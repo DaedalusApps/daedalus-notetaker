@@ -135,7 +135,7 @@ async def main():
     console.print(f"[bold green]Found:[/bold green] {device.name} ({device.address})")
 
     try:
-        async with BleakClient(device) as client:
+        async with BleakClient(device, timeout=30.0) as client:
             result = await discover(client)
             await listen_notifications(client, result["notify_uuids"], result["notifications"])
             result["device"] = {"name": device.name, "address": device.address}
