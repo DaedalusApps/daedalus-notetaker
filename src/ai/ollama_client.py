@@ -9,7 +9,7 @@ import os
 import urllib.error
 import urllib.request
 
-MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e4b")
+MODEL = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
 BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
@@ -56,4 +56,17 @@ def complete(
         payload["format"] = "json"
 
     result = _post("/api/chat", payload)
-    return result["message"]["content"]
+    return _strip_fences(result["message"]["content"])
+
+
+def _strip_fences(text: str) -> str:
+    """Strip markdown code fences that models often wrap JSON in."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        # drop opening fence (```json or ```) and closing fence (```)
+        inner = lines[1:] if lines[0].startswith("```") else lines
+        if inner and inner[-1].strip() == "```":
+            inner = inner[:-1]
+        return "\n".join(inner).strip()
+    return text
