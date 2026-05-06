@@ -1,0 +1,13 @@
+.env
+token.json
+credentials.json
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.wav
+*.mp3
+notetaker-exports/
