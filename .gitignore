@@ -11,3 +11,10 @@ venv/
 *.wav
 *.mp3
 notetaker-exports/
+
+# Reverse-engineering artifacts: keep scripts and analysis JSON, ignore binaries
+reverse/*.xapk
+reverse/*.apk
+reverse/xapk_contents/
+reverse/arm_native/
+reverse/libapp_strings.txt
