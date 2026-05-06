@@ -1,7 +1,7 @@
-"""Category-aware summarization via Claude API."""
+"""Category-aware summarization via local Ollama model."""
 import json
 
-from src.ai.claude_client import complete
+from src.ai.ollama_client import complete
 from src.categories import get_category
 
 

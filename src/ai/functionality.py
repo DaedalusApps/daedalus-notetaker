@@ -1,7 +1,7 @@
 """Category 15 'Functionality' — 8 sequential meeting analyses."""
 import json
 
-from src.ai.claude_client import complete
+from src.ai.ollama_client import complete
 from src.categories import FUNCTIONALITY_PROMPTS
 
 

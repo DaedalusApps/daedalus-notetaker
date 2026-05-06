@@ -1,7 +1,7 @@
 """Generates mind map JSON structure and Mermaid/Markdown from transcript."""
 import json
 
-from src.ai.claude_client import complete
+from src.ai.ollama_client import complete
 
 _MINDMAP_SYSTEM = (
     "You are a mind map generator. Analyze this transcript and create a hierarchical mind map. "

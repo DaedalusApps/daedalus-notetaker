@@ -1,5 +1,5 @@
-"""Transcript translation via Claude API."""
-from src.ai.claude_client import complete
+"""Transcript translation via local Ollama model."""
+from src.ai.ollama_client import complete
 
 
 def translate(transcript: str, target_language: str) -> str:
