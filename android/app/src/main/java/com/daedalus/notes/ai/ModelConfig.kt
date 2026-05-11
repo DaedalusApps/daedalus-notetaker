@@ -12,26 +12,34 @@ data class LocalModel(
     val sizeBytes: Long
 )
 
+/**
+ * Models compatible with MediaPipe LLM Inference (tasks-genai .bin format).
+ * Hosted on Google's public storage — no authentication required.
+ *
+ * NOTE: Gemma 4 E4B uses the newer .litertlm format (LiteRT-LM SDK) which
+ * is not yet stable with the Android build toolchain. Will be added as an
+ * upgrade when LiteRT-LM + KSP compatibility matures.
+ */
 val AVAILABLE_MODELS = listOf(
     LocalModel(
-        id          = "gemma4_e4b",
-        displayName = "Gemma 4 E4B",
-        description = "Best quality, ~2.5 GB. Optimized for S24 Ultra NPU.",
-        downloadUrl = "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-litert-lm.bin",
-        filename    = "gemma4_e4b.bin",
-        sizeBytes   = 2_500_000_000L
+        id          = "gemma2_2b_cpu",
+        displayName = "Gemma 2 2B (CPU)",
+        description = "~1.4 GB, runs on any Android phone. Good quality, fast.",
+        downloadUrl = "https://storage.googleapis.com/mediapipe-models/llm_inference/gemma-2-2b-it-cpu-int4/float16/1/gemma-2-2b-it-cpu-int4.bin",
+        filename    = "gemma2_2b_cpu_int4.bin",
+        sizeBytes   = 1_400_000_000L
     ),
     LocalModel(
-        id          = "gemma3_4b",
-        displayName = "Gemma 3 4B (Lighter)",
-        description = "Smaller, ~1.5 GB. Works on most Android phones.",
-        downloadUrl = "https://huggingface.co/litert-community/gemma-3-4B-it-litert-lm/resolve/main/gemma-3-4B-it-litert-lm.bin",
-        filename    = "gemma3_4b.bin",
-        sizeBytes   = 1_500_000_000L
+        id          = "gemma2_2b_gpu",
+        displayName = "Gemma 2 2B (GPU/NPU)",
+        description = "~2.7 GB, GPU-accelerated. Best for S24 Ultra and similar flagships.",
+        downloadUrl = "https://storage.googleapis.com/mediapipe-models/llm_inference/gemma-2-2b-it-gpu-int8/float16/1/gemma-2-2b-it-gpu-int8.bin",
+        filename    = "gemma2_2b_gpu_int8.bin",
+        sizeBytes   = 2_700_000_000L
     )
 )
 
-const val DEFAULT_MODEL_ID = "gemma4_e4b"
+const val DEFAULT_MODEL_ID = "gemma2_2b_gpu"
 const val PREFS_MODEL_ID   = "local_model_id"
 
 fun modelsDir(context: Context): File =

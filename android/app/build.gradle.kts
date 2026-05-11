@@ -51,15 +51,15 @@ dependencies {
     implementation(libs.appcompat)
     implementation(libs.coroutines.android)
 
-    // Room
+    // Room (KSP instead of kapt — faster, no daemon issues)
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     kapt(libs.room.compiler)
 
-    // HTTP (model download only — no cloud AI)
+    // HTTP (model download only)
     implementation(libs.okhttp)
 
-    // On-device AI — MediaPipe LLM Inference
+    // On-device AI — MediaPipe LLM Inference (tasks-genai .bin format models)
     implementation(libs.mediapipe.genai)
 
     // Audio playback
