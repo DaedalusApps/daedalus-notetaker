@@ -62,7 +62,8 @@ This file provides foundational mandates, architecture, and workflows for the `n
 - **GEMINI.md:** Foundational mandates and architecture (this file).
 - **ROADMAP.md:** Future feature development and backlog.
 - **PLAN.md:** Original design document and strategy.
-- **CLAUDE.md:** Environment-specific CLI guidance.
+- **CLAUDE.md:** Environment-specific CLI guidance (root).
+- **android/BUILD.md:** Android build and environment documentation.
 
 ## Workflows
 

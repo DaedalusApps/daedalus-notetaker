@@ -9,7 +9,7 @@ This document tracks the future development of Daedalus Notetaker. Features are 
 
 ## 🧹 Housekeeping
 - [x] **Git Hygiene:** `.gradle/` build cache files were being committed. (Resolved: Updated `.gitignore` and pruned git history).
-- [x] **Android Docs:** Created `android/CLAUDE.md` to document the Android build process and environment.
+- [x] **Android Docs:** Created `android/BUILD.md` to document the Android build process and environment.
 
 ## 🚀 Active Development (Phase 2: Android)
 
