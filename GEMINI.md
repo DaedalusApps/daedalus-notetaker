@@ -57,6 +57,13 @@ This file provides foundational mandates, architecture, and workflows for the `n
     - `ui/`: Compose screens and components.
     - `viewmodel/`: State management for UI.
 
+## Documentation & Tracking
+- **README.md:** Project overview and setup.
+- **GEMINI.md:** Foundational mandates and architecture (this file).
+- **ROADMAP.md:** Future feature development and backlog.
+- **PLAN.md:** Original design document and strategy.
+- **CLAUDE.md:** Environment-specific CLI guidance.
+
 ## Workflows
 
 ### Setup & Development
