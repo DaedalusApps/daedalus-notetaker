@@ -32,6 +32,7 @@ class LocalLlmService(private val context: Context) {
     suspend fun generate(systemPrompt: String, userText: String): String =
         withContext(Dispatchers.IO) {
             val llm = inference ?: error("Model not loaded — call ensureLoaded() first")
+            // Gemma instruction-tuned turn format
             val prompt = buildString {
                 append("<start_of_turn>system\n")
                 append(systemPrompt)
