@@ -1,10 +1,14 @@
 """
-FW920 BLE connection test — forces LE transport, subscribes within 5s window.
+FW920 BLE connection test using the fully reverse-engineered DOWAY protocol.
 
-Device behaviour (confirmed via nRF Connect):
-- Connects on LE 1M, upgrades to LE 2M
-- Disconnects after ~5s if central doesn't subscribe to notifications
-- FFD0 service is the main control channel
+Connects, runs the 7-command init sequence (GET_FW_VERSION → SET_FW_VERSION →
+GET_SERIAL → SYNC_TIME → GET_STATUS → CMD_18 → LIST_FILES), then stays
+connected for further interaction.
+
+NOTE: Linux BlueZ may fail to connect because the Intel adapter tries BR/EDR
+first (missing 0x04 flag in ESP32-C3 advertising). This works correctly from
+Android. Run 'sudo btmgmt power off && sudo btmgmt power on' if connection
+times out — or use the Android app (Phase 2) for BLE control.
 """
 
 import asyncio
@@ -14,102 +18,77 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from bleak import BleakClient, BleakScanner
-from bleak.exc import BleakError
+from bleak import BleakScanner
 from rich.console import Console
+from rich.table import Table
 
 from src.ble.protocol import (
-    SERVICE_UUID, WRITE_CHAR_UUID, NOTIFY_CHAR_UUID, BIDIR_CHAR_UUID,
-    BATTERY_CHAR_UUID, B0B0_SERVICE_UUID, B0B2_CHAR_UUID,
-    CMD_STATUS_REQUEST,
+    B0B2_NOTIFY_UUID, B0B3_NOTIFY_UUID, B0B4_NOTIFY_UUID,
+    WRITE_CHAR_UUID, cmd_get_status, cmd_list_files, parse_response,
+    init_sequence,
 )
+from src.ble.connection import BleConnection
 
 DEVICE_NAME = "FW920"
 console = Console()
-received: list[tuple[str, bytes]] = []
-
-
-def on_notify(char, data: bytearray) -> None:
-    hex_str = bytes(data).hex()
-    received.append((str(char.uuid), bytes(data)))
-    console.print(f"  [bold green]NOTIFY[/bold green] {char.uuid}: [yellow]{hex_str}[/yellow]")
 
 
 async def main() -> None:
     console.print(f"[cyan]Scanning for {DEVICE_NAME}…[/cyan]")
 
-    # Keep scanner running while connecting (Android TRANSPORT_LE equivalent)
     detected = asyncio.Event()
-    captured = {"device": None}
+    captured: dict = {}
 
     def on_detect(device, adv):
         if device.name and DEVICE_NAME in device.name and not detected.is_set():
             captured["device"] = device
             detected.set()
 
-    async with BleakScanner(detection_callback=on_detect) as scanner:
+    async with BleakScanner(detection_callback=on_detect):
         await asyncio.wait_for(detected.wait(), timeout=15.0)
 
     device = captured["device"]
     console.print(f"[green]Found:[/green] {device.name} ({device.address})")
-    console.print("[cyan]Connecting (LE transport, 15s timeout)…[/cyan]")
+    console.print("[cyan]Connecting and running init sequence…[/cyan]")
 
     try:
-        async with BleakClient(device, timeout=15.0) as client:
-            console.print(f"[bold green]CONNECTED![/bold green]")
+        async with BleConnection(device) as conn:
+            console.print("[bold green]CONNECTED and init complete![/bold green]\n")
 
-            # Print all services
-            for svc in client.services:
-                console.print(f"  [dim]Service:[/dim] {svc.uuid}")
-                for char in svc.characteristics:
-                    console.print(f"    {char.uuid}  [{', '.join(char.properties)}]")
+            # Show device info
+            table = Table(title="FW920 Device Info")
+            table.add_column("Property")
+            table.add_column("Value")
+            table.add_row("Serial", conn.device_serial or "?")
+            table.add_row("Firmware", conn.fw_version or "?")
+            if conn.last_status:
+                table.add_row("Battery", f"{conn.last_status.get('battery_pct', '?')}%")
+                free = conn.last_status.get('storage_free_kb', 0)
+                total = conn.last_status.get('storage_total_kb', 0)
+                table.add_row("Storage", f"{free//1024} MB free / {total//1024} MB total")
+            console.print(table)
 
-            # Subscribe to all notify characteristics IMMEDIATELY (within 5s window)
-            console.print("\n[cyan]Subscribing to all notify chars…[/cyan]")
-            notify_uuids = [
-                NOTIFY_CHAR_UUID, BIDIR_CHAR_UUID, B0B2_CHAR_UUID,
-                "0000b0b3-0000-1000-8000-00805f9b34fb",
-                "0000b0b4-0000-1000-8000-00805f9b34fb",
-                "0000c0c2-0000-1000-8000-00805f9b34fb",
-                "e49a3003-f69a-11e8-8eb2-f2801f1b9fd1",
-                BATTERY_CHAR_UUID,
-            ]
-            for uuid in notify_uuids:
-                try:
-                    await client.start_notify(uuid, on_notify)
-                    console.print(f"  [green]✓[/green] subscribed {uuid}")
-                except Exception as e:
-                    console.print(f"  [dim]skip {uuid}: {e}[/dim]")
+            # Show files
+            if conn._files:
+                ftable = Table(title="Recordings on Device")
+                ftable.add_column("Filename")
+                ftable.add_column("Size", justify="right")
+                for f in conn._files:
+                    ftable.add_row(f["name"], f"{f['size_bytes']//1024} KB")
+                console.print(ftable)
+            else:
+                console.print("[yellow]No recordings found on device.[/yellow]")
 
-            # Read battery
-            try:
-                batt = await client.read_gatt_char(BATTERY_CHAR_UUID)
-                console.print(f"\n[green]Battery:[/green] {batt[0]}%")
-            except Exception:
-                pass
-
-            # Probe with status request
-            console.print(f"\n[cyan]Writing status request → {WRITE_CHAR_UUID}[/cyan]")
-            try:
-                await client.write_gatt_char(WRITE_CHAR_UUID, CMD_STATUS_REQUEST, response=False)
-                console.print("  [green]sent[/green]")
-            except Exception as e:
-                console.print(f"  [red]write failed:[/red] {e}")
-
-            console.print("\n[dim]Listening 10s for responses…[/dim]")
+            console.print("\n[dim]Staying connected 10s — press Ctrl+C to exit[/dim]")
             await asyncio.sleep(10)
-
-            console.print(f"\n[bold]Received {len(received)} notifications total.[/bold]")
-            for uuid, data in received:
-                console.print(f"  {uuid}: {data.hex()}")
 
     except asyncio.TimeoutError:
         console.print("[red]Connection timed out.[/red]")
-        console.print("\n[yellow]Trying gatttool as fallback…[/yellow]")
-        console.print("Run: [bold]gatttool -b REDACTED_MAC -t public -I[/bold]")
-        console.print("Then type: [bold]connect[/bold]")
-    except BleakError as e:
-        console.print(f"[red]BLE error:[/red] {e}")
+        console.print("[yellow]Linux BLE note:[/yellow] This Intel adapter tries BR/EDR first. "
+                      "Android connects fine via TRANSPORT_LE. "
+                      "Try from the Android app for reliable BLE control.")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
 
 
 if __name__ == "__main__":
