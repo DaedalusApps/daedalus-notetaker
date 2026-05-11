@@ -1,0 +1,36 @@
+package com.daedalus.notes.viewmodel
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.daedalus.notes.ble.BleManager
+import com.daedalus.notes.ble.BleState
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+
+class DeviceViewModel(application: Application) : AndroidViewModel(application) {
+
+    val bleManager = BleManager(application)
+    val state: StateFlow<BleState> = bleManager.bleState
+
+    fun scan() = bleManager.startScan()
+
+    fun disconnect() = bleManager.disconnect()
+
+    fun startRecording() = viewModelScope.launch {
+        bleManager.startRecording()
+    }
+
+    fun stopRecording() = viewModelScope.launch {
+        bleManager.stopRecording()
+    }
+
+    fun refreshFiles() = viewModelScope.launch {
+        bleManager.listFiles()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        bleManager.destroy()
+    }
+}
