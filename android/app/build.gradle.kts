@@ -13,8 +13,8 @@ android {
         applicationId   = "com.daedalus.notes"
         minSdk          = 26
         targetSdk       = 35
-        versionCode     = 1
-        versionName     = "1.0.0"
+        versionCode     = 2
+        versionName     = "1.1.0"
     }
 
     buildTypes {
@@ -56,11 +56,11 @@ dependencies {
     implementation(libs.room.ktx)
     kapt(libs.room.compiler)
 
-    // Network (Claude API)
-    implementation(libs.retrofit)
-    implementation(libs.retrofit.gson)
-    implementation(libs.okhttp.logging)
-    implementation(libs.gson)
+    // HTTP (model download only — no cloud AI)
+    implementation(libs.okhttp)
+
+    // On-device AI — MediaPipe LLM Inference
+    implementation(libs.mediapipe.genai)
 
     // Audio playback
     implementation(libs.media3.exoplayer)
