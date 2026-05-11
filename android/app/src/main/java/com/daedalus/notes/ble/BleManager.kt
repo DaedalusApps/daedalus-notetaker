@@ -307,13 +307,16 @@ class BleManager(private val context: Context) {
 
     suspend fun startRecording(): Boolean {
         val response = sendAndAwait(PKT_START_RECORDING, expectedCmd = 0x06)
-        return response is ParsedResponse.RecordingStarted
+        val success = response is ParsedResponse.RecordingStarted
+        if (success) { _bleState.update { it.copy(isRecording = true) } }
+        return success
     }
 
     suspend fun stopRecording(): Boolean {
         val stopResp = sendAndAwait(PKT_STOP_RECORDING, expectedCmd = 0x08)
         if (stopResp is ParsedResponse.RecordingStopped) {
             sendAndAwait(PKT_CONFIRM_DONE, expectedCmd = 0x07)
+            _bleState.update { it.copy(isRecording = false) }
             return true
         }
         return false
