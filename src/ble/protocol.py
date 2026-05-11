@@ -1,86 +1,209 @@
 """
-FW920 BLE GATT protocol constants — extracted from nRF Connect live capture.
+FW920 BLE GATT protocol — fully reverse-engineered from DOWAY HCI snoop.
 
-Confirmed via nRF Connect log (2026-05-06): device connects on LE transport,
-upgrades to LE 2M PHY, then exposes this GATT table.
+BLE service used for commands: B0B0 (NOT FFD0 as originally thought)
+  Write:   0000b0b1-0000-1000-8000-00805f9b34fb  (handle 0x002B)
+  Notify:  0000b0b2-0000-1000-8000-00805f9b34fb  (handle 0x002D)
 
-Note: E606E15D family from earlier libapp.so analysis is for a DIFFERENT
-DOWAY product. The FW920 uses the FFD0 / B0B0 / C0C0 family below.
+Packet format: A0 0A | category(1) | cmd(1) | len(1) | payload(len) | CRC16(2)
+CRC: CRC16-ARC (poly=0x8005, init=0, refIn=True, refOut=True), big-endian bytes.
 
-Disconnect behaviour: device terminates connection after ~5 seconds if the
-central does not subscribe to notifications. Subscribe within 3 seconds.
+Init sequence (must complete within ~5s or device disconnects):
+  1. GET_FW_VERSION  (cmd 0x02)
+  2. SET_FW_VERSION  (cmd 0x03, echo firmware version back)
+  3. GET_SERIAL      (cmd 0x01)
+  4. SYNC_TIME       (cmd 0x04, send current time)
+  5. GET_STATUS      (cmd 0x05)
+  6. CMD_18          (cmd 0x18, payload 0x00)
+  7. LIST_FILES      (cmd 0x0A)
+
+Captured FW920 firmware version: "176046"
+Captured FW920 serial: "KF9HA11240"
 """
+from __future__ import annotations
+import datetime
 
 # ---------------------------------------------------------------------------
-# Primary control service (BLE UART / transparent serial)
-# ---------------------------------------------------------------------------
-SERVICE_UUID       = "0000ffd0-0000-1000-8000-00805f9b34fb"
-WRITE_CHAR_UUID    = "0000ffd1-0000-1000-8000-00805f9b34fb"  # W, WNR — send commands
-NOTIFY_CHAR_UUID   = "0000ffd2-0000-1000-8000-00805f9b34fb"  # N   — device → central
-BIDIR_CHAR_UUID    = "0000ffd3-0000-1000-8000-00805f9b34fb"  # N + W — bidirectional
-
-# Backwards-compatible aliases
-CONTROL_CHAR_UUID  = WRITE_CHAR_UUID
-STATUS_CHAR_UUID   = NOTIFY_CHAR_UUID
-
-# ---------------------------------------------------------------------------
-# Secondary services (OTA / config / extended)
+# GATT UUIDs — B0B0 service is the command channel
 # ---------------------------------------------------------------------------
 B0B0_SERVICE_UUID  = "0000b0b0-0000-1000-8000-00805f9b34fb"
-B0B1_CHAR_UUID     = "0000b0b1-0000-1000-8000-00805f9b34fb"  # WNR
-B0B2_CHAR_UUID     = "0000b0b2-0000-1000-8000-00805f9b34fb"  # N
-B0B3_CHAR_UUID     = "0000b0b3-0000-1000-8000-00805f9b34fb"  # N
-B0B4_CHAR_UUID     = "0000b0b4-0000-1000-8000-00805f9b34fb"  # N
+B0B1_WRITE_UUID    = "0000b0b1-0000-1000-8000-00805f9b34fb"  # write commands here
+B0B2_NOTIFY_UUID   = "0000b0b2-0000-1000-8000-00805f9b34fb"  # receive responses here
+B0B3_NOTIFY_UUID   = "0000b0b3-0000-1000-8000-00805f9b34fb"
+B0B4_NOTIFY_UUID   = "0000b0b4-0000-1000-8000-00805f9b34fb"
 
-C0C0_SERVICE_UUID  = "0000c0c0-0000-1000-8000-00805f9b34fb"
-C0C1_CHAR_UUID     = "0000c0c1-0000-1000-8000-00805f9b34fb"  # WNR
-C0C2_CHAR_UUID     = "0000c0c2-0000-1000-8000-00805f9b34fb"  # N
+# FFD0 service is present but NOT used for the main protocol
+FFD0_SERVICE_UUID  = "0000ffd0-0000-1000-8000-00805f9b34fb"
+FFD1_WRITE_UUID    = "0000ffd1-0000-1000-8000-00805f9b34fb"
+FFD2_NOTIFY_UUID   = "0000ffd2-0000-1000-8000-00805f9b34fb"
 
-E49A_SERVICE_UUID  = "e49a3001-f69a-11e8-8eb2-f2801f1b9fd1"
-E49A_WRITE_UUID    = "e49a3002-f69a-11e8-8eb2-f2801f1b9fd1"  # WNR
-E49A_NOTIFY_UUID   = "e49a3003-f69a-11e8-8eb2-f2801f1b9fd1"  # N
+# Backwards-compatible aliases
+SERVICE_UUID       = B0B0_SERVICE_UUID
+WRITE_CHAR_UUID    = B0B1_WRITE_UUID
+NOTIFY_CHAR_UUID   = B0B2_NOTIFY_UUID
+CONTROL_CHAR_UUID  = B0B1_WRITE_UUID
+STATUS_CHAR_UUID   = B0B2_NOTIFY_UUID
 
-# Standard
 BATTERY_CHAR_UUID  = "00002a19-0000-1000-8000-00805f9b34fb"
-CCCD_UUID          = "00002902-0000-1000-8000-00805f9b34fb"
 
 # ---------------------------------------------------------------------------
-# Connection parameters (from nRF Connect capture)
+# CRC16-ARC (poly=0x8005, init=0, refIn, refOut, big-endian output)
 # ---------------------------------------------------------------------------
-CONN_INTERVAL_MS   = 30.0   # device requests 30ms after initial 7.5ms
-CONN_PHY           = "2M"   # device upgrades to LE 2M PHY immediately
-KEEPALIVE_WINDOW_S = 5      # device disconnects if nothing happens in 5s
+_CRC16_TABLE: list[int] = []
+
+def _build_table() -> None:
+    for i in range(256):
+        crc = 0
+        b = i
+        for _ in range(8):
+            if (b ^ crc) & 1:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+            b >>= 1
+        _CRC16_TABLE.append(crc)
+
+_build_table()
+
+
+def crc16_arc(data: bytes) -> int:
+    crc = 0x0000
+    for byte in data:
+        crc = (crc >> 8) ^ _CRC16_TABLE[(crc ^ byte) & 0xFF]
+    return crc
+
+
+def crc16_bytes(data: bytes) -> bytes:
+    """Return 2 CRC bytes in big-endian order."""
+    crc = crc16_arc(data)
+    return bytes([crc >> 8, crc & 0xFF])
+
 
 # ---------------------------------------------------------------------------
-# Protocol identity (from DOWAY libapp.so static analysis)
+# Packet builder
 # ---------------------------------------------------------------------------
-# Internal name: xlx_link (from Dart source path: dowayProtocol/bluetooth/xlx_link/)
-# Chip protocol: cmd_2837 (ATS2837 audio DSP, controlled via ESP32-C3 BLE bridge)
-# Alt variant:   cmd_3085s (different hardware SKU, not FW920)
-# Debug markers: "xlx_2837 start", "xlx_3085s"
-#
-# Connection behaviour:
-# - Device sends a SyncTimeRequest immediately after connect
-# - If central does not respond within ~5 seconds, device disconnects (HCI 0x13)
-# - Response packet header seen in debug log: 0x0905
-# - Exact SyncTimeRequest byte format: TBD (need HCI snoop capture to confirm)
-#
-# Linux note: BlueZ routes to BR/EDR because ESP32-C3 firmware omits the
-# 0x04 "BR/EDR Not Supported" advertising flag. Android specifies
-# TRANSPORT_LE explicitly (connectGatt(..., TRANSPORT_LE, ...)) and works.
-# Fix requires root: sudo btmgmt bredr off, or /etc/bluetooth/main.conf
-# ControllerMode = le. Android app (Phase 2) has no issue.
+HEADER   = bytes([0xA0, 0x0A])
+CATEGORY = 0x01
+
+
+def build_packet(cmd: int, payload: bytes = b"") -> bytes:
+    body = bytes([CATEGORY, cmd, len(payload)]) + payload
+    packet = HEADER + body
+    return packet + crc16_bytes(packet)
+
+
 # ---------------------------------------------------------------------------
-CMD_RECORD_START   = bytes([0x01])   # placeholder — confirm via HCI snoop
-CMD_RECORD_STOP    = bytes([0x02])
-CMD_RECORD_PAUSE   = bytes([0x03])
-CMD_STATUS_REQUEST = bytes([0x10])
+# Command packets (pre-built or factory functions)
+# ---------------------------------------------------------------------------
+def cmd_get_fw_version() -> bytes:
+    return build_packet(0x02)
+
+
+def cmd_set_fw_version(version: str = "176046") -> bytes:
+    v = version.encode()[:6].ljust(16, b"\x00") + b"\x00" * (17 - min(len(version), 16))
+    return build_packet(0x03, v[:17])
+
+
+def cmd_get_serial() -> bytes:
+    return build_packet(0x01)
+
+
+def cmd_sync_time(dt: datetime.datetime | None = None) -> bytes:
+    if dt is None:
+        dt = datetime.datetime.now()
+    payload = bytes([
+        dt.year - 2000,
+        dt.month,
+        dt.day,
+        dt.hour,
+        dt.minute,
+        dt.second,
+    ])
+    return build_packet(0x04, payload)
+
+
+def cmd_get_status() -> bytes:
+    return build_packet(0x05)
+
+
+def cmd_cmd18() -> bytes:
+    return build_packet(0x18, bytes([0x00]))
+
+
+def cmd_list_files() -> bytes:
+    return build_packet(0x0A)
+
+
+def cmd_download_file(filename: str) -> bytes:
+    """Request download of a recording by its base filename (e.g. '20260507121415')."""
+    payload = b"\x10\x00" + filename.encode()[:14].ljust(14, b"\x00")
+    return build_packet(0x06, payload)
+
+
+# ---------------------------------------------------------------------------
+# INIT_SEQUENCE: send these in order after subscribing to B0B2 notifications
+# ---------------------------------------------------------------------------
+def init_sequence(fw_version: str = "176046") -> list[bytes]:
+    return [
+        cmd_get_fw_version(),
+        cmd_set_fw_version(fw_version),
+        cmd_get_serial(),
+        cmd_sync_time(),
+        cmd_get_status(),
+        cmd_cmd18(),
+        cmd_list_files(),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Response parser
+# ---------------------------------------------------------------------------
+def parse_response(data: bytes) -> dict | None:
+    if len(data) < 5 or data[:2] != HEADER:
+        return None
+    cat = data[2]
+    cmd = data[3]
+    plen = data[4]
+    if len(data) < 5 + plen + 2:
+        return None
+    payload = data[5:5 + plen]
+    crc = data[5 + plen:5 + plen + 2]
+
+    result: dict = {"cat": cat, "cmd": cmd, "payload": payload, "raw": data.hex()}
+
+    if cmd == 0x01 and plen >= 10:
+        result["serial"] = payload[:10].decode("ascii", "ignore").rstrip("\x00")
+    elif cmd == 0x02 and plen > 0:
+        result["fw_version"] = payload[:6].decode("ascii", "ignore").rstrip("\x00")
+    elif cmd == 0x03:
+        result["ok"] = plen >= 1 and payload[0] == 0
+    elif cmd == 0x04:
+        result["ok"] = plen >= 1 and payload[0] == 0
+    elif cmd == 0x05 and plen >= 10:
+        result["storage_free_kb"] = int.from_bytes(payload[0:4], "little") // 1024
+        result["storage_total_kb"] = int.from_bytes(payload[4:8], "little") // 1024
+        result["battery_pct"] = payload[9] if plen > 9 else 0
+        fw = payload[14:30].decode("ascii", "ignore").rstrip("\x00") if plen > 14 else ""
+        result["fw_name"] = fw
+    elif cmd == 0x0A and plen >= 15:
+        name_raw = payload[1:15].decode("ascii", "ignore").rstrip("\x00")
+        if name_raw:
+            size = int.from_bytes(payload[16:20], "little") if plen >= 20 else 0
+            result["filename"] = name_raw + ".mp3"
+            result["size_bytes"] = size
+        else:
+            result["end_of_list"] = True
+
+    return result
 
 
 def parse_status_packet(data: bytes) -> dict:
-    """Raw notify parser — format not yet reverse-engineered."""
+    """Backwards-compatible wrapper."""
+    parsed = parse_response(data) or {}
     return {
         "raw_hex": data.hex(),
-        "length": len(data),
-        "byte0": data[0] if len(data) > 0 else None,
+        "battery_pct": parsed.get("battery_pct", 0),
+        "storage_free_kb": parsed.get("storage_free_kb", 0),
+        "is_recording": False,
+        **parsed,
     }
