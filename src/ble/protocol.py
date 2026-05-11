@@ -140,6 +140,35 @@ def cmd_download_file(filename: str) -> bytes:
     return build_packet(0x06, payload)
 
 
+def cmd_request_file_info() -> bytes:
+    """Request file metadata (CMD 0x15, empty payload).
+    Device responds with filename + size, then streams audio on B0B3 (0x0030).
+    """
+    return build_packet(0x15)
+
+
+# ---------------------------------------------------------------------------
+# Recording notes (from HCI snoop analysis)
+# ---------------------------------------------------------------------------
+# Recording is ALWAYS triggered by the PHYSICAL BUTTON on the device.
+# The DOWAY app does NOT send a BLE start/stop recording command.
+#
+# When the device starts recording:
+#   DEV→APP CMD 0x06  - device notifies app a recording is available/started
+#   APP→DEV CMD 0x15  - app requests file metadata
+#   DEV→APP CMD 0x15  - device responds with filename + size
+#   DEV→APP h=0x0030  - device streams raw audio in real-time via B0B3
+#   DEV→APP CMD 0x0F  - periodic status: battery %, rec_state=1 (recording)
+#   DEV→APP CMD 0x07  - recording / transfer complete
+#
+# Status update (CMD 0x0F) payload layout:
+#   byte 0:    0x00 (padding)
+#   byte 1:    battery % (0x64 = 100%)
+#   byte 2:    recording state (0x01 = recording, 0x00 = idle)
+#   byte 3:    unknown flags
+#   bytes 4+:  more status data
+
+
 # ---------------------------------------------------------------------------
 # INIT_SEQUENCE: send these in order after subscribing to B0B2 notifications
 # ---------------------------------------------------------------------------
@@ -193,6 +222,29 @@ def parse_response(data: bytes) -> dict | None:
             result["size_bytes"] = size
         else:
             result["end_of_list"] = True
+    elif cmd == 0x0F and plen >= 3:
+        # Periodic status update sent during recording
+        result["battery_pct"] = payload[1] if plen > 1 else 0
+        result["is_recording"] = bool(payload[2]) if plen > 2 else False
+    elif cmd == 0x15 and plen >= 15:
+        # File info response (app sent CMD 0x15 with empty payload to request)
+        name_raw = payload[2:16].decode("ascii", "ignore").rstrip("\x00")
+        if name_raw:
+            size = int.from_bytes(payload[16:20], "little") if plen >= 20 else 0
+            result["filename"] = name_raw + ".mp3"
+            result["size_bytes"] = size
+    elif cmd == 0x06:
+        # Device notifying app a recording is available/started
+        name_raw = payload[2:16].decode("ascii", "ignore").rstrip("\x00") if plen >= 16 else ""
+        if name_raw:
+            result["filename"] = name_raw + ".mp3"
+        result["recording_available"] = True
+    elif cmd == 0x07:
+        # Transfer / recording complete
+        name_raw = payload[0:14].decode("ascii", "ignore").rstrip("\x00") if plen >= 14 else ""
+        if name_raw:
+            result["filename"] = name_raw + ".mp3"
+        result["transfer_complete"] = True
 
     return result
 
