@@ -18,8 +18,10 @@ The project is developed in two phases:
     *   15 specialized recording categories (Medical, Legal, Meetings, Education, etc.).
     *   Automatic summarization, action item extraction, and perspective analysis.
     *   Interactive mind map generation (Markdown/Mermaid).
--   **On-Device AI (Android):** Powered by Google MediaPipe and Gemma 4 E4B for completely offline analysis.
--   **Multi-Format Export:** Export to Markdown, PDF, DOCX, and SRT (timestamps).
+- **On-Device AI (Android):** Powered by Google MediaPipe and Gemma models. Downloads are optimized via community mirrors for seamless, authenticated-free setup.
+- **Build Transparency:** Current version and build number are clearly displayed in the Settings screen.
+- **Multi-Format Export:** Export to Markdown, PDF, DOCX, and SRT (timestamps).
+
 -   **Cloud Sync:** Optional Google Drive synchronization.
 
 ## Project Structure

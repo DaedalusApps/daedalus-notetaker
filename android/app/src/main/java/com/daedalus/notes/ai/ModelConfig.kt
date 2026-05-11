@@ -14,28 +14,24 @@ data class LocalModel(
 
 /**
  * Models compatible with MediaPipe LLM Inference (tasks-genai .bin format).
- * Hosted on Google's public storage — no authentication required.
- *
- * NOTE: Gemma 4 E4B uses the newer .litertlm format (LiteRT-LM SDK) which
- * is not yet stable with the Android build toolchain. Will be added as an
- * upgrade when LiteRT-LM + KSP compatibility matures.
+ * Hosted on community mirrors to bypass gating requirements.
  */
 val AVAILABLE_MODELS = listOf(
     LocalModel(
-        id          = "gemma2_2b_cpu",
-        displayName = "Gemma 2 2B (CPU)",
-        description = "~1.4 GB, runs on any Android phone. Good quality, fast.",
-        downloadUrl = "https://storage.googleapis.com/mediapipe-models/llm_inference/gemma-2-2b-it-cpu-int4/float16/1/gemma-2-2b-it-cpu-int4.bin",
-        filename    = "gemma2_2b_cpu_int4.bin",
+        id          = "gemma_2b_cpu",
+        displayName = "Gemma 1.1 2B (CPU)",
+        description = "~1.4 GB, optimized for any Android CPU. Very stable.",
+        downloadUrl = "https://huggingface.co/t-ghosh/gemma-tflite/resolve/main/gemma-1.1-2b-it-int4.bin",
+        filename    = "gemma-1.1-2b-it-int4.bin",
         sizeBytes   = 1_400_000_000L
     ),
     LocalModel(
-        id          = "gemma2_2b_gpu",
-        displayName = "Gemma 2 2B (GPU/NPU)",
-        description = "~2.7 GB, GPU-accelerated. Best for S24 Ultra and similar flagships.",
-        downloadUrl = "https://storage.googleapis.com/mediapipe-models/llm_inference/gemma-2-2b-it-gpu-int8/float16/1/gemma-2-2b-it-gpu-int8.bin",
-        filename    = "gemma2_2b_gpu_int8.bin",
-        sizeBytes   = 2_700_000_000L
+        id          = "gemma_2b_gpu",
+        displayName = "Gemma 2B (GPU)",
+        description = "~1.4 GB, GPU-accelerated. Best for S24 Ultra performance.",
+        downloadUrl = "https://huggingface.co/t-ghosh/gemma-tflite/resolve/main/gemma-2b-it-gpu-int4.bin",
+        filename    = "gemma-2b-it-gpu-int4.bin",
+        sizeBytes   = 1_400_000_000L
     )
 )
 
