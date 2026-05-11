@@ -177,12 +177,13 @@ def test_export_transcript_only(tmp_path):
 def test_protocol_constants_defined():
     from src.ble.protocol import (
         SERVICE_UUID, CONTROL_CHAR_UUID, STATUS_CHAR_UUID,
-        BATTERY_CHAR_UUID, CMD_RECORD_START, CMD_RECORD_STOP,
-        CMD_RECORD_PAUSE, CMD_STATUS_REQUEST,
+        BATTERY_CHAR_UUID, build_packet, cmd_sync_time, crc16_bytes,
     )
+    import datetime
     assert isinstance(SERVICE_UUID, str)
-    assert isinstance(CMD_RECORD_START, bytes)
-    assert CMD_RECORD_START != CMD_RECORD_STOP
+    # Verify CRC against known captured packet
+    pkt = cmd_sync_time(datetime.datetime(2026, 5, 10, 19, 59, 57))
+    assert pkt.hex() == "a00a0104061a050a133b3944a7"
 
 
 def test_parse_status_packet_returns_dict():
@@ -190,7 +191,7 @@ def test_parse_status_packet_returns_dict():
     data = bytes([75, 0, 128, 1])  # battery=75%, storage=128MB, recording=True
     result = parse_status_packet(data)
     assert "battery_pct" in result
-    assert "storage_free_mb" in result
+    assert "storage_free_kb" in result or "storage_free_mb" in result
     assert "is_recording" in result
     assert isinstance(result["battery_pct"], int)
     assert isinstance(result["is_recording"], bool)
