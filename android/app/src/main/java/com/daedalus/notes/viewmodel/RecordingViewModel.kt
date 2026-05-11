@@ -1,11 +1,11 @@
 package com.daedalus.notes.viewmodel
 
 import android.app.Application
-import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.daedalus.notes.ai.CATEGORIES
-import com.daedalus.notes.ai.ClaudeService
+import com.daedalus.notes.ai.LocalLlmService
+import com.daedalus.notes.ai.selectedModel
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.Recording
@@ -15,17 +15,23 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+private const val MINDMAP_PROMPT =
+    "Create a mind map for this content. Return a nested Markdown bullet list with the main topic as root and key themes as branches. Be concise, max 3 levels deep."
+
 class RecordingViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val db = AppDatabase.getInstance(application)
+    private val db   = AppDatabase.getInstance(application)
     private val repo = RecordingRepository(db.recordingDao())
-    private val prefs = application.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+    private val llm  = LocalLlmService(application)
 
     val recordings: StateFlow<List<Recording>> = repo.allRecordings
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     private val _isProcessing = MutableStateFlow(false)
     val isProcessing: StateFlow<Boolean> = _isProcessing
+
+    private val _aiError = MutableStateFlow<String?>(null)
+    val aiError: StateFlow<String?> = _aiError
 
     private val _currentNote = MutableStateFlow<Recording?>(null)
     val currentNote: StateFlow<Recording?> = _currentNote
@@ -39,23 +45,20 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     fun analyze(filename: String, categoryId: Int = 1, transcript: String = "") {
         viewModelScope.launch {
             _isProcessing.value = true
+            _aiError.value = null
             try {
-                val apiKey = prefs.getString("claude_api_key", "") ?: ""
-                if (apiKey.isBlank()) {
-                    _isProcessing.value = false
-                    return@launch
-                }
+                val modelId  = selectedModel(getApplication()).id
+                llm.ensureLoaded(modelId)
                 val category = CATEGORIES.find { it.id == categoryId } ?: CATEGORIES[0]
-                val service = ClaudeService(apiKey)
-                val useTranscript = transcript.ifBlank {
-                    "No transcript available. Please describe the recording content."
+                val text = transcript.ifBlank {
+                    "No transcript provided. Generate a placeholder summary noting that no audio content was available."
                 }
-                val summary = service.summarize(useTranscript, category.systemPrompt)
-                val mindMap = service.generateMindMap(useTranscript)
+                val summary = llm.generate(category.systemPrompt, text)
+                val mindMap = llm.generate(MINDMAP_PROMPT, text)
                 repo.updateSummary(filename, summary, mindMap)
                 _currentNote.value = repo.get(filename)
             } catch (e: Exception) {
-                // Log error — surface via a dedicated error StateFlow if needed
+                _aiError.value = e.message ?: "AI error"
             } finally {
                 _isProcessing.value = false
             }
@@ -81,10 +84,13 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     fun importFromDevice(filename: String, sizeBytes: Long) {
         viewModelScope.launch {
             val existing = repo.get(filename)
-            if (existing == null) {
-                repo.save(Recording(filename = filename, sizeBytes = sizeBytes))
-            }
+            if (existing == null) repo.save(Recording(filename = filename, sizeBytes = sizeBytes))
             loadNote(filename)
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        llm.close()
     }
 }
