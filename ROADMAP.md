@@ -1,0 +1,41 @@
+# Roadmap & Feature Backlog
+
+This document tracks the future development of Daedalus Notetaker. Features are categorized by phase and priority.
+
+## 🚀 Active Development (Phase 2: Android)
+
+### High Priority
+- [ ] **Background Transcription:** Continue processing audio even when the app is in the background or the screen is off.
+- [ ] **Search Engine Optimization:** Full-text search (FTS4) across all transcripts and summaries.
+- [ ] **Real-time BLE Status:** Persistent notification showing battery level and recording status of the physical device.
+
+### Medium Priority
+- [ ] **Multi-Speaker Diarization:** Identify and label different speakers in the transcript using local AI.
+- [ ] **Interactive Mind Maps:** Pan and zoom interface for Mermaid/Markdown mind maps.
+- [ ] **Batch Processing:** Ability to select multiple recordings for transcription and analysis in one go.
+
+## 🗺️ Future Milestones (Phase 3+)
+
+### Advanced AI Capabilities
+- [ ] **Real-time Streaming:** Stream audio from the device via BLE/USB for live transcription (if hardware supports it).
+- [ ] **Custom Category Creator:** Allow users to define their own analysis prompts and categories.
+- [ ] **Audio-to-Video Sync:** Generate a video file with the audio and synchronized subtitles (SRT).
+
+### Ecosystem & Integration
+- [ ] **Desktop Companion (Electron/Tauri):** A cross-platform desktop app to mirror the Android experience.
+- [ ] **Obsidian/Notion Integration:** Direct export to popular note-taking apps via their APIs.
+- [ ] **Web Dashboard:** Secure, encrypted web interface for viewing synced recordings.
+
+## 🛠️ Infrastructure & Maintenance
+- [ ] **Unit Test Expansion:** Complete coverage for BLE protocol edge cases.
+- [ ] **CI/CD Pipeline:** Automated APK builds and Python linting on GitHub Actions.
+- [ ] **Model Optimization:** Support for smaller, faster quantization levels (INT4/INT8) for budget hardware.
+
+## 📝 Backlog / Ideas
+- [ ] Apple Watch / WearOS remote control app.
+- [ ] Transcription support for 50+ languages via Whisper multilingual models.
+- [ ] Automatic "Highlight" clip generation (finding the most important 30 seconds).
+- [ ] QR Code sharing for summaries.
+
+---
+*Note: This roadmap is subject to change based on protocol discovery and user feedback.*
