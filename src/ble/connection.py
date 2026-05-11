@@ -22,13 +22,15 @@ from src.ble.protocol import (
     B0B3_NOTIFY_UUID,
     B0B4_NOTIFY_UUID,
     WRITE_CHAR_UUID,
-    build_packet,
     cmd_cmd18,
+    cmd_confirm_done,
     cmd_get_fw_version,
     cmd_get_serial,
     cmd_get_status,
     cmd_list_files,
     cmd_set_fw_version,
+    cmd_start_recording,
+    cmd_stop_recording,
     cmd_sync_time,
     parse_response,
     parse_status_packet,
@@ -182,15 +184,20 @@ class BleConnection:
     async def send_command(self, packet: bytes) -> dict | None:
         return await self._send_recv(packet)
 
-    # Recording commands (byte values TBD — needs snoop during recording session)
-    async def start_recording(self) -> None:
-        await self._send(build_packet(0x10))
+    async def start_recording(self) -> dict | None:
+        """Start recording (CMD 0x06). Device responds with new filename."""
+        return await self._send_recv(cmd_start_recording())
 
-    async def stop_recording(self) -> None:
-        await self._send(build_packet(0x11))
+    async def stop_recording(self) -> dict | None:
+        """Stop recording (CMD 0x08) then confirm done (CMD 0x07)."""
+        resp = await self._send_recv(cmd_stop_recording())
+        await asyncio.sleep(0.2)
+        await self._send_recv(cmd_confirm_done())
+        return resp
 
     async def pause_recording(self) -> None:
-        await self._send(build_packet(0x12))
+        # Not supported — device only has start/stop, no pause via BLE
+        raise NotImplementedError("FW920 does not support BLE pause; use physical button.")
 
     async def __aenter__(self) -> "BleConnection":
         await self.connect()

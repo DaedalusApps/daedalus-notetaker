@@ -147,26 +147,56 @@ def cmd_request_file_info() -> bytes:
     return build_packet(0x15)
 
 
+def cmd_start_recording() -> bytes:
+    """Start recording via in-app button (CMD 0x06, empty payload).
+    Verified raw: a00a010600a1d1
+    Device responds with CMD 0x06 + new filename.
+    """
+    return build_packet(0x06)
+
+
+def cmd_stop_recording() -> bytes:
+    """Stop recording via in-app button (CMD 0x08, empty payload).
+    Verified raw: a00a010800c1d5
+    Device responds with CMD 0x08 + final filename.
+    """
+    return build_packet(0x08)
+
+
+def cmd_confirm_done() -> bytes:
+    """Confirm transfer/recording done (CMD 0x07, empty payload).
+    Verified raw: a00a01070031d0
+    Send after stop recording. Device responds with final file info.
+    """
+    return build_packet(0x07)
+
+
 # ---------------------------------------------------------------------------
-# Recording notes (from HCI snoop analysis)
+# Full recording protocol (from HCI snoop — in-app button session)
 # ---------------------------------------------------------------------------
-# Recording is ALWAYS triggered by the PHYSICAL BUTTON on the device.
-# The DOWAY app does NOT send a BLE start/stop recording command.
-#
-# When the device starts recording:
-#   DEV→APP CMD 0x06  - device notifies app a recording is available/started
+# Via PHYSICAL BUTTON (device-initiated):
+#   DEV→APP CMD 0x06  - device notifies app a recording started/is available
 #   APP→DEV CMD 0x15  - app requests file metadata
 #   DEV→APP CMD 0x15  - device responds with filename + size
 #   DEV→APP h=0x0030  - device streams raw audio in real-time via B0B3
 #   DEV→APP CMD 0x0F  - periodic status: battery %, rec_state=1 (recording)
-#   DEV→APP CMD 0x07  - recording / transfer complete
+#   DEV→APP CMD 0x07  - recording/transfer complete
+#
+# Via IN-APP BUTTON (app-initiated):
+#   APP→DEV CMD 0x06  - start recording          → raw: a00a010600a1d1
+#   DEV→APP CMD 0x06  - ACK + new filename
+#   DEV→APP h=0x0030  - real-time audio stream
+#   DEV→APP CMD 0x0F  - periodic status updates
+#   APP→DEV CMD 0x08  - stop recording           → raw: a00a010800c1d5
+#   DEV→APP CMD 0x08  - ACK + final filename
+#   APP→DEV CMD 0x07  - confirm done             → raw: a00a01070031d0
+#   DEV→APP CMD 0x07  - final file info (name, size)
 #
 # Status update (CMD 0x0F) payload layout:
 #   byte 0:    0x00 (padding)
 #   byte 1:    battery % (0x64 = 100%)
 #   byte 2:    recording state (0x01 = recording, 0x00 = idle)
 #   byte 3:    unknown flags
-#   bytes 4+:  more status data
 
 
 # ---------------------------------------------------------------------------
