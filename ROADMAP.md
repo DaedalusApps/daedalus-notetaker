@@ -2,6 +2,15 @@
 
 This document tracks the future development of Daedalus Notetaker. Features are categorized by phase and priority.
 
+## 🚧 Missing Features (by design — deferred)
+- [ ] **On-Device Transcription:** The app can currently summarize, but there is no audio→text pipeline on-device yet. **Whisper.cpp JNI** for Android is required to close this gap.
+- [ ] **Audio Playback:** ExoPlayer is included in dependencies, but the recordings screen does not yet have a functional player.
+- [ ] **Android Export Formats:** Only Markdown is currently wired up. PDF/DOCX exporters (present in Python prototype) need to be ported/implemented for Android.
+
+## 🧹 Housekeeping
+- [x] **Git Hygiene:** `.gradle/` build cache files were being committed. (Resolved: Updated `.gitignore` and pruned git history).
+- [x] **Android Docs:** Created `android/CLAUDE.md` to document the Android build process and environment.
+
 ## 🚀 Active Development (Phase 2: Android)
 
 ### High Priority
