@@ -24,6 +24,7 @@ This file provides foundational mandates, architecture, and workflows for the `n
 - **Local AI:** MediaPipe LLM Inference (Gemma 4 E4B), `whisper.cpp` JNI
 - **Database:** Room + FTS4
 - **Architecture:** MVVM + Clean Architecture principles
+- **Versioning:** Automated via git commit count (`versionCode`) and `android/version.properties` (`versionName`).
 
 ## Core Mandates & Conventions
 

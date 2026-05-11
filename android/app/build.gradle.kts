@@ -1,9 +1,28 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.kapt)
 }
+
+val versionPropsFile = file("../version.properties")
+val versionProps = Properties().apply {
+    if (versionPropsFile.exists()) {
+        load(FileInputStream(versionPropsFile))
+    }
+}
+
+// Get version code from git commit count, fallback to property file
+val gitCommitCount = try {
+    Runtime.getRuntime().exec("git rev-list --count HEAD").inputStream.bufferedReader().readText().trim().toInt()
+} catch (e: Exception) {
+    versionProps.getProperty("BUILD_NUMBER", "1").toInt()
+}
+
+val vName = versionProps.getProperty("VERSION_NAME", "1.0.0")
 
 android {
     namespace   = "com.daedalus.notes"
@@ -13,8 +32,8 @@ android {
         applicationId   = "com.daedalus.notes"
         minSdk          = 26
         targetSdk       = 35
-        versionCode     = 2
-        versionName     = "1.1.0"
+        versionCode     = gitCommitCount
+        versionName     = vName
     }
 
     buildTypes {
