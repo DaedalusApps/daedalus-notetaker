@@ -12,6 +12,15 @@ venv/
 *.mp3
 notetaker-exports/
 
+# Android
+android/.gradle/
+android/.kotlin/
+android/app/build/
+android/build/
+android/local.properties
+.idea/
+*.iml
+
 # Reverse-engineering artifacts: keep scripts and analysis JSON, ignore binaries
 reverse/*.xapk
 reverse/*.apk
