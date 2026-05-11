@@ -29,7 +29,33 @@ fun ModelDownloadScreen(onReady: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text("Daedalus Notes", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+        val packageInfo = remember {
+            try {
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            } catch (e: Exception) {
+                null
+            }
+        }
+        val versionName = packageInfo?.versionName ?: "Unknown"
+        val versionCode = packageInfo?.let {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                it.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                it.versionCode.toLong()
+            }
+        } ?: 0L
+
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text("Daedalus Notes", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "v$versionName ($versionCode)",
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(bottom = 4.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+        }
         Spacer(Modifier.height(6.dp))
         Text("AI Voice Recorder Companion", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(48.dp))
