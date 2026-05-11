@@ -21,21 +21,21 @@ val AVAILABLE_MODELS = listOf(
         id          = "gemma_2b_cpu",
         displayName = "Gemma 1.1 2B (CPU)",
         description = "~1.4 GB, optimized for any Android CPU. Very stable.",
-        downloadUrl = "https://huggingface.co/t-ghosh/gemma-tflite/resolve/main/gemma-1.1-2b-it-int4.bin",
-        filename    = "gemma-1.1-2b-it-int4.bin",
-        sizeBytes   = 1_400_000_000L
+        downloadUrl = "https://huggingface.co/t-ghosh/gemma-tflite/resolve/main/gemma-1.1-2b-it-cpu-int4.bin",
+        filename    = "gemma-1.1-2b-it-cpu-int4.bin",
+        sizeBytes   = 1_346_427_328L
     ),
     LocalModel(
         id          = "gemma_2b_gpu",
         displayName = "Gemma 2B (GPU)",
         description = "~1.4 GB, GPU-accelerated. Best for S24 Ultra performance.",
-        downloadUrl = "https://huggingface.co/t-ghosh/gemma-tflite/resolve/main/gemma-2b-it-gpu-int4.bin",
+        downloadUrl = "https://huggingface.co/manjirao/gemma-2b-it-gpu-int4.bin/resolve/main/gemma-2b-it-gpu-int4.bin",
         filename    = "gemma-2b-it-gpu-int4.bin",
-        sizeBytes   = 1_400_000_000L
+        sizeBytes   = 1_354_301_440L
     )
 )
 
-const val DEFAULT_MODEL_ID = "gemma2_2b_gpu"
+const val DEFAULT_MODEL_ID = "gemma_2b_gpu"
 const val PREFS_MODEL_ID   = "local_model_id"
 
 fun modelsDir(context: Context): File =
