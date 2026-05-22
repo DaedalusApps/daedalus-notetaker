@@ -201,7 +201,8 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                 
                 val category = CATEGORIES.find { it.id == categoryId } ?: CATEGORIES[0]
                 
-                val summary = llm.generate(category.systemPrompt, note.transcript)
+                val rawSummary = llm.generate(category.systemPrompt, note.transcript)
+                val summary = stripCodeFences(rawSummary)
                 val mindMap = llm.generate(MINDMAP_PROMPT, note.transcript)
 
                 repo.save(note.copy(summary = summary, mindMap = mindMap, category = categoryId))
@@ -213,6 +214,14 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                 _isProcessing.value = false
             }
         }
+    }
+
+    private fun stripCodeFences(text: String): String {
+        // Gemma sometimes wraps output in ```json ... ``` fences — strip them
+        val stripped = text.trim()
+            .removePrefix("```json").removePrefix("```")
+            .removeSuffix("```").trim()
+        return stripped
     }
 
     fun exportMarkdown(filename: String) {

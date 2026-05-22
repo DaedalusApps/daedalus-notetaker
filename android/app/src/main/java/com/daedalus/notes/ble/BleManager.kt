@@ -337,6 +337,11 @@ class BleManager(private val context: Context) {
         }
     }
 
+    /** Polls CMD 0x0F to sync the actual recording state from the device. */
+    suspend fun refreshRecordingStatus() {
+        sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
+    }
+
     // ------------------------------------------------------------------
     // Public suspend methods
     // ------------------------------------------------------------------
@@ -359,10 +364,11 @@ class BleManager(private val context: Context) {
         Log.i("BleManager", "stopRecording: response=$stopResp")
         if (stopResp is ParsedResponse.RecordingStopped) {
             sendAndAwait(PKT_CONFIRM_DONE, expectedCmd = 0x07)
-            _bleState.update { it.copy(isRecording = false) }
-            return true
         }
-        return false
+        // Always clear recording state — user intent was to stop, even if device
+        // already stopped (auto-stop on full storage, timeout, etc.)
+        _bleState.update { it.copy(isRecording = false) }
+        return stopResp is ParsedResponse.RecordingStopped
     }
 
     suspend fun refreshStatus() {
