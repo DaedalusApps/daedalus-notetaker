@@ -173,8 +173,7 @@ fun RecordingsScreen(
                     items(files, key = { it.filename }) { file ->
                         RecordingCard(
                             file = file,
-                            onPlay = { onNavigateToNote(file.filename) },
-                            onBleSync = { recordingViewModel.syncBleFile(file.filename, viewModel.bleManager) }
+                            onPlay = { onNavigateToNote(file.filename) }
                         )
                     }
                 }
@@ -186,8 +185,7 @@ fun RecordingsScreen(
 @Composable
 private fun RecordingCard(
     file: FileEntry,
-    onPlay: () -> Unit,
-    onBleSync: () -> Unit
+    onPlay: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -212,15 +210,6 @@ private fun RecordingCard(
                     text = formatFileSize(file.sizeBytes),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            IconButton(onClick = onBleSync) {
-                Icon(
-                    Icons.Default.Sync,
-                    contentDescription = "Wireless Sync",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(24.dp)
                 )
             }
 
