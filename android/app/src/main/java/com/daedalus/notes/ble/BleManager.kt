@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 import kotlin.coroutines.resume
 
@@ -326,6 +328,55 @@ class BleManager(private val context: Context) {
         sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
     }
 
+    suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? {
+        val context = this.context
+        val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
+        
+        // Command 0x06 with payload 0x10 0x00 + filename is used for download
+        val payload = byteArrayOf(0x10.toByte(), 0x00.toByte()) + 
+                     cleanName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
+        val downloadPkt = buildPacket(0x06, payload)
+        
+        val localFile = File(context.getExternalFilesDir(null), "Recordings/$filename.mp3").also {
+            it.parentFile?.mkdirs()
+            it.delete() // Start fresh
+        }
+
+        sendPacket(downloadPkt)
+        
+        var totalBytes = 0L
+        val fos = FileOutputStream(localFile)
+        
+        try {
+            // Monitor B0B3 chunks and CMD 0x07 (Done)
+            val timeoutMs = 10000L // 10s of no data = stop
+            var lastDataTime = System.currentTimeMillis()
+
+            while (System.currentTimeMillis() - lastDataTime < timeoutMs) {
+                val response = withTimeoutOrNull(2000) { responseChannel.receive() } ?: continue
+                
+                when (response) {
+                    is ParsedResponse.AudioChunk -> {
+                        fos.write(response.data)
+                        totalBytes += response.data.size
+                        onProgress(totalBytes)
+                        lastDataTime = System.currentTimeMillis()
+                    }
+                    is ParsedResponse.Ack -> {
+                        if (response.cmd == 0x07) break // Transfer done
+                    }
+                    else -> Unit
+                }
+            }
+        } finally {
+            fos.close()
+        }
+
+        return if (totalBytes > 0) localFile else null
+    }
+
+    // Add FileOutputStream import later or here if I can
+
     suspend fun listFiles() {
         collectFileList()
     }
@@ -409,6 +460,7 @@ class BleManager(private val context: Context) {
                 is ParsedResponse.FileList        -> expectedCmd == 0x0A
                 is ParsedResponse.RecordingStarted -> expectedCmd == 0x06
                 is ParsedResponse.RecordingStopped -> expectedCmd == 0x08
+                is ParsedResponse.AudioChunk      -> false
                 is ParsedResponse.Unknown         -> response.cmd == expectedCmd
             }
             if (matchesCmd) return response

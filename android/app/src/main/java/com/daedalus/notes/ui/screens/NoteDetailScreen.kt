@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -47,6 +48,15 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import android.net.Uri
+import android.util.Log
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalContext
+import java.io.File
 import com.daedalus.notes.ai.CATEGORIES
 import com.daedalus.notes.viewmodel.RecordingViewModel
 
@@ -57,8 +67,20 @@ fun NoteDetailScreen(
     recordingViewModel: RecordingViewModel,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
     val note by recordingViewModel.currentNote.collectAsState()
     val isProcessing by recordingViewModel.isProcessing.collectAsState()
+    val aiError by recordingViewModel.aiError.collectAsState()
+
+    // Player setup
+    val player = remember { ExoPlayer.Builder(context).build() }
+    var isPlaying by remember { mutableStateOf(false) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            player.release()
+        }
+    }
 
     val transcript = note?.transcript.orEmpty()
     val summary = note?.summary.orEmpty()
@@ -108,7 +130,15 @@ fun NoteDetailScreen(
             )
         },
         bottomBar = {
-            Column {
+            Column(modifier = Modifier.navigationBarsPadding()) {
+                if (aiError != null) {
+                    Text(
+                        text = "AI Error: $aiError",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
+                }
                 if (isProcessing) {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
@@ -118,6 +148,31 @@ fun NoteDetailScreen(
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    // Play Button
+                    Button(
+                        onClick = {
+                            if (isPlaying) {
+                                player.stop()
+                                isPlaying = false
+                            } else {
+                                val file = note?.localPath?.let { File(it) } ?: File(context.getExternalFilesDir(null), "Recordings/$filename")
+                                if (file.exists()) {
+                                    player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
+                                    player.prepare()
+                                    player.play()
+                                    isPlaying = true
+                                } else {
+                                    Log.e("Playback", "File not found: ${file.absolutePath}")
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(0.7f)
+                    ) {
+                        Icon(if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (isPlaying) "Stop" else "Play")
+                    }
+
                     Button(
                         onClick = { showCategoryDialog = true },
                         enabled = !isProcessing,

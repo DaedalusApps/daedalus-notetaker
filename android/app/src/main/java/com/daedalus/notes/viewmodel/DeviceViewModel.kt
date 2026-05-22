@@ -29,6 +29,10 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
         bleManager.listFiles()
     }
 
+    fun downloadFile(filename: String, onProgress: (Long) -> Unit) = viewModelScope.launch {
+        bleManager.downloadFile(filename, onProgress)
+    }
+
     override fun onCleared() {
         super.onCleared()
         bleManager.destroy()

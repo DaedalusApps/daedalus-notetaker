@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -43,6 +44,16 @@ import com.daedalus.notes.ble.FileEntry
 import com.daedalus.notes.viewmodel.DeviceViewModel
 import com.daedalus.notes.viewmodel.RecordingViewModel
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material3.LinearProgressIndicator
+
+import android.content.Intent
+import android.os.Environment
+import android.provider.Settings
+import android.net.Uri
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecordingsScreen(
@@ -51,10 +62,34 @@ fun RecordingsScreen(
     onNavigateToNote: (String) -> Unit,
     onBack: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val bleState by viewModel.state.collectAsState()
+    val syncProgress by recordingViewModel.syncProgress.collectAsState()
     val files = bleState.files
 
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+        onResult = { uris -> if (uris.isNotEmpty()) recordingViewModel.syncFiles(uris) }
+    )
+
+    fun handleSync() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            if (Environment.isExternalStorageManager()) {
+                recordingViewModel.fullAutoSync()
+            } else {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                }
+                context.startActivity(intent)
+            }
+        } else {
+            // Fallback for older Android if needed
+            filePicker.launch(arrayOf("audio/*"))
+        }
+    }
+
     Scaffold(
+        modifier = Modifier.navigationBarsPadding(),
         topBar = {
             TopAppBar(
                 title = { Text("Recordings") },
@@ -63,10 +98,16 @@ fun RecordingsScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
+                actions = {
+                    IconButton(onClick = { handleSync() }) {
+                        Icon(Icons.Default.Sync, contentDescription = "Sync from USB")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary
+                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary,
+                    actionIconContentColor = MaterialTheme.colorScheme.onPrimary
                 )
             )
         },
@@ -80,46 +121,62 @@ fun RecordingsScreen(
             }
         }
     ) { innerPadding ->
-        if (files.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(32.dp)
-                ) {
-                    Text(
-                        text = "No recordings found.",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Connect FW920 and press Start Recording.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-                }
+        Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            if (syncProgress != null) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text(
+                    text = syncProgress!!,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(files, key = { it.filename }) { file ->
-                    RecordingCard(
-                        file = file,
-                        onPlay = { onNavigateToNote(file.filename) },
-                        onProcess = { recordingViewModel.analyze(file.filename) }
-                    )
+
+            if (files.isEmpty()) {
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(32.dp)
+                    ) {
+                        Text(
+                            text = "No recordings found.",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Connect FW920 and press Start Recording.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        OutlinedButton(onClick = { handleSync() }) {
+                            Icon(Icons.Default.Sync, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Auto-Sync from USB")
+                        }
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(files, key = { it.filename }) { file ->
+                        RecordingCard(
+                            file = file,
+                            onPlay = { onNavigateToNote(file.filename) },
+                            onBleSync = { recordingViewModel.syncBleFile(file.filename, viewModel.bleManager) }
+                        )
+                    }
                 }
             }
         }
@@ -130,7 +187,7 @@ fun RecordingsScreen(
 private fun RecordingCard(
     file: FileEntry,
     onPlay: () -> Unit,
-    onProcess: () -> Unit
+    onBleSync: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -158,30 +215,21 @@ private fun RecordingCard(
                 )
             }
 
+            IconButton(onClick = onBleSync) {
+                Icon(
+                    Icons.Default.Sync,
+                    contentDescription = "Wireless Sync",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+
             IconButton(onClick = onPlay) {
                 Icon(
                     Icons.Default.PlayArrow,
                     contentDescription = "Open note",
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(28.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(4.dp))
-
-            OutlinedButton(
-                onClick = onProcess,
-                modifier = Modifier.height(36.dp)
-            ) {
-                Icon(
-                    Icons.Default.Analytics,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "AI",
-                    style = MaterialTheme.typography.labelMedium
                 )
             }
         }
