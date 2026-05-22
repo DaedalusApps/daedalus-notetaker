@@ -14,6 +14,7 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -75,6 +76,9 @@ class BleManager(private val context: Context) {
 
     /** Single-consumer channel; responses flow here from onCharacteristicChanged. */
     private val responseChannel = Channel<ParsedResponse>(capacity = Channel.UNLIMITED)
+
+    /** Signals completion of each writeDescriptor call (one per notification enable). */
+    private val descriptorChannel = Channel<Unit>(capacity = Channel.UNLIMITED)
 
     // Descriptor UUID required to enable notifications on Android
     private val CCC_DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -197,14 +201,27 @@ class BleManager(private val context: Context) {
 
             writeChar = service.getCharacteristic(UUID.fromString(WRITE_UUID))
 
-            // Subscribe to all three notify characteristics
-            for (notifyUuid in listOf(NOTIFY_B0B2_UUID, NOTIFY_B0B3_UUID, NOTIFY_B0B4_UUID)) {
-                val notifyChar = service.getCharacteristic(UUID.fromString(notifyUuid)) ?: continue
-                enableNotification(gatt, notifyChar)
+            // Enable notifications one at a time (GATT requires serialized operations),
+            // then start the init sequence only after all descriptors are written.
+            scope.launch {
+                for (notifyUuid in listOf(NOTIFY_B0B2_UUID, NOTIFY_B0B3_UUID, NOTIFY_B0B4_UUID)) {
+                    val notifyChar = service.getCharacteristic(UUID.fromString(notifyUuid)) ?: continue
+                    enableNotification(gatt, notifyChar)
+                    // Wait up to 2s for onDescriptorWrite before continuing to the next one
+                    withTimeoutOrNull(2000L) { descriptorChannel.receive() }
+                }
+                Log.i("BleManager", "All notifications enabled, starting init sequence")
+                runInitSequence()
             }
+        }
 
-            // After subscribing we must send the init sequence within 5 seconds
-            scope.launch { runInitSequence() }
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            Log.d("BleManager", "onDescriptorWrite status=$status char=${descriptor.characteristic.uuid}")
+            descriptorChannel.trySend(Unit)
         }
 
         @Deprecated("Used for API < 33")
@@ -246,7 +263,10 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     private fun handleIncoming(data: ByteArray) {
+        val hex = data.joinToString(" ") { "%02X".format(it) }
+        Log.d("BleManager", "RX [${data.size}b]: $hex")
         val parsed = parseResponse(data) ?: return
+        Log.d("BleManager", "RX parsed: $parsed")
         // Eagerly update state for status and file-list responses
         when (parsed) {
             is ParsedResponse.Serial  -> _bleState.update { it.copy(deviceSerial = parsed.value) }
@@ -279,28 +299,42 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     private suspend fun runInitSequence() {
+        Log.i("BleManager", "runInitSequence: start")
+
         // 1. CMD 0x02 — get firmware version
         sendAndAwait(PKT_GET_FW_VERSION, expectedCmd = 0x02)
+            .also { Log.d("BleManager", "CMD 0x02 (fw version): ${if (it != null) "ok" else "timeout"}") }
 
         // 2. CMD 0x03 — set firmware version string
         sendAndAwait(buildSetFwVersion(), expectedCmd = 0x03)
+            .also { Log.d("BleManager", "CMD 0x03 (set fw): ${if (it != null) "ok" else "timeout"}") }
 
         // 3. CMD 0x01 — get serial
         sendAndAwait(PKT_GET_SERIAL, expectedCmd = 0x01)
+            .also { Log.d("BleManager", "CMD 0x01 (serial): ${if (it != null) "ok" else "timeout"}") }
 
-        // 4. CMD 0x04 — sync time (fire-and-forget ack)
+        // 4. CMD 0x04 — sync time
         sendAndAwait(buildSyncTime(), expectedCmd = 0x04)
+            .also { Log.d("BleManager", "CMD 0x04 (time): ${if (it != null) "ok" else "timeout"}") }
 
         // 5. CMD 0x05 — get device status
         sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
+            .also { Log.d("BleManager", "CMD 0x05 (status): ${if (it != null) "ok" else "timeout"}") }
 
         // 6. CMD 0x18 — unknown init command
         sendAndAwait(PKT_CMD18, expectedCmd = 0x18)
+            .also { Log.d("BleManager", "CMD 0x18: ${if (it != null) "ok" else "timeout"}") }
 
         // 7. CMD 0x0A — list files
         collectFileList()
 
-        _bleState.update { it.copy(connectionState = ConnectionState.CONNECTED) }
+        // Only mark CONNECTED if the physical link is still up
+        if (bluetoothGatt != null) {
+            Log.i("BleManager", "runInitSequence: complete, marking CONNECTED")
+            _bleState.update { it.copy(connectionState = ConnectionState.CONNECTED) }
+        } else {
+            Log.w("BleManager", "runInitSequence: gatt is null after init — device disconnected mid-sequence")
+        }
     }
 
     // ------------------------------------------------------------------
@@ -308,14 +342,21 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     suspend fun startRecording(): Boolean {
-        val response = sendAndAwait(PKT_START_RECORDING, expectedCmd = 0x06)
-        val success = response is ParsedResponse.RecordingStarted
-        if (success) { _bleState.update { it.copy(isRecording = true) } }
-        return success
+        Log.i("BleManager", "startRecording: gatt=${bluetoothGatt != null} writeChar=${writeChar != null}")
+        if (writeChar == null || bluetoothGatt == null) return false
+        sendPacket(PKT_START_RECORDING)
+        // Optimistic update — device starts recording immediately on CMD 0x06; ACK is optional
+        _bleState.update { it.copy(isRecording = true) }
+        // Wait briefly for optional confirmation (don't require it)
+        val response = withTimeoutOrNull(2000L) { awaitResponse(0x06) }
+        Log.i("BleManager", "startRecording: optional confirmation=$response")
+        return true
     }
 
     suspend fun stopRecording(): Boolean {
+        Log.i("BleManager", "stopRecording")
         val stopResp = sendAndAwait(PKT_STOP_RECORDING, expectedCmd = 0x08)
+        Log.i("BleManager", "stopRecording: response=$stopResp")
         if (stopResp is ParsedResponse.RecordingStopped) {
             sendAndAwait(PKT_CONFIRM_DONE, expectedCmd = 0x07)
             _bleState.update { it.copy(isRecording = false) }
@@ -414,24 +455,28 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     private suspend fun sendPacket(data: ByteArray) {
-        val char = writeChar ?: return
-        val gatt = bluetoothGatt ?: return
+        val char = writeChar ?: run {
+            Log.w("BleManager", "sendPacket: writeChar is null — device disconnected?")
+            return
+        }
+        val gatt = bluetoothGatt ?: run {
+            Log.w("BleManager", "sendPacket: gatt is null — device disconnected?")
+            return
+        }
 
         suspendCancellableCoroutine<Unit> { cont ->
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeCharacteristic(
-                    char,
-                    data,
-                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                )
+            val cmd = if (data.size >= 4) data[3].toInt() and 0xFF else -1
+            val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
             } else {
                 @Suppress("DEPRECATION")
-                char.value     = data
+                char.value = data
                 @Suppress("DEPRECATION")
                 char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 @Suppress("DEPRECATION")
-                gatt.writeCharacteristic(char)
+                if (gatt.writeCharacteristic(char)) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
             }
+            Log.d("BleManager", "sendPacket cmd=0x${cmd.toString(16)} result=$result")
             cont.resume(Unit)
         }
     }

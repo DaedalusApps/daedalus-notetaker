@@ -188,7 +188,10 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
             _isProcessing.value = true
             _aiError.value = null
             try {
-                val note = repo.get(filename) ?: return@launch
+                val note = repo.get(filename) ?: run {
+                    _aiError.value = "Recording not synced. Use the sync button to download it first."
+                    return@launch
+                }
                 if (note.transcript.isBlank()) {
                     _aiError.value = "No transcript available for analysis"
                     return@launch

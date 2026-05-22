@@ -57,7 +57,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.daedalus.notes.ble.ConnectionState
 import com.daedalus.notes.viewmodel.DeviceViewModel
-import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -94,10 +93,7 @@ fun DeviceScreen(
 
     LaunchedEffect(state.connectionState) {
         if (state.connectionState == ConnectionState.CONNECTED) {
-            while (true) {
-                delay(5_000)
-                viewModel.refreshFiles()
-            }
+            viewModel.refreshFiles()
         }
     }
 
@@ -458,8 +454,8 @@ private fun formatStorage(freeKb: Long, totalKb: Long): String {
     return if (totalMb >= 1024) {
         val freeGb = freeMb / 1024f
         val totalGb = totalMb / 1024f
-        "${"%.1f".format(freeGb)}/${"%.1f".format(totalGb)} GB free"
+        "${"%.1f".format(freeGb)} GB free / ${"%.1f".format(totalGb)} GB"
     } else {
-        "$freeMb/$totalMb MB free"
+        "$freeMb MB free / $totalMb MB"
     }
 }

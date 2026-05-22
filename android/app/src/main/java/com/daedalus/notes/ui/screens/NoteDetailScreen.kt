@@ -48,6 +48,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.media3.common.MediaItem
@@ -166,11 +167,12 @@ fun NoteDetailScreen(
                                 }
                             }
                         },
-                        modifier = Modifier.weight(0.7f)
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Icon(if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow, contentDescription = null)
+                        Icon(if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text(if (isPlaying) "Stop" else "Play")
+                        Text(if (isPlaying) "Stop" else "Play", maxLines = 1)
                     }
 
                     Button(

@@ -35,7 +35,7 @@ val AVAILABLE_MODELS = listOf(
     )
 )
 
-const val DEFAULT_MODEL_ID = "gemma_2b_gpu"
+const val DEFAULT_MODEL_ID = "gemma_2b_cpu"
 const val PREFS_MODEL_ID   = "local_model_id"
 
 fun modelsDir(context: Context): File =
