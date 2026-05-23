@@ -18,7 +18,7 @@ from bleak import BleakClient, BleakScanner
 from rich.console import Console
 
 DEVICE_NAME = "FW920"
-DEVICE_ADDR = "REDACTED_MAC"
+DEVICE_ADDR = ""  # set via env: export FW920_ADDR=$(adb logcat -s R2.a | grep -m1 address | awk '{print $NF}')
 console = Console()
 
 received = []
