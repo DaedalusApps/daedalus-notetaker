@@ -15,7 +15,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.wifi.WifiManager
 import android.util.Log
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import com.daedalus.notes.ui.NavGraph
 import com.daedalus.notes.ui.theme.DaedalusTheme
 import com.daedalus.notes.viewmodel.DeviceViewModel
@@ -28,11 +31,35 @@ class MainActivity : ComponentActivity() {
 
     private val adbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "com.daedalus.notes.SYNC") {
-                Log.i("DaedalusADB", "ADB Sync triggered")
-                recordingViewModel.fullAutoSync()
+            when (intent?.action) {
+                "com.daedalus.notes.SYNC" -> {
+                    Log.i("DaedalusADB", "ADB Sync triggered")
+                    recordingViewModel.fullAutoSync()
+                }
+                "com.daedalus.notes.PROBE" -> {
+                    Log.i("DaedalusADB", "BLE probe triggered")
+                    if (BuildConfig.DEBUG) wifiScan()
+                    lifecycleScope.launch {
+                        deviceViewModel.bleManager.runProbe()
+                    }
+                }
+                "com.daedalus.notes.PROBE2" -> {
+                    Log.i("DaedalusADB", "Service probe triggered")
+                    lifecycleScope.launch {
+                        deviceViewModel.bleManager.runServiceProbe()
+                    }
+                }
             }
         }
+    }
+
+    private fun wifiScan() {
+        val wifi = getSystemService(Context.WIFI_SERVICE) as WifiManager
+        Log.i("FW920_PROBE", "=== NEARBY WI-FI NETWORKS (cached scan) ===")
+        wifi.scanResults.sortedByDescending { it.level }.forEach { r ->
+            Log.i("FW920_PROBE", "  SSID=\"${r.SSID}\" BSSID=${r.BSSID} ${r.level} dBm")
+        }
+        if (wifi.scanResults.isEmpty()) Log.i("FW920_PROBE", "  (no cached results — check system Wi-Fi scan)")
     }
 
     private val permissionLauncher = registerForActivityResult(
@@ -44,9 +71,13 @@ class MainActivity : ComponentActivity() {
 
         requestRequiredPermissions()
 
-        val filter = IntentFilter("com.daedalus.notes.SYNC")
+        val filter = IntentFilter().apply {
+            addAction("com.daedalus.notes.SYNC")
+            addAction("com.daedalus.notes.PROBE")
+            addAction("com.daedalus.notes.PROBE2")
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(adbReceiver, filter, RECEIVER_EXPORTED)
+            registerReceiver(adbReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(adbReceiver, filter)
         }

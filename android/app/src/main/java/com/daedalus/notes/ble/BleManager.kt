@@ -343,6 +343,153 @@ class BleManager(private val context: Context) {
     }
 
     // ------------------------------------------------------------------
+    // Unknown service probe
+    // ------------------------------------------------------------------
+
+    suspend fun runServiceProbe() {
+        val gatt = bluetoothGatt ?: run { Log.e("FW920_PROBE", "Not connected"); return }
+
+        // The three unknown services and their write/notify UUIDs
+        val targets = listOf(
+            Triple("FFD0", "0000ffd1-0000-1000-8000-00805f9b34fb",
+                             listOf("0000ffd2-0000-1000-8000-00805f9b34fb",
+                                    "0000ffd3-0000-1000-8000-00805f9b34fb")),
+            Triple("C0C0",  "0000c0c1-0000-1000-8000-00805f9b34fb",
+                             listOf("0000c0c2-0000-1000-8000-00805f9b34fb")),
+            Triple("E49A",  "e49a3002-f69a-11e8-8eb2-f2801f1b9fd1",
+                             listOf("e49a3003-f69a-11e8-8eb2-f2801f1b9fd1"))
+        )
+
+        // Step 1 — subscribe to all notify chars in unknown services
+        Log.i("FW920_PROBE", "=== SUBSCRIBING TO UNKNOWN SERVICE NOTIFICATIONS ===")
+        targets.forEach { (name, _, notifyUuids) ->
+            notifyUuids.forEach { notifyUuid ->
+                val svcUuid = when (name) {
+                    "FFD0" -> "0000ffd0-0000-1000-8000-00805f9b34fb"
+                    "C0C0" -> "0000c0c0-0000-1000-8000-00805f9b34fb"
+                    else   -> "e49a3001-f69a-11e8-8eb2-f2801f1b9fd1"
+                }
+                val svc = gatt.getService(UUID.fromString(svcUuid))
+                val ch  = svc?.getCharacteristic(UUID.fromString(notifyUuid)) ?: return@forEach
+                if (ch.properties and 0x10 != 0 || ch.properties and 0x20 != 0) {
+                    enableNotification(gatt, ch)
+                    withTimeoutOrNull(2000L) { descriptorChannel.receive() }
+                    Log.i("FW920_PROBE", "  Subscribed to $name/$notifyUuid")
+                }
+            }
+        }
+        kotlinx.coroutines.delay(500)
+
+        // Step 2 — for each unknown write char, try multiple payloads
+        val payloads = listOf(
+            "our CMD proto" to PKT_GET_STATUS,           // CMD 0x05 — known good packet
+            "our CMD proto" to PKT_GET_FW_VERSION,       // CMD 0x02
+            "our CMD proto" to PKT_GET_SERIAL,           // CMD 0x01
+            "raw 0x00"      to byteArrayOf(0x00),
+            "raw 0x01"      to byteArrayOf(0x01),
+            "raw 0xFF"      to byteArrayOf(0xFF.toByte()),
+            "raw AT"        to "AT\r\n".toByteArray(),   // ESP32 AT command firmware
+            "raw AT+GMR"    to "AT+GMR\r\n".toByteArray(), // firmware version
+            "raw AT+CWLAP"  to "AT+CWLAP\r\n".toByteArray(), // list Wi-Fi APs
+        )
+
+        targets.forEach { (name, writeUuid, _) ->
+            val svcUuid = when (name) {
+                "FFD0" -> "0000ffd0-0000-1000-8000-00805f9b34fb"
+                "C0C0" -> "0000c0c0-0000-1000-8000-00805f9b34fb"
+                else   -> "e49a3001-f69a-11e8-8eb2-f2801f1b9fd1"
+            }
+            val svc       = gatt.getService(UUID.fromString(svcUuid)) ?: run {
+                Log.w("FW920_PROBE", "$name: service not found"); return@forEach
+            }
+            val writeChar = svc.getCharacteristic(UUID.fromString(writeUuid)) ?: run {
+                Log.w("FW920_PROBE", "$name: write char not found"); return@forEach
+            }
+
+            Log.i("FW920_PROBE", "=== PROBING SERVICE $name (write=${writeUuid.take(8)}) ===")
+            payloads.forEach { (label, data) ->
+                Log.d("FW920_PROBE", "$name: sending [$label] ${data.size}b")
+
+                // Write to the unknown characteristic directly (not via sendPacket)
+                val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeCharacteristic(writeChar, data,
+                        BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    writeChar.value = data
+                    @Suppress("DEPRECATION")
+                    writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                    @Suppress("DEPRECATION")
+                    if (gatt.writeCharacteristic(writeChar)) 0 else 1
+                }
+
+                // Drain the response channel for up to 800ms — log anything that arrives
+                val deadline = System.currentTimeMillis() + 800L
+                while (System.currentTimeMillis() < deadline) {
+                    val resp = withTimeoutOrNull(deadline - System.currentTimeMillis()) {
+                        responseChannel.receive()
+                    } ?: break
+                    val hex = when (resp) {
+                        is ParsedResponse.Unknown -> resp.payload.joinToString(" ") { "%02X".format(it) }
+                        is ParsedResponse.AudioChunk -> resp.data.take(16).joinToString(" ") { "%02X".format(it) } + "..."
+                        else -> resp.toString()
+                    }
+                    Log.i("FW920_PROBE", "  $name [$label] → $hex")
+                }
+                kotlinx.coroutines.delay(200)
+            }
+        }
+        Log.i("FW920_PROBE", "=== SERVICE PROBE COMPLETE ===")
+    }
+
+    // ------------------------------------------------------------------
+    // Diagnostic probe — triggered via ADB broadcast
+    // ------------------------------------------------------------------
+
+    suspend fun runProbe() {
+        val gatt = bluetoothGatt ?: run {
+            Log.e("FW920_PROBE", "Not connected — connect first")
+            return
+        }
+
+        Log.i("FW920_PROBE", "=== GATT SERVICE INVENTORY ===")
+        gatt.services.forEach { svc ->
+            Log.i("FW920_PROBE", "SERVICE ${svc.uuid} (type=${svc.type})")
+            svc.characteristics.forEach { ch ->
+                val props = buildString {
+                    if (ch.properties and 0x02 != 0) append("READ ")
+                    if (ch.properties and 0x04 != 0) append("WRITE_NO_RSP ")
+                    if (ch.properties and 0x08 != 0) append("WRITE ")
+                    if (ch.properties and 0x10 != 0) append("NOTIFY ")
+                    if (ch.properties and 0x20 != 0) append("INDICATE ")
+                    if (ch.properties and 0x80 != 0) append("EXT_PROPS ")
+                }
+                Log.i("FW920_PROBE", "  CHAR ${ch.uuid}  [$props]")
+                ch.descriptors.forEach { desc ->
+                    Log.i("FW920_PROBE", "    DESC ${desc.uuid}")
+                }
+            }
+        }
+
+        Log.i("FW920_PROBE", "=== UNDOCUMENTED COMMAND PROBE (0x19–0x50) ===")
+        for (cmd in 0x19..0x50) {
+            sendPacket(buildPacket(cmd))
+            val resp = withTimeoutOrNull(600L) { awaitResponse(cmd) }
+            when {
+                resp == null -> Log.d("FW920_PROBE", "CMD 0x${cmd.toString(16).uppercase()} → timeout")
+                resp is ParsedResponse.Unknown -> {
+                    val hex = resp.payload.joinToString(" ") { "%02X".format(it) }
+                    val str = resp.payload.filter { it in 0x20..0x7E }.map { it.toChar() }.joinToString("")
+                    Log.i("FW920_PROBE", "CMD 0x${cmd.toString(16).uppercase()} → UNKNOWN payload=[$hex] str=\"$str\"")
+                }
+                else -> Log.i("FW920_PROBE", "CMD 0x${cmd.toString(16).uppercase()} → $resp")
+            }
+            kotlinx.coroutines.delay(150)
+        }
+        Log.i("FW920_PROBE", "=== PROBE COMPLETE ===")
+    }
+
+    // ------------------------------------------------------------------
     // Public suspend methods
     // ------------------------------------------------------------------
 
@@ -384,10 +531,9 @@ class BleManager(private val context: Context) {
                      cleanName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
         val downloadPkt = buildPacket(0x06, payload)
         
-        val localFile = File(context.getExternalFilesDir(null), "Recordings/$filename.mp3").also {
-            it.parentFile?.mkdirs()
-            it.delete() // Start fresh
-        }
+        val localDir = File(context.getExternalFilesDir(null), "Recordings").also { it.mkdirs() }
+        val safeName = File(cleanName).name + ".mp3"  // strip any path components from BLE-supplied name
+        val localFile = File(localDir, safeName).also { it.delete() }
 
         sendPacket(downloadPkt)
         
