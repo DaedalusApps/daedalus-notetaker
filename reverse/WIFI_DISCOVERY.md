@@ -12,7 +12,7 @@
 | Recorder | ELVANZA FW920 (rebadged HUXGO FW920) |
 | Chip | ESP32-C3 (BLE + Wi-Fi native) + ATS2837 audio DSP |
 | BLE protocol | "B0B0" custom service (see below) |
-| MAC address | `REDACTED_MAC` |
+| MAC address | redacted — run `adb logcat -s R2.a` while DOWAY connects to find it |
 | Firmware | v1.0.3 (shown in DOWAY app) |
 
 ---

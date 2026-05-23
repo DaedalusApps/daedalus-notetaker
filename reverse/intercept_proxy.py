@@ -25,6 +25,19 @@ TARGET_HOST = "www.dowayai.com"
 TARGET_PORT = 8188
 FAKE_MODE = "--fake" in sys.argv
 
+# Detect this machine's LAN IP automatically (used in fake firmware URL)
+def _get_local_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+LAPTOP_IP = _get_local_ip()
+
 def log(msg):
     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     print(f"[{ts}] {msg}", flush=True)
@@ -40,7 +53,7 @@ def make_fake_response(request_body: bytes) -> bytes:
         "msg": "success",
         "data": {
             "version": "1.0.4",
-            "url": f"http://192.168.1.102:{LISTEN_PORT}/firmware/fw920_1.0.4.bin",
+            "url": f"http://{LAPTOP_IP}:{LISTEN_PORT}/firmware/fw920_1.0.4.bin",
             "description": "Bug fixes",
             "forceUpdate": False,
             "fileSize": 1048576
