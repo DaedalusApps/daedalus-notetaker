@@ -41,15 +41,8 @@ import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.viewmodel.DeviceViewModel
 import com.daedalus.notes.viewmodel.RecordingViewModel
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.LinearProgressIndicator
-
-import android.content.Intent
-import android.os.Environment
-import android.provider.Settings
-import android.net.Uri
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,29 +52,11 @@ fun RecordingsScreen(
     onNavigateToNote: (String) -> Unit,
     onBack: () -> Unit
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
     val syncProgress by recordingViewModel.syncProgress.collectAsState()
     val recordings by recordingViewModel.allRecordings.collectAsState()
 
-    val filePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments(),
-        onResult = { uris -> if (uris.isNotEmpty()) recordingViewModel.syncFiles(uris) }
-    )
-
     fun handleSync() {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            if (Environment.isExternalStorageManager()) {
-                recordingViewModel.fullAutoSync()
-            } else {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                }
-                context.startActivity(intent)
-            }
-        } else {
-            // Fallback for older Android if needed
-            filePicker.launch(arrayOf("audio/*"))
-        }
+        recordingViewModel.syncAllBleFiles(viewModel.bleManager)
     }
 
     Scaffold(
@@ -96,7 +71,7 @@ fun RecordingsScreen(
                 },
                 actions = {
                     IconButton(onClick = { handleSync() }) {
-                        Icon(Icons.Default.Sync, contentDescription = "Sync from USB")
+                        Icon(Icons.Default.Sync, contentDescription = "Sync via BLE")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -136,7 +111,7 @@ fun RecordingsScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Connect FW920 and press Start Recording.",
+                            text = "Connect the FW920 via BLE then tap the sync button.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
@@ -145,7 +120,7 @@ fun RecordingsScreen(
                         OutlinedButton(onClick = { handleSync() }) {
                             Icon(Icons.Default.Sync, contentDescription = null)
                             Spacer(Modifier.width(8.dp))
-                            Text("Auto-Sync from USB")
+                            Text("Sync via BLE")
                         }
                     }
                 }

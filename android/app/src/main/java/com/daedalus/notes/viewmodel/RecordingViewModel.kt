@@ -48,6 +48,34 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     val allRecordings: StateFlow<List<Recording>> = repo.allRecordings
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    fun syncAllBleFiles(bleManager: BleManager) {
+        viewModelScope.launch {
+            val files = bleManager.bleState.value.files
+            if (files.isEmpty()) {
+                _aiError.value = "No files found on device. Make sure FW920 is connected."
+                return@launch
+            }
+            _aiError.value = null
+            var synced = 0
+            files.forEach { entry ->
+                val existing = repo.get(entry.filename)
+                if (existing?.localPath?.let { java.io.File(it).exists() } == true) return@forEach
+                _syncProgress.value = "Downloading ${entry.filename} via BLE…"
+                val file = bleManager.downloadFile(entry.filename) { bytes ->
+                    _syncProgress.value = "Downloading ${entry.filename} (${bytes / 1024} KB)…"
+                }
+                if (file != null) {
+                    val recording = existing ?: Recording(filename = entry.filename)
+                    repo.save(recording.copy(localPath = file.absolutePath, sizeBytes = file.length()))
+                    synced++
+                }
+            }
+            _syncProgress.value = if (synced > 0) "Synced $synced file(s) via BLE" else "All files already synced"
+            delay(2000)
+            _syncProgress.value = null
+        }
+    }
+
     fun syncBleFile(filename: String, bleManager: BleManager) {
         viewModelScope.launch {
             _syncProgress.value = "Starting BLE Sync..."
