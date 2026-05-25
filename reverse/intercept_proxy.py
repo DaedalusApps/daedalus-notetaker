@@ -127,7 +127,7 @@ def handle_client(conn, addr):
             return
 
         first_line = data.split(b"\r\n")[0].decode(errors="replace")
-        log(f"[REQUEST] {addr[0]} → {first_line}")
+        log(f"[REQUEST] {addr[0]} -> {first_line}")
 
         if b"\r\n\r\n" in data:
             body = data[data.index(b"\r\n\r\n") + 4:]

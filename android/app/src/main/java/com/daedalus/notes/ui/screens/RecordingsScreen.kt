@@ -16,13 +16,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,7 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.daedalus.notes.ble.FileEntry
+import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.viewmodel.DeviceViewModel
 import com.daedalus.notes.viewmodel.RecordingViewModel
 
@@ -63,9 +60,8 @@ fun RecordingsScreen(
     onBack: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val bleState by viewModel.state.collectAsState()
     val syncProgress by recordingViewModel.syncProgress.collectAsState()
-    val files = bleState.files
+    val recordings by recordingViewModel.allRecordings.collectAsState()
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
@@ -111,15 +107,6 @@ fun RecordingsScreen(
                 )
             )
         },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { viewModel.refreshFiles() },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary
-            ) {
-                Icon(Icons.Default.Refresh, contentDescription = "Refresh recordings")
-            }
-        }
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             if (syncProgress != null) {
@@ -132,7 +119,7 @@ fun RecordingsScreen(
                 )
             }
 
-            if (files.isEmpty()) {
+            if (recordings.isEmpty()) {
                 Box(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     contentAlignment = Alignment.Center
@@ -170,10 +157,10 @@ fun RecordingsScreen(
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(files, key = { it.filename }) { file ->
+                    items(recordings, key = { it.filename }) { recording ->
                         RecordingCard(
-                            file = file,
-                            onPlay = { onNavigateToNote(file.filename) }
+                            recording = recording,
+                            onPlay = { onNavigateToNote(recording.filename) }
                         )
                     }
                 }
@@ -184,7 +171,7 @@ fun RecordingsScreen(
 
 @Composable
 private fun RecordingCard(
-    file: FileEntry,
+    recording: Recording,
     onPlay: () -> Unit
 ) {
     Card(
@@ -199,7 +186,7 @@ private fun RecordingCard(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = formatFilename(file.filename),
+                    text = formatFilename(recording.filename),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
@@ -207,7 +194,7 @@ private fun RecordingCard(
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = formatFileSize(file.sizeBytes),
+                    text = formatFileSize(recording.sizeBytes),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

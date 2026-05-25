@@ -113,7 +113,7 @@ fun NoteDetailScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = filename.substringBeforeLast("."),
+                        text = formatFilename(filename),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -353,6 +353,13 @@ private fun CategoryPickerDialog(
             }
         }
     )
+}
+
+private fun formatFilename(filename: String): String {
+    val base = filename.substringBeforeLast(".")
+    val match = Regex("""(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})""").find(base) ?: return base
+    val (year, month, day, hour, min, sec) = match.destructured
+    return "$year-$month-$day $hour:$min:$sec"
 }
 
 /** Naive JSON pretty-printer without pulling in an extra library. */

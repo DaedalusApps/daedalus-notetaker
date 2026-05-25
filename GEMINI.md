@@ -84,8 +84,18 @@ python3 -m pytest tests/ -v
 - Open the `android/` directory in Android Studio.
 - Ensure `Gemma 4 E4B` model is downloaded/configured for local inference (see `ModelDownloader.kt`).
 
+## Engineering Principles
+
+- **Think Before Coding:** State assumptions clearly. If a requirement is ambiguous, ask for clarification before implementing. Surface trade-offs and push back on over-engineering.
+- **Minimalism & Simplicity:** Write the minimum code necessary. Avoid speculative features or premature abstractions. If a senior engineer would call it overcomplicated, simplify it.
+- **Goal-Driven Execution:** Transform vague tasks into verifiable goals with a clear plan.
+    - **"Fix the bug"** → Reproduce with a test, then make it pass.
+    - **"Add feature X"** → Define success criteria, implement, and verify with tests.
+
 ## Design Standards
-- **Surgical Updates:** When modifying existing logic, maintain architectural consistency.
+
+- **Surgical Updates:** Touch only what is necessary. Every changed line must trace directly to the request. Respect existing code style and formatting.
 - **Explicit Types:** Use Python type hints and Kotlin's strong typing system rigorously.
 - **Interactive CLI:** Use `rich` for all user-facing CLI output to ensure a polished experience.
 - **Visuals:** Android UI should follow modern Material 3 guidelines, prioritizing responsiveness and accessible design.
+- **Cleanup:** Only remove imports, variables, or functions that your changes made obsolete. Do not delete pre-existing dead code unless explicitly asked.
