@@ -17,8 +17,18 @@ interface RecordingDao {
     @Query("SELECT * FROM recordings WHERE filename = :filename")
     suspend fun get(filename: String): Recording?
 
+    @Query("""SELECT * FROM recordings WHERE
+    filename LIKE '%' || :q || '%' OR
+    transcript LIKE '%' || :q || '%' OR
+    summary LIKE '%' || :q || '%'
+    ORDER BY createdAt DESC""")
+    fun searchFlow(q: String): Flow<List<Recording>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(recording: Recording)
+
+    @Query("UPDATE recordings SET title = :title, shortSummary = :shortSummary WHERE filename = :filename")
+    suspend fun updateTitleAndSummary(filename: String, title: String, shortSummary: String)
 
     @Delete
     suspend fun delete(recording: Recording)

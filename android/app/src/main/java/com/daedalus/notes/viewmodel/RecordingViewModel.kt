@@ -1,40 +1,69 @@
 package com.daedalus.notes.viewmodel
 
 import android.app.Application
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.util.Log
+import androidx.annotation.RequiresApi
+import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.daedalus.notes.ai.CATEGORIES
+import com.daedalus.notes.ai.activePrompt
+import com.daedalus.notes.ai.extractActionItems
 import com.daedalus.notes.ai.LocalLlmService
+import com.daedalus.notes.ai.MarkdownExporter
+import com.daedalus.notes.ai.SmartAnalysisParser
+import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.selectedModel
+import com.daedalus.notes.ai.voskModelDir
 import com.daedalus.notes.ble.BleManager
+import com.daedalus.notes.ble.ConnectionState
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
+import com.daedalus.notes.data.model.AudioUtils
 import com.daedalus.notes.data.model.Recording
+import com.daedalus.notes.ui.mindmap.GlobalGraph
+import com.daedalus.notes.ui.mindmap.GraphBuilder
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
-private const val MINDMAP_PROMPT =
-    "Create a mind map for this content. Return a nested Markdown bullet list with the main topic as root and key themes as branches. Be concise, max 3 levels deep."
-
-class RecordingViewModel(application: Application) : AndroidViewModel(application) {
-
-    private val db   = AppDatabase.getInstance(application)
-    private val repo = RecordingRepository(db.recordingDao())
-    private val llm  = LocalLlmService(application)
+@OptIn(ExperimentalCoroutinesApi::class)
+class RecordingViewModel @JvmOverloads constructor(
+    application: Application,
+    private val db: AppDatabase = AppDatabase.getInstance(application),
+    private val repo: RecordingRepository = RecordingRepository(db.recordingDao()),
+    private val llm: LocalLlmService = LocalLlmService(application),
+    private val transcriber: TranscriptionService = TranscriptionService(application)
+) : AndroidViewModel(application) {
 
     private val _syncProgress = MutableStateFlow<String?>(null)
     val syncProgress: StateFlow<String?> = _syncProgress
+
+    private var syncJob: Job? = null
+
+    fun cancelSync() {
+        syncJob?.cancel()
+        syncJob = null
+        _syncProgress.value = null
+    }
 
     private val _isProcessing = MutableStateFlow(false)
     val isProcessing: StateFlow<Boolean> = _isProcessing
@@ -45,57 +74,121 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     private val _currentNote = MutableStateFlow<Recording?>(null)
     val currentNote: StateFlow<Recording?> = _currentNote
 
+    private val _exportIntent = MutableStateFlow<Intent?>(null)
+    val exportIntent: StateFlow<Intent?> = _exportIntent
+
     val allRecordings: StateFlow<List<Recording>> = repo.allRecordings
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    val globalGraph: StateFlow<GlobalGraph> = allRecordings
+        .map { GraphBuilder.build(it) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, GlobalGraph(emptyList(), emptyList()))
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery
+
+    val filteredRecordings: StateFlow<List<Recording>> = _searchQuery
+        .flatMapLatest { q ->
+            if (q.isBlank()) repo.allRecordings else repo.search(q)
+        }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    init {
+        // Heal missing durations for already synced files
+        viewModelScope.launch(Dispatchers.IO) {
+            repo.allRecordings.first().forEach { recording ->
+                if (recording.durationMillis == 0L && recording.localPath.isNotBlank()) {
+                    val duration = AudioUtils.getDurationMillis(recording.localPath)
+                    if (duration > 0) {
+                        repo.save(recording.copy(durationMillis = duration))
+                    }
+                }
+            }
+        }
+    }
+
+    fun setSearchQuery(q: String) { _searchQuery.value = q }
+
     fun syncAllBleFiles(bleManager: BleManager) {
-        viewModelScope.launch {
+        syncJob = viewModelScope.launch {
+            try {
+            if (!isBleConnected(bleManager)) {
+                _aiError.value = "Device not connected. Connect the FW920 before syncing."
+                return@launch
+            }
+            _syncProgress.value = "Listing files on device…"
+            bleManager.listFiles()
             val files = bleManager.bleState.value.files
             if (files.isEmpty()) {
+                _syncProgress.value = null
                 _aiError.value = "No files found on device. Make sure FW920 is connected."
                 return@launch
             }
             _aiError.value = null
             var synced = 0
+            val newFilenames = mutableListOf<String>()
+
             files.forEach { entry ->
+                if (!entry.filename.matches(Regex("[A-Za-z0-9._-]+"))) {
+                    Log.w("DaedalusSync", "Skipping suspicious filename: ${entry.filename}")
+                    return@forEach
+                }
                 val existing = repo.get(entry.filename)
-                if (existing?.localPath?.let { java.io.File(it).exists() } == true) return@forEach
+
+                val localFile = existing?.localPath?.let { java.io.File(it) }
+                val localSize = localFile?.takeIf { it.exists() }?.length() ?: 0L
+                Log.i("DaedalusSync", "file=${entry.filename} localSize=$localSize deviceSize=${entry.sizeBytes}")
+                if (localSize > 0) return@forEach
                 _syncProgress.value = "Downloading ${entry.filename} via BLE…"
                 val file = bleManager.downloadFile(entry.filename) { bytes ->
                     _syncProgress.value = "Downloading ${entry.filename} (${bytes / 1024} KB)…"
                 }
                 if (file != null) {
+                    val duration = AudioUtils.getDurationMillis(file.absolutePath)
                     val recording = existing ?: Recording(filename = entry.filename)
-                    repo.save(recording.copy(localPath = file.absolutePath, sizeBytes = file.length()))
+                    repo.save(recording.copy(
+                        localPath = file.absolutePath, 
+                        sizeBytes = file.length(),
+                        durationMillis = duration
+                    ))
+                    newFilenames.add(entry.filename)
                     synced++
                 }
             }
-            _syncProgress.value = if (synced > 0) "Synced $synced file(s) via BLE" else "All files already synced"
-            delay(2000)
+
+            _syncProgress.value = if (synced > 0) "Synced $synced file(s)" else "All files already synced"
+            delay(1000)
+            autoAnalyzePending()
             _syncProgress.value = null
+            } catch (e: CancellationException) {
+                _syncProgress.value = null
+                throw e
+            }
         }
     }
 
-    fun syncBleFile(filename: String, bleManager: BleManager) {
-        viewModelScope.launch {
-            _syncProgress.value = "Starting BLE Sync..."
-            val file = bleManager.downloadFile(filename) { bytes ->
-                _syncProgress.value = "Syncing $filename (${bytes / 1024} KB)..."
+    private suspend fun autoAnalyzePending() {
+        val context = getApplication<Application>()
+        val prefs = context.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+        val autoProcess = prefs.getBoolean("auto_process", false)
+
+        if (!autoProcess) return
+
+        // Fetch current list from repo
+        val recordings = repo.allRecordings.first()
+        for (recording in recordings) {
+            if (recording.summary.isBlank() && recording.localPath.isNotBlank()) {
+                val file = File(recording.localPath)
+                if (file.exists()) {
+                    _syncProgress.value = "Auto-analyzing ${recording.filename}…"
+                    doAnalyze(recording.filename)
+                    delay(500) // Brief pause between analyses
+                }
             }
-            
-            if (file != null) {
-                val recording = repo.get(filename) ?: Recording(filename = filename)
-                repo.save(recording.copy(localPath = file.absolutePath, sizeBytes = file.length()))
-                _syncProgress.value = "Sync Complete!"
-            } else {
-                _aiError.value = "BLE Sync failed or timed out"
-            }
-            delay(2000)
-            _syncProgress.value = null
-            _currentNote.value?.let { loadNote(it.filename) }
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.R)
     fun fullAutoSync() {
         viewModelScope.launch {
             val context = getApplication<Application>()
@@ -150,8 +243,13 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                                         input.copyTo(output)
                                     }
                                 }
+                                val duration = AudioUtils.getDurationMillis(destFile.absolutePath)
                                 val recording = repo.get(file.name) ?: Recording(filename = file.name)
-                                repo.save(recording.copy(localPath = destFile.absolutePath, sizeBytes = destFile.length()))
+                                repo.save(recording.copy(
+                                    localPath = destFile.absolutePath, 
+                                    sizeBytes = destFile.length(),
+                                    durationMillis = duration
+                                ))
                             } catch (e: Exception) {
                                 Log.e("DaedalusSync", "Error copying ${file.name}", e)
                                 _aiError.value = "Failed to copy ${file.name}: ${e.message}"
@@ -167,6 +265,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                     Log.i("DaedalusSync", "Auto-Sync complete")
                 }
             }
+            autoAnalyzePending()
             _syncProgress.value = null
             _currentNote.value?.let { loadNote(it.filename) }
         }
@@ -193,13 +292,19 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                                 input.copyTo(output)
                             }
                         }
+                        val duration = AudioUtils.getDurationMillis(destFile.absolutePath)
                         val recording = repo.get(name) ?: Recording(filename = name)
-                        repo.save(recording.copy(localPath = destFile.absolutePath, sizeBytes = destFile.length()))
+                        repo.save(recording.copy(
+                            localPath = destFile.absolutePath, 
+                            sizeBytes = destFile.length(),
+                            durationMillis = duration
+                        ))
                     } catch (e: Exception) {
                         _aiError.value = "Failed to sync $name: ${e.message}"
                     }
                 }
             }
+            autoAnalyzePending()
             _syncProgress.value = null
             _currentNote.value?.let { loadNote(it.filename) }
         }
@@ -211,37 +316,75 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun analyze(filename: String, categoryId: Int = 1) {
-        viewModelScope.launch {
+    fun analyze(filename: String) {
+        viewModelScope.launch { doAnalyze(filename) }
+    }
+
+    private suspend fun doAnalyze(filename: String) {
             _isProcessing.value = true
             _aiError.value = null
             try {
                 val note = repo.get(filename) ?: run {
-                    _aiError.value = "Recording not synced. Use the sync button to download it first."
-                    return@launch
-                }
-                if (note.transcript.isBlank()) {
-                    _aiError.value = "No transcript available for analysis"
-                    return@launch
+                    _aiError.value = "Recording not synced. Download it first."
+                    return
                 }
 
+                val localFile = note.localPath.let { java.io.File(it) }.takeIf { it.exists() } ?: run {
+                    _aiError.value = "Audio file missing — sync the recording first."
+                    return
+                }
+
+                // Step 1: Always re-transcribe to get fresh text
+                _syncProgress.value = "Transcribing audio…"
+                Log.i("DaedalusAI", "Transcribing ${localFile.name}")
+                val transcript = transcriber.transcribe(localFile)
+                if (transcript.isBlank()) {
+                    val modelReady = com.daedalus.notes.ai.voskModelDir(getApplication<Application>()).exists()
+                    _aiError.value = if (modelReady) {
+                        "No speech detected in this recording (too short or silent)."
+                    } else {
+                        "Transcription model not found. Please download it in Settings."
+                    }
+                    return
+                }
+                repo.save(note.copy(transcript = transcript))
+
+                // Step 2: Summarize + mind map with Gemma (Single Pass)
+                _syncProgress.value = "Analyzing with Gemma…"
                 llm.ensureLoaded()
-                
-                val category = CATEGORIES.find { it.id == categoryId } ?: CATEGORIES[0]
-                
-                val rawSummary = llm.generate(category.systemPrompt, note.transcript)
-                val summary = stripCodeFences(rawSummary)
-                val mindMap = llm.generate(MINDMAP_PROMPT, note.transcript)
 
-                repo.save(note.copy(summary = summary, mindMap = mindMap, category = categoryId))
+                val rawResponse = llm.generate(activePrompt(getApplication()), transcript)
+                val cleanJson = stripCodeFences(rawResponse)
+                val analysis = SmartAnalysisParser.parse(cleanJson)
+
+                val fullSummaryFinal = if ("## Action Items" !in analysis.fullSummary) {
+                    val items = extractActionItems(transcript)
+                    if (items.isNotEmpty()) {
+                        analysis.fullSummary.trimEnd() + "\n\n## Action Items\n" +
+                            items.joinToString("\n") { "- [ ] $it" }
+                    } else {
+                        analysis.fullSummary
+                    }
+                } else {
+                    analysis.fullSummary
+                }
+
+                repo.updateSummary(
+                    filename = filename,
+                    summary = fullSummaryFinal,
+                    mindMap = analysis.mindMap,
+                    title = analysis.title,
+                    shortSummary = analysis.shortSummary,
+                    topics = analysis.topics
+                )
                 _currentNote.value = repo.get(filename)
             } catch (e: Exception) {
                 Log.e("DaedalusAI", "Analysis failed", e)
                 _aiError.value = e.message ?: "Unknown AI error"
             } finally {
                 _isProcessing.value = false
+                _syncProgress.value = null
             }
-        }
     }
 
     private fun stripCodeFences(text: String): String {
@@ -252,8 +395,103 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         return stripped
     }
 
+    fun clearExportIntent() { _exportIntent.value = null }
+
+    private fun isBleConnected(bleManager: BleManager): Boolean =
+        bleManager.bleState.value.connectionState == ConnectionState.CONNECTED
+
+    fun updateTitleAndSummary(filename: String, title: String, shortSummary: String) {
+        viewModelScope.launch { repo.updateTitleAndSummary(filename, title, shortSummary) }
+    }
+
+    fun deleteRecording(filename: String, bleManager: BleManager) {
+        viewModelScope.launch {
+            if (!isBleConnected(bleManager)) {
+                _aiError.value = "Device not connected. Connect the FW920 before deleting."
+                return@launch
+            }
+            val recording = repo.get(filename) ?: return@launch
+
+            // 1. Try to delete from physical device via BLE
+            _syncProgress.value = "Deleting from device…"
+            val bleSuccess = bleManager.deleteFile(filename)
+            Log.i("RecordingViewModel", "BLE delete result: $bleSuccess")
+            
+            if (bleSuccess) {
+                // 2. Remove local file
+                recording.localPath.takeIf { it.isNotBlank() }?.let { File(it).delete() }
+                // 3. Remove from database
+                repo.delete(recording)
+                _syncProgress.value = "Deleted successfully"
+            } else {
+                _aiError.value = "Hardware delete failed. File still on FW920."
+                _syncProgress.value = "Delete failed"
+            }
+            delay(1500)
+            _syncProgress.value = null
+        }
+    }
+
+    fun deleteMultipleRecordings(filenames: List<String>, bleManager: BleManager) {
+        viewModelScope.launch {
+            if (!isBleConnected(bleManager)) {
+                _aiError.value = "Device not connected. Connect the FW920 before deleting."
+                return@launch
+            }
+            _isProcessing.value = true
+            var count = 0
+            var failedCount = 0
+            val total = filenames.size
+            
+            for (filename in filenames) {
+                count++
+                _syncProgress.value = "Deleting $count of $total..."
+                
+                val recording = repo.get(filename) ?: continue
+                
+                // 1. Hardware wipe
+                val bleSuccess = bleManager.deleteFile(filename)
+                
+                if (bleSuccess) {
+                    // 2. Local cleanup
+                    recording.localPath.takeIf { it.isNotBlank() }?.let { java.io.File(it).delete() }
+                    repo.delete(recording)
+                } else {
+                    Log.w("RecordingViewModel", "Failed to wipe $filename from hardware")
+                    failedCount++
+                }
+            }
+            
+            if (failedCount > 0) {
+                _syncProgress.value = "Done ($failedCount failed)"
+                _aiError.value = "Some files could not be deleted from the FW920 hardware."
+            } else {
+                _syncProgress.value = "Deleted $total items"
+            }
+            delay(1500)
+            _syncProgress.value = null
+            _isProcessing.value = false
+        }
+    }
+
     fun exportMarkdown(filename: String) {
-        // ... (existing export logic)
+        viewModelScope.launch {
+            val recording = repo.get(filename) ?: return@launch
+            val content = MarkdownExporter.export(recording)
+            val context = getApplication<Application>()
+
+            val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            val outFile = File(downloadsDir, "${filename.removeSuffix(".mp3")}.md")
+            withContext(Dispatchers.IO) { outFile.writeText(content) }
+
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", outFile)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/markdown"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            _exportIntent.value = Intent.createChooser(shareIntent, "Export as Markdown")
+        }
     }
 
     override fun onCleared() {

@@ -20,8 +20,8 @@ This file provides foundational mandates, architecture, and workflows for the `n
 
 ### Android App (Phase 2)
 - **Language:** Kotlin
-- **UI:** Jetpack Compose
-- **Local AI:** MediaPipe LLM Inference (Gemma 4 E4B), `whisper.cpp` JNI
+- **UI:** Jetpack Compose (Material 3)
+- **Local AI:** MediaPipe LLM Inference (Gemma 3 1B), sherpa-onnx (Whisper)
 - **Database:** Room + FTS4
 - **Architecture:** MVVM + Clean Architecture principles
 - **Versioning:** Automated via git commit count (`versionCode`) and `android/version.properties` (`versionName`).
@@ -29,17 +29,59 @@ This file provides foundational mandates, architecture, and workflows for the `n
 ## Core Mandates & Conventions
 
 ### 1. AI & Transcription
-- **No Audio to Claude:** Claude's API handles text only. **ALWAYS** use local Whisper for transcription. Claude is strictly for summarization, mind mapping, and translation of the resulting text.
-- **Prompt Caching:** Utilize Anthropic's prompt caching for system prompts and category templates to optimize latency and cost.
-- **Category 15 (Functionality):** This category involves 8 sequential sub-analyses. Chain these calls using conversation context where possible.
+- **On-Device Only:** Transcription (Whisper) and Analysis (Gemma 3) must run locally on the phone. Do not send audio or transcripts to external APIs in the Android app.
+- **Model Storage:** Models are downloaded to `getExternalFilesDir(null)/models/` on first launch.
 
-### 2. BLE Protocol
-- **Discovery First:** BLE UUIDs in `src/ble/protocol.py` are placeholders. Run `scripts/ble_discover.py` on new hardware to identify real service/characteristic UUIDs.
-- **Control Only:** BLE is for control (start/stop recording, status). Data transfer (MP3 files) happens via USB mass storage.
+### 2. BLE Protocol (confirmed via HCI snoop of DOWAY reference app)
+
+**UUIDs:**
+- Service: `0000b0b0-0000-1000-8000-00805f9b34fb`
+- Write: `0000b0b1-...` — send commands here
+- Notify B0B2: control responses (A0 0A 01 packets)
+- Notify B0B3/B0B4: audio data chunks during download
+
+**Packet format:** `A0 0A 01 [CMD] [LEN] [PAYLOAD...] [CRC16-ARC-hi] [CRC16-ARC-lo]`
+
+**Key commands:**
+| CMD  | Direction | Purpose |
+|------|-----------|---------|
+| 0x01 | →device   | Get serial number |
+| 0x02 | →device   | Get firmware version |
+| 0x04 | →device   | Sync time |
+| 0x05 | →device   | Get storage/battery status |
+| 0x06 | →device   | Start recording |
+| 0x07 | →device   | Confirm done (after stop) |
+| 0x08 | →device   | Stop recording |
+| 0x0A | →device   | List files (device replies with one 0x0A packet per file, null-entry = end) |
+| 0x0B | →device   | **Download file** — payload: 14-byte filename (space-padded) + 4-byte LE offset (always 0x00000000) |
+| 0x0D | →device   | **Delete file** — payload: 14-byte filename (space-padded) |
+
+**Download protocol (cmd=0x0B):**
+1. Send `buildPacket(0x0B, nameBytes + [0,0,0,0])` — 14-byte space-padded filename, zero offset
+2. Device responds `Ack(0x0B)` = "ready"
+3. Device streams `AudioChunk` packets on B0B3/B0B4
+4. Device sends second `Ack(0x0B)` = end-of-file
+5. **Do not send any confirm/continue packet** — one request, device sends complete file
+
+**MTU:** Must request MTU 512 before service discovery (`gatt.requestMtu(512)` → `onMtuChanged` → `gatt.discoverServices()`). Without this, device may not stream audio chunks.
+
+**File list `sizeBytes` field is NOT in bytes** — it appears to be raw PCM sample count or some other unit. Do not use it for size comparison. Trust the actual bytes received; a clean `Ack(0x0B)` after data = complete file.
+
+**ADB test automation:**
+```powershell
+# Trigger sync:
+adb shell am broadcast -a com.daedalus.notes.SYNC -n com.daedalus.notes/.AdbReceiver
+# Start/stop recording:
+adb shell am broadcast -a com.daedalus.notes.START_RECORDING -n com.daedalus.notes/.AdbReceiver
+adb shell am broadcast -a com.daedalus.notes.STOP_RECORDING -n com.daedalus.notes/.AdbReceiver
+# Trigger analysis for a specific file:
+adb shell am broadcast -a com.daedalus.notes.ANALYZE --es filename "20260524213434.mp3" -n com.daedalus.notes/.AdbReceiver
+```
+`AdbReceiver` (exported manifest receiver) re-broadcasts to same package UID, bypassing `RECEIVER_NOT_EXPORTED` on MainActivity's dynamic receiver.
 
 ### 3. File System & Storage
-- **USB-First:** Audio files are accessed directly from the recorder's exFAT filesystem (typically mounted at `/media/.../RECORD/`).
-- **Android SAF:** On Android, use Storage Access Framework (SAF) for USB OTG access.
+- **BLE-First:** Audio files are downloaded via BLE (cmd=0x0B) into `getExternalFilesDir(null)/Recordings/`. USB OTG path is legacy/fallback only.
+- **Android SAF:** On Android, use Storage Access Framework (SAF) for USB OTG access if needed.
 
 ## Architecture
 
@@ -53,7 +95,7 @@ This file provides foundational mandates, architecture, and workflows for the `n
 
 ### Android Structure
 - `android/app/src/main/java/com/daedalus/notes/`:
-    - `ai/`: Local LLM and Whisper services.
+    - `ai/`: Local LLM (Gemma 3) and Transcription (Whisper) services.
     - `ble/`: Bluetooth management and FW920 protocol.
     - `ui/`: Compose screens and components.
     - `viewmodel/`: State management for UI.
@@ -82,7 +124,22 @@ python3 -m pytest tests/ -v
 
 ### Android Development
 - Open the `android/` directory in Android Studio.
-- Ensure `Gemma 4 E4B` model is downloaded/configured for local inference (see `ModelDownloader.kt`).
+- Ensure `Gemma 3 1B` and `Whisper base.en` models are downloaded (see `ModelDownloader.kt` and `WhisperDownloader.kt`).
+
+### Testing (Android)
+```bash
+cd android
+# Run Unit Tests
+.\gradlew :app:testDebugUnitTest
+
+# Run Instrumented (UI) Tests
+.\gradlew :app:connectedDebugAndroidTest
+```
+Maintain the regression test suite:
+- `HomeScreenTest.kt`: Core UI flows and selection mode.
+- `GlobalMindMapScreenTest.kt`: Knowledge Graph rendering.
+- `SmartAnalysisParserTest.kt`: AI response normalization.
+- `RecordingDaoTest.kt`: Database integrity.
 
 ## Engineering Principles
 
@@ -98,4 +155,6 @@ python3 -m pytest tests/ -v
 - **Explicit Types:** Use Python type hints and Kotlin's strong typing system rigorously.
 - **Interactive CLI:** Use `rich` for all user-facing CLI output to ensure a polished experience.
 - **Visuals:** Android UI should follow modern Material 3 guidelines, prioritizing responsiveness and accessible design.
+- **Accessibility & Testability:** Prefer rendering UI nodes as Composables (e.g., `Text`) over direct `Canvas.drawText` to ensure they are discoverable by the semantics tree and screen readers.
 - **Cleanup:** Only remove imports, variables, or functions that your changes made obsolete. Do not delete pre-existing dead code unless explicitly asked.
+

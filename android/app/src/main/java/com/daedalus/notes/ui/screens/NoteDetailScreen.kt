@@ -15,8 +15,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
+import android.content.Intent
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -25,6 +29,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
@@ -44,9 +49,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.filled.PlayArrow
@@ -56,9 +64,10 @@ import androidx.media3.exoplayer.ExoPlayer
 import android.net.Uri
 import android.util.Log
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import java.io.File
-import com.daedalus.notes.ai.CATEGORIES
+import com.daedalus.notes.ui.mindmap.MindMapCanvas
 import com.daedalus.notes.viewmodel.RecordingViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -66,12 +75,24 @@ import com.daedalus.notes.viewmodel.RecordingViewModel
 fun NoteDetailScreen(
     filename: String,
     recordingViewModel: RecordingViewModel,
+    bleManager: com.daedalus.notes.ble.BleManager,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val prefs   = remember { context.getSharedPreferences("daedalus_prefs", android.content.Context.MODE_PRIVATE) }
     val note by recordingViewModel.currentNote.collectAsState()
     val isProcessing by recordingViewModel.isProcessing.collectAsState()
+    val syncProgress by recordingViewModel.syncProgress.collectAsState()
     val aiError by recordingViewModel.aiError.collectAsState()
+    val exportIntent by recordingViewModel.exportIntent.collectAsState()
+
+    // Launch share sheet when export intent is ready
+    LaunchedEffect(exportIntent) {
+        exportIntent?.let {
+            context.startActivity(it)
+            recordingViewModel.clearExportIntent()
+        }
+    }
 
     // Player setup
     val player = remember { ExoPlayer.Builder(context).build() }
@@ -93,18 +114,31 @@ fun NoteDetailScreen(
     }
 
     var selectedTab by remember { mutableIntStateOf(0) }
-    var showCategoryDialog by remember { mutableStateOf(false) }
-    var selectedCategoryId by remember { mutableStateOf(CATEGORIES.lastOrNull()?.id ?: 15) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    var showInNoteSearch by remember { mutableStateOf(false) }
+    var inNoteQuery by remember { mutableStateOf("") }
 
-    if (showCategoryDialog) {
-        CategoryPickerDialog(
-            selectedCategoryId = selectedCategoryId,
-            onConfirm = { categoryId ->
-                selectedCategoryId = categoryId
-                showCategoryDialog = false
-                recordingViewModel.analyze(filename, categoryId)
+    val bleState by bleManager.bleState.collectAsState()
+    val isConnected = bleState.connectionState == com.daedalus.notes.ble.ConnectionState.CONNECTED
+
+    if (showDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Delete recording?") },
+            text = { Text("This will remove the recording from BOTH this app and the FW920 hardware permanently. The device must remain connected.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteDialog = false
+                        recordingViewModel.deleteRecording(filename, bleManager)
+                        onBack()
+                    },
+                    enabled = isConnected
+                ) { Text("Delete") }
             },
-            onDismiss = { showCategoryDialog = false }
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") }
+            }
         )
     }
 
@@ -112,8 +146,13 @@ fun NoteDetailScreen(
         topBar = {
             TopAppBar(
                 title = {
+                    val displayTitle = if (!note?.title.isNullOrBlank()) {
+                        note!!.title
+                    } else {
+                        formatFilename(filename)
+                    }
                     Text(
-                        text = formatFilename(filename),
+                        text = displayTitle,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -121,6 +160,14 @@ fun NoteDetailScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showInNoteSearch = !showInNoteSearch; if (!showInNoteSearch) inNoteQuery = "" }) {
+                        Icon(Icons.Default.Search, contentDescription = "Search in note", tint = MaterialTheme.colorScheme.onPrimary)
+                    }
+                    IconButton(onClick = { showDeleteDialog = true }) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onPrimary)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -176,7 +223,7 @@ fun NoteDetailScreen(
                     }
 
                     Button(
-                        onClick = { showCategoryDialog = true },
+                        onClick = { recordingViewModel.analyze(filename) },
                         enabled = !isProcessing,
                         modifier = Modifier.weight(1f)
                     ) {
@@ -208,14 +255,32 @@ fun NoteDetailScreen(
                 }
             }
 
+            if (showInNoteSearch) {
+                OutlinedTextField(
+                    value = inNoteQuery,
+                    onValueChange = { inNoteQuery = it },
+                    placeholder = { Text("Find in note…") },
+                    leadingIcon = { Icon(Icons.Default.Search, null) },
+                    trailingIcon = {
+                        if (inNoteQuery.isNotEmpty()) {
+                            IconButton(onClick = { inNoteQuery = "" }) {
+                                Icon(Icons.Default.Close, null)
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    singleLine = true
+                )
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
                 when (selectedTab) {
-                    0 -> TranscriptTab(transcript)
-                    1 -> SummaryTab(summary)
+                    0 -> TranscriptTab(transcript, inNoteQuery)
+                    1 -> SummaryTab(summary, inNoteQuery)
                     2 -> MindMapTab(mindMap)
                 }
             }
@@ -224,7 +289,7 @@ fun NoteDetailScreen(
 }
 
 @Composable
-private fun TranscriptTab(transcript: String) {
+private fun TranscriptTab(transcript: String, query: String) {
     if (transcript.isEmpty()) {
         PlaceholderText("Tap 'Analyze' to transcribe this recording.")
     } else {
@@ -234,7 +299,7 @@ private fun TranscriptTab(transcript: String) {
                 .verticalScroll(rememberScrollState())
         ) {
             Text(
-                text = transcript,
+                text = highlightMatches(transcript, query),
                 style = MaterialTheme.typography.bodyMedium
             )
         }
@@ -242,21 +307,30 @@ private fun TranscriptTab(transcript: String) {
 }
 
 @Composable
-private fun SummaryTab(summary: String) {
+private fun SummaryTab(summary: String, query: String) {
     if (summary.isEmpty()) {
         PlaceholderText("No summary yet. Tap 'Analyze' to generate one.")
     } else {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = prettyPrintJson(summary),
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Monospace
-                )
-            )
+            val sections = parseSummarySections(summary)
+            if (sections.isEmpty()) {
+                Text(highlightMatches(summary, query), style = MaterialTheme.typography.bodyMedium)
+            } else {
+                sections.forEach { (key, value) ->
+                    Text(
+                        text = key,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(text = highlightMatches(value, query), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
         }
     }
 }
@@ -266,16 +340,7 @@ private fun MindMapTab(mindMap: String) {
     if (mindMap.isEmpty()) {
         PlaceholderText("No mind map yet. Tap 'Analyze' to generate one.")
     } else {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-        ) {
-            Text(
-                text = mindMap,
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
+        MindMapCanvas(markdown = mindMap)
     }
 }
 
@@ -293,66 +358,39 @@ private fun PlaceholderText(message: String) {
     }
 }
 
-@Composable
-private fun CategoryPickerDialog(
-    selectedCategoryId: Int,
-    onConfirm: (Int) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var currentId by remember { mutableStateOf(selectedCategoryId) }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                text = "Select Category",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold
-            )
-        },
-        text = {
-            Column(
-                modifier = Modifier
-                    .selectableGroup()
-                    .verticalScroll(rememberScrollState())
-            ) {
-                CATEGORIES.forEach { category ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .selectable(
-                                selected = currentId == category.id,
-                                onClick = { currentId = category.id },
-                                role = Role.RadioButton
-                            )
-                            .padding(horizontal = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = currentId == category.id,
-                            onClick = null
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = category.name,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
+/**
+ * Turns a JSON summary blob into readable (header, text) pairs.
+ * Falls back to empty list if the input isn't JSON-like.
+ */
+private fun parseSummarySections(raw: String): List<Pair<String, String>> {
+    val trimmed = raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+    if (!trimmed.startsWith("{")) return emptyList()
+    return try {
+        val sections = mutableListOf<Pair<String, String>>()
+        // Simple regex-based extraction: "key": value (string or array)
+        val fieldRegex = Regex(""""(\w+)"\s*:\s*("(?:[^"\\]|\\.)*"|\[[\s\S]*?]|\{[\s\S]*?})""")
+        fieldRegex.findAll(trimmed).forEach { match ->
+            val key = match.groupValues[1]
+                .replace('_', ' ')
+                .replaceFirstChar { it.uppercase() }
+            val valueRaw = match.groupValues[2].trim()
+            val value = when {
+                valueRaw.startsWith('"') -> valueRaw.removeSurrounding("\"").replace("\\n", "\n").replace("\\\"", "\"")
+                valueRaw.startsWith('[') -> {
+                    // Extract strings from array
+                    Regex(""""([^"\\]*)"""").findAll(valueRaw)
+                        .map { "• ${it.groupValues[1]}" }
+                        .joinToString("\n")
                 }
+                else -> valueRaw
             }
-        },
-        confirmButton = {
-            Button(onClick = { onConfirm(currentId) }) {
-                Text("Analyze")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
+            if (value.isNotBlank()) sections.add(key to value)
         }
-    )
+        sections
+    } catch (_: Exception) {
+        emptyList()
+    }
 }
 
 private fun formatFilename(filename: String): String {
@@ -362,44 +400,19 @@ private fun formatFilename(filename: String): String {
     return "$year-$month-$day $hour:$min:$sec"
 }
 
-/** Naive JSON pretty-printer without pulling in an extra library. */
-private fun prettyPrintJson(raw: String): String {
-    return try {
-        val sb = StringBuilder()
-        var indent = 0
-        var inString = false
-        var escape = false
-        for (ch in raw.trim()) {
-            when {
-                escape -> {
-                    sb.append(ch)
-                    escape = false
-                }
-                ch == '\\' && inString -> {
-                    sb.append(ch)
-                    escape = true
-                }
-                ch == '"' -> {
-                    inString = !inString
-                    sb.append(ch)
-                }
-                inString -> sb.append(ch)
-                ch == '{' || ch == '[' -> {
-                    indent++
-                    sb.append(ch).append('\n').append("  ".repeat(indent))
-                }
-                ch == '}' || ch == ']' -> {
-                    indent--
-                    sb.append('\n').append("  ".repeat(indent)).append(ch)
-                }
-                ch == ',' -> sb.append(ch).append('\n').append("  ".repeat(indent))
-                ch == ':' -> sb.append(": ")
-                ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t' -> { /* skip raw whitespace */ }
-                else -> sb.append(ch)
-            }
+private fun highlightMatches(text: String, query: String): AnnotatedString = buildAnnotatedString {
+    if (query.isBlank()) { append(text); return@buildAnnotatedString }
+    var start = 0
+    val lower = text.lowercase()
+    val q = query.lowercase()
+    while (true) {
+        val idx = lower.indexOf(q, start)
+        if (idx < 0) { append(text.substring(start)); break }
+        append(text.substring(start, idx))
+        withStyle(SpanStyle(background = Color(0xFFFFFF00), color = Color.Black)) {
+            append(text.substring(idx, idx + q.length))
         }
-        sb.toString()
-    } catch (_: Exception) {
-        raw
+        start = idx + q.length
     }
 }
+

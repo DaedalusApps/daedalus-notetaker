@@ -8,6 +8,8 @@ class RecordingRepository(private val dao: RecordingDao) {
 
     val allRecordings: Flow<List<Recording>> = dao.getAllFlow()
 
+    fun search(query: String): Flow<List<Recording>> = dao.searchFlow(query)
+
     suspend fun get(filename: String): Recording? = dao.get(filename)
 
     suspend fun save(recording: Recording) = dao.upsert(recording)
@@ -17,8 +19,26 @@ class RecordingRepository(private val dao: RecordingDao) {
         dao.upsert(r.copy(transcript = transcript))
     }
 
-    suspend fun updateSummary(filename: String, summary: String, mindMap: String) {
+    suspend fun delete(recording: Recording) = dao.delete(recording)
+
+    suspend fun updateTitleAndSummary(filename: String, title: String, shortSummary: String) =
+        dao.updateTitleAndSummary(filename, title, shortSummary)
+
+    suspend fun updateSummary(
+        filename: String,
+        summary: String,
+        mindMap: String,
+        title: String = "",
+        shortSummary: String = "",
+        topics: List<String> = emptyList()
+    ) {
         val r = dao.get(filename) ?: Recording(filename = filename)
-        dao.upsert(r.copy(summary = summary, mindMap = mindMap))
+        dao.upsert(r.copy(
+            summary = summary,
+            mindMap = mindMap,
+            title = title,
+            shortSummary = shortSummary,
+            topics = topics
+        ))
     }
 }

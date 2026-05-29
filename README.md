@@ -1,76 +1,95 @@
-# Daedalus Notetaker
+# Daedalus Notes
 
-Companion application for the **ELVANZA FW920** (HUXGO OEM) AI voice recorder.
+An Android companion app for the **ELVANZA FW920** voice recorder. Syncs recordings over BLE, transcribes them on-device with Whisper, and generates AI summaries and mind maps with Gemma 3 — no cloud required.
 
-## Overview
+## Features
 
-Daedalus Notetaker bridge the gap between your physical voice recorder and AI-powered insights. It provides a seamless workflow for controlling your device via Bluetooth, importing recordings over USB, and generating high-quality transcripts, summaries, and mind maps.
+- **BLE Sync** — Download recordings wirelessly from the FW920, skipping files already on-device
+- **On-Device Transcription** — Whisper base.en via sherpa-onnx; audio never leaves your phone
+- **AI Analysis** — Gemma 3 1B generates a title, summary, topics, and a structured mind map per recording
+- **Knowledge Graph** — Visualize connections across all recordings by shared topics
+- **Full-Text Search** — Search across all transcripts and summaries
+- **Export** — Share notes as Markdown
 
-The project is developed in two phases:
-1.  **Phase 1:** A robust Python CLI prototype for rapid protocol validation and desktop-class processing.
-2.  **Phase 2:** A native Android application (Kotlin/Compose) for on-device inference and mobile-first convenience.
+## Requirements
 
-## Key Features
+| | |
+|---|---|
+| **Hardware** | ELVANZA FW920 (HUXGO OEM) voice recorder |
+| **Android** | ARM64, API 26+ (Android 8.0), Bluetooth LE |
+| **Storage** | ~750 MB free (Gemma 3 1B: ~555 MB · Whisper base.en: ~160 MB) |
 
--   **BLE Remote Control:** Start, stop, and pause recordings directly from your phone or computer.
--   **Local Transcription:** Uses `openai-whisper` (desktop) and `whisper.cpp` (Android) for 100% private, local transcription. **Audio never leaves your device.**
--   **AI Analysis:** 
-    *   15 specialized recording categories (Medical, Legal, Meetings, Education, etc.).
-    *   Automatic summarization, action item extraction, and perspective analysis.
-    *   Interactive mind map generation (Markdown/Mermaid).
-- **On-Device AI (Android):** Powered by Google MediaPipe and Gemma models. Downloads are optimized via community mirrors for seamless, authenticated-free setup.
-- **Build Transparency:** Current version and build number are clearly displayed in the Settings screen.
-- **Multi-Format Export:** Export to Markdown, PDF, DOCX, and SRT (timestamps).
+Tested on Samsung Galaxy S24 Ultra.
 
--   **Cloud Sync:** Optional Google Drive synchronization.
+## Setup
+
+1. Open the `android/` folder in Android Studio (Hedgehog or newer)
+2. Build and run on your device, or via the command line:
+   ```bash
+   # Windows
+   cd android && .\gradlew installDebug
+
+   # macOS / Linux
+   cd android && ./gradlew installDebug
+   ```
+3. On first launch the app will prompt you to download the AI models from Settings:
+   - **Gemma 3 1B** (~555 MB) — on-device summarization
+   - **Whisper base.en** (~160 MB) — on-device speech-to-text
+4. Power on the FW920 — the app scans and connects automatically via BLE
+
+## How It Works
+
+```
+FW920 recorder ──BLE──► Android app
+                              │
+                         Whisper STT
+                         (on-device)
+                              │
+                         Gemma 3 1B
+                         (on-device)
+                              │
+                   Title · Summary · Topics
+                         Mind Map
+```
+
+All processing is local. No data is sent to external servers.
+
+## Tech Stack
+
+| Component | Technology |
+|---|---|
+| UI | Jetpack Compose + Material 3 |
+| Architecture | MVVM · Room · StateFlow |
+| On-device LLM | MediaPipe 0.10.35 + Gemma 3 1B (`.task` format) |
+| Transcription | sherpa-onnx 1.13.2 + Whisper base.en int8 ONNX |
+| BLE | Android BluetoothLE — custom FW920 protocol |
+| Database | Room 2.6.1 + SQLite WAL |
+| Build | AGP 8.7.3 · Kotlin 2.0.21 · JDK 21 |
 
 ## Project Structure
 
--   `src/`: Python source code (Phase 1).
--   `android/`: Kotlin/Jetpack Compose Android project (Phase 2).
--   `scripts/`: BLE protocol discovery and reverse-engineering tools.
--   `reverse/`: Analysis artifacts from device firmware and OEM app.
-
-## Getting Started (Python CLI)
-
-### Prerequisites
--   Python 3.13+
--   `ffmpeg` (for audio processing)
-
-### Setup
-1.  Clone the repository.
-2.  Install dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
-3.  Configure your environment:
-    ```bash
-    cp .env.example .env
-    # Add your ANTHROPIC_API_KEY for cloud analysis
-    ```
-
-### Usage
-```bash
-# Scan for the recorder
-python src/cli.py scan
-
-# Start a recording via BLE
-python src/cli.py record start
-
-# Process a recording from the USB drive
-python src/cli.py process /media/user/RECORD/REC001.MP3
+```
+android/     Kotlin/Compose Android app (primary)
+src/         Python CLI prototype — BLE exploration & desktop processing
+reverse/     FW920 protocol reverse-engineering notes and tools
 ```
 
-## Getting Started (Android)
+## Building
 
-1.  Open the `android/` directory in Android Studio.
-2.  Build and install the APK on an ARM64 device (e.g., S24 Ultra).
-3.  Follow the in-app prompts to download the local Gemma AI model (~1.4GB - 2.5GB).
+Requires Android SDK 35 and JDK 21.
 
-## Documentation
+```bash
+cd android
+.\gradlew assembleDebug    # debug APK
+.\gradlew assembleRelease  # release APK (ADB debug hooks disabled)
+```
 
-For detailed architectural mandates and development workflows, see [GEMINI.md](./GEMINI.md).
+## Notes
+
+- The FW920 uses a proprietary BLE GATT profile. Protocol details are documented in [`reverse/`](./reverse/).
+- The Python CLI in `src/` is a Phase 1 prototype used for initial BLE discovery; the Android app is the primary product.
+- ADB broadcast commands (`ANALYZE`, `SYNC`, etc.) are only active in debug builds and disabled in release.
 
 ## License
 
-[MIT License](LICENSE) (or your preferred license)
+MIT

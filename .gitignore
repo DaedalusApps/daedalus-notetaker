@@ -27,3 +27,31 @@ reverse/*.apk
 reverse/xapk_contents/
 reverse/arm_native/
 reverse/libapp_strings.txt
+reverse/*.log
+dev/
+
+# Databases & WAL files (user data — never commit)
+*.db
+*.db-wal
+*.db-shm
+*_b64.txt
+
+# Build & log artifacts
+build.log
+*.log
+
+# Android device state dumps (generated during development/testing)
+android/backup.ab
+ui*.xml
+state*.xml
+list*.xml
+selection.xml
+post_delete.xml
+sync_result.xml
+window*.xml
+window_dump.xml
+screen_*.png
+
+# Internal development plan files
+android/*_PLAN.md
+

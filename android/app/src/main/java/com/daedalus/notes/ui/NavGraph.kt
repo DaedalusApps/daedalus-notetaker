@@ -1,20 +1,20 @@
 package com.daedalus.notes.ui
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
-import com.daedalus.notes.ai.modelFile
-import com.daedalus.notes.ai.selectedModel
-import com.daedalus.notes.ui.screens.DeviceScreen
+import com.daedalus.notes.ui.screens.GlobalMindMapScreen
+import com.daedalus.notes.ui.screens.HomeScreen
 import com.daedalus.notes.ui.screens.ModelDownloadScreen
 import com.daedalus.notes.ui.screens.NoteDetailScreen
-import com.daedalus.notes.ui.screens.RecordingsScreen
+import com.daedalus.notes.ui.screens.PromptEditorScreen
 import com.daedalus.notes.ui.screens.SettingsScreen
+import com.daedalus.notes.ui.screens.SplashScreen
 import com.daedalus.notes.viewmodel.DeviceViewModel
 import com.daedalus.notes.viewmodel.RecordingViewModel
 
@@ -24,34 +24,40 @@ fun NavGraph(
     deviceViewModel: DeviceViewModel,
     recordingViewModel: RecordingViewModel
 ) {
-    val context    = LocalContext.current
-    val modelReady = remember { modelFile(context, selectedModel(context).id).exists() }
-    val start      = if (modelReady) "device" else "model_download"
+    NavHost(navController = navController, startDestination = "splash") {
 
-    NavHost(navController = navController, startDestination = start) {
+        composable("splash") {
+            SplashScreen { modelReady ->
+                navController.navigate(if (modelReady) "home" else "model_download") {
+                    popUpTo("splash") { inclusive = true }
+                }
+            }
+        }
 
         composable("model_download") {
             ModelDownloadScreen(
                 onReady = {
-                    navController.navigate("device") {
+                    navController.navigate("home") {
                         popUpTo("model_download") { inclusive = true }
                     }
                 }
             )
         }
 
-        composable("device") {
-            DeviceScreen(
+        composable("home") {
+            HomeScreen(
                 viewModel = deviceViewModel,
-                onNavigateToRecordings = { navController.navigate("recordings") },
+                recordingViewModel = recordingViewModel,
+                onNavigateToNote = { filename -> navController.navigate("note/$filename") },
+                onNavigateToGlobalMindMap = { navController.navigate("global_mind_map") },
                 onNavigateToSettings = { navController.navigate("settings") }
             )
         }
 
-        composable("recordings") {
-            RecordingsScreen(
-                viewModel = deviceViewModel,
-                recordingViewModel = recordingViewModel,
+        composable("global_mind_map") {
+            val graph by recordingViewModel.globalGraph.collectAsState()
+            GlobalMindMapScreen(
+                graph = graph,
                 onNavigateToNote = { filename -> navController.navigate("note/$filename") },
                 onBack = { navController.popBackStack() }
             )
@@ -64,12 +70,20 @@ fun NavGraph(
             NoteDetailScreen(
                 filename = backStackEntry.arguments?.getString("filename") ?: "",
                 recordingViewModel = recordingViewModel,
+                bleManager = deviceViewModel.bleManager,
                 onBack = { navController.popBackStack() }
             )
         }
 
         composable("settings") {
-            SettingsScreen(onBack = { navController.popBackStack() })
+            SettingsScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToPromptEditor = { navController.navigate("prompt_editor") }
+            )
+        }
+
+        composable("prompt_editor") {
+            PromptEditorScreen(onBack = { navController.popBackStack() })
         }
     }
 }

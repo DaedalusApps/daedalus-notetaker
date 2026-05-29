@@ -34,6 +34,7 @@ android {
         targetSdk       = 35
         versionCode     = gitCommitCount
         versionName     = vName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -54,6 +55,14 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "META-INF/LICENSE.md"
+            excludes += "META-INF/LICENSE-notice.md"
+        }
     }
 }
 
@@ -86,7 +95,33 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
 
+    // Local speech-to-text (on-device, no internet)
+    implementation("com.alphacephei:vosk-android:0.3.47")
+
+    // Whisper STT via sherpa-onnx (better accuracy, falls back to Vosk if not downloaded)
+    implementation(files("libs/sherpa-onnx-1.13.2.aar"))
+
     implementation(libs.documentfile)
 
     debugImplementation(libs.compose.ui.tooling)
+    debugImplementation(libs.compose.ui.test.manifest)
+
+    testImplementation(libs.junit4)
+    testImplementation(libs.mockk)
+    testImplementation(libs.coroutines.test)
+    testImplementation(libs.androidx.arch.core.testing)
+
+    androidTestImplementation(libs.androidx.test.ext)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.room.testing)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    androidTestImplementation(libs.mockk.android)
+}
+
+// Reinstall the app after instrumented tests (test runner uninstalls it as cleanup)
+tasks.whenTaskAdded {
+    if (name == "connectedDebugAndroidTest") {
+        finalizedBy("installDebug")
+    }
 }

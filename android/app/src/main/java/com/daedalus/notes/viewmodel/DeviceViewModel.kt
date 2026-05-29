@@ -17,14 +17,6 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
 
     fun disconnect() = bleManager.disconnect()
 
-    fun startRecording() = viewModelScope.launch {
-        bleManager.startRecording()
-    }
-
-    fun stopRecording() = viewModelScope.launch {
-        bleManager.stopRecording()
-    }
-
     fun refreshFiles() = viewModelScope.launch {
         bleManager.listFiles()
     }

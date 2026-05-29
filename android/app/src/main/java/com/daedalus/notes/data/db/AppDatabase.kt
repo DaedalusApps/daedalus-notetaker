@@ -4,9 +4,11 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.TypeConverters
 import com.daedalus.notes.data.model.Recording
 
-@Database(entities = [Recording::class], version = 1, exportSchema = false)
+@Database(entities = [Recording::class], version = 5, exportSchema = false)
+@TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun recordingDao(): RecordingDao
@@ -21,7 +23,9 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "daedalus_notes.db"
-                ).build().also { INSTANCE = it }
+                )
+                .fallbackToDestructiveMigration()
+                .build().also { INSTANCE = it }
             }
         }
     }

@@ -3,25 +3,28 @@
 This document tracks the future development of Daedalus Notetaker. Features are categorized by phase and priority.
 
 ## 🚧 Missing Features (by design — deferred)
-- [ ] **On-Device Transcription:** The app can currently summarize, but there is no audio→text pipeline on-device yet. **Whisper.cpp JNI** for Android is required to close this gap.
 - [ ] **Audio Playback:** ExoPlayer is included in dependencies, but the recordings screen does not yet have a functional player.
 - [ ] **Android Export Formats:** Only Markdown is currently wired up. PDF/DOCX exporters (present in Python prototype) need to be ported/implemented for Android.
 
 ## 🧹 Housekeeping
 - [x] **Git Hygiene:** `.gradle/` build cache files were being committed. (Resolved: Updated `.gitignore` and pruned git history).
 - [x] **Android Docs:** Created `android/BUILD.md` to document the Android build process and environment.
+- [x] **Security Audit:** Performed manual audit and cleaned up sensitive temporary files.
+- [x] **App Icon:** Updated to modern adaptive icon with branded microphone vector.
 
 ## 🚀 Active Development (Phase 2: Android)
 
 ### High Priority
+- [x] **On-Device Transcription:** Local speech-to-text via Whisper (sherpa-onnx) is now functional.
 - [ ] **Background Transcription:** Continue processing audio even when the app is in the background or the screen is off.
 - [ ] **Search Engine Optimization:** Full-text search (FTS4) across all transcripts and summaries.
 - [ ] **Real-time BLE Status:** Persistent notification showing battery level and recording status of the physical device.
 
 ### Medium Priority
+- [x] **Interactive Mind Maps:** Knowledge Graph with zoom/pan and node interactivity is functional.
 - [ ] **Multi-Speaker Diarization:** Identify and label different speakers in the transcript using local AI.
-- [ ] **Interactive Mind Maps:** Pan and zoom interface for Mermaid/Markdown mind maps.
 - [ ] **Batch Processing:** Ability to select multiple recordings for transcription and analysis in one go.
+- [x] **Regression Testing:** Automated test suite for Home, Global Mind Map, and AI parsing logic.
 
 ## 🗺️ Future Milestones (Phase 3+)
 

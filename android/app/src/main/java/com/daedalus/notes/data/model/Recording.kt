@@ -12,5 +12,9 @@ data class Recording(
     val summary: String = "",
     val mindMap: String = "",
     val category: Int = 1,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val title: String = "",
+    val shortSummary: String = "",
+    val topics: List<String> = emptyList(),
+    val durationMillis: Long = 0
 )

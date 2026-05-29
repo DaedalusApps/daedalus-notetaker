@@ -1,0 +1,136 @@
+package com.daedalus.notes
+
+import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.createComposeRule
+import com.daedalus.notes.ble.BleManager
+import com.daedalus.notes.ble.BleState
+import com.daedalus.notes.ble.ConnectionState
+import com.daedalus.notes.data.model.Recording
+import com.daedalus.notes.ui.screens.HomeScreen
+import com.daedalus.notes.ui.theme.DaedalusTheme
+import com.daedalus.notes.viewmodel.DeviceViewModel
+import com.daedalus.notes.viewmodel.RecordingViewModel
+import io.mockk.every
+import io.mockk.mockk
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+
+class HomeScreenTest {
+
+    @get:Rule
+    val composeTestRule = createComposeRule()
+
+    private val deviceViewModel = mockk<DeviceViewModel>(relaxed = true)
+    private val recordingViewModel = mockk<RecordingViewModel>(relaxed = true)
+    private val bleManager = mockk<BleManager>(relaxed = true)
+
+    private val bleStateFlow = MutableStateFlow(BleState())
+    private val filteredRecordingsFlow = MutableStateFlow<List<Recording>>(emptyList())
+    private val searchQueryFlow = MutableStateFlow("")
+    private val syncProgressFlow = MutableStateFlow<String?>(null)
+
+    @Before
+    fun setup() {
+        every { deviceViewModel.bleManager } returns bleManager
+        every { bleManager.bleState } returns bleStateFlow
+        every { recordingViewModel.filteredRecordings } returns filteredRecordingsFlow
+        every { recordingViewModel.searchQuery } returns searchQueryFlow
+        every { recordingViewModel.syncProgress } returns syncProgressFlow
+    }
+
+    @Test
+    fun homeScreen_disconnected_showsNotConnectedBanner() {
+        bleStateFlow.value = BleState(connectionState = ConnectionState.DISCONNECTED)
+
+        composeTestRule.setContent {
+            DaedalusTheme {
+                HomeScreen(
+                    viewModel = deviceViewModel,
+                    recordingViewModel = recordingViewModel,
+                    onNavigateToNote = {},
+                    onNavigateToGlobalMindMap = {},
+                    onNavigateToSettings = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("FW920 not connected").assertIsDisplayed()
+    }
+
+    @Test
+    fun homeScreen_connected_showsDeviceStatusRow() {
+        bleStateFlow.value = BleState(
+            connectionState = ConnectionState.CONNECTED,
+            batteryPct = 85
+        )
+
+        composeTestRule.setContent {
+            DaedalusTheme {
+                HomeScreen(
+                    viewModel = deviceViewModel,
+                    recordingViewModel = recordingViewModel,
+                    onNavigateToNote = {},
+                    onNavigateToGlobalMindMap = {},
+                    onNavigateToSettings = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("FW920").assertIsDisplayed()
+        composeTestRule.onNodeWithText("85%").assertIsDisplayed()
+    }
+
+    @Test
+    fun homeScreen_recordingCard_displaysTitle_and_summary() {
+        val recording = Recording(
+            filename = "20260524213434.mp3",
+            title = "Project Meeting",
+            shortSummary = "Discussed the new global mind map."
+        )
+        filteredRecordingsFlow.value = listOf(recording)
+
+        composeTestRule.setContent {
+            DaedalusTheme {
+                HomeScreen(
+                    viewModel = deviceViewModel,
+                    recordingViewModel = recordingViewModel,
+                    onNavigateToNote = {},
+                    onNavigateToGlobalMindMap = {},
+                    onNavigateToSettings = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Project Meeting").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Discussed the new global mind map.").assertIsDisplayed()
+    }
+
+    @Test
+    fun homeScreen_longPress_entersSelectionMode() {
+        val recording1 = Recording(filename = "file1.mp3", title = "Note 1")
+        val recording2 = Recording(filename = "file2.mp3", title = "Note 2")
+        filteredRecordingsFlow.value = listOf(recording1, recording2)
+
+        composeTestRule.setContent {
+            DaedalusTheme {
+                HomeScreen(
+                    viewModel = deviceViewModel,
+                    recordingViewModel = recordingViewModel,
+                    onNavigateToNote = {},
+                    onNavigateToGlobalMindMap = {},
+                    onNavigateToSettings = {}
+                )
+            }
+        }
+
+        // Long press first item
+        composeTestRule.onNodeWithText("Note 1").performTouchInput { longClick() }
+
+        // Assert selection mode UI
+        composeTestRule.onNodeWithText("1 selected").assertIsDisplayed()
+        composeTestRule.onAllNodesWithContentDescription("Select item").onFirst().assertExists()
+        composeTestRule.onAllNodesWithContentDescription("Select item")[0].assertIsOn()
+    }
+}

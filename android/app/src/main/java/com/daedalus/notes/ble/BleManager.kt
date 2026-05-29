@@ -73,6 +73,7 @@ class BleManager(private val context: Context) {
     private var bluetoothGatt: BluetoothGatt? = null
     private var writeChar: BluetoothGattCharacteristic? = null
     private var leScanner: BluetoothLeScanner? = null
+    private var pollJob: kotlinx.coroutines.Job? = null
 
     /** Single-consumer channel; responses flow here from onCharacteristicChanged. */
     private val responseChannel = Channel<ParsedResponse>(capacity = Channel.UNLIMITED)
@@ -148,6 +149,7 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     fun disconnect() {
+        stopPoller()
         bluetoothGatt?.disconnect()
         bluetoothGatt?.close()
         bluetoothGatt = null
@@ -164,9 +166,10 @@ class BleManager(private val context: Context) {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    gatt.discoverServices()
+                    gatt.requestMtu(512)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    stopPoller()
                     writeChar = null
                     bluetoothGatt?.close()
                     bluetoothGatt = null
@@ -213,6 +216,11 @@ class BleManager(private val context: Context) {
                 Log.i("BleManager", "All notifications enabled, starting init sequence")
                 runInitSequence()
             }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            Log.i("BleManager", "MTU changed to $mtu (status=$status)")
+            gatt.discoverServices()
         }
 
         override fun onDescriptorWrite(
@@ -267,23 +275,28 @@ class BleManager(private val context: Context) {
         Log.d("BleManager", "RX [${data.size}b]: $hex")
         val parsed = parseResponse(data) ?: return
         Log.d("BleManager", "RX parsed: $parsed")
-        // Eagerly update state for status and file-list responses
+        
+        // Eagerly update state based on parsed response
         when (parsed) {
             is ParsedResponse.Serial  -> _bleState.update { it.copy(deviceSerial = parsed.value) }
             is ParsedResponse.FwVersion -> _bleState.update { it.copy(fwVersion = parsed.value) }
-            is ParsedResponse.Status  -> mergeStatus(parsed.status)
+            is ParsedResponse.Status  -> mergeStatus(parsed)
+            is ParsedResponse.RecordingStarted -> _bleState.update { it.copy(isRecording = true) }
+            is ParsedResponse.RecordingStopped -> _bleState.update { it.copy(isRecording = false) }
             else -> Unit
         }
         responseChannel.trySend(parsed)
     }
 
-    private fun mergeStatus(s: DeviceStatus) {
+    private fun mergeStatus(resp: ParsedResponse.Status) {
+        val s = resp.status
         _bleState.update { current ->
             current.copy(
                 batteryPct     = if (s.batteryPct > 0) s.batteryPct else current.batteryPct,
                 storageFreeKb  = if (s.storageFreeKb > 0) s.storageFreeKb else current.storageFreeKb,
                 storageTotalKb = if (s.storageTotalKb > 0) s.storageTotalKb else current.storageTotalKb,
-                isRecording    = s.isRecording,
+                // Never update isRecording from status polls — only CMD 0x06/0x08 events are reliable.
+                isRecording    = current.isRecording,
                 fwVersion      = if (s.fwName.isNotEmpty()) s.fwName else current.fwVersion
             )
         }
@@ -332,14 +345,30 @@ class BleManager(private val context: Context) {
         if (bluetoothGatt != null) {
             Log.i("BleManager", "runInitSequence: complete, marking CONNECTED")
             _bleState.update { it.copy(connectionState = ConnectionState.CONNECTED) }
+            startPoller()
         } else {
             Log.w("BleManager", "runInitSequence: gatt is null after init — device disconnected mid-sequence")
         }
     }
 
-    /** Polls CMD 0x0F to sync the actual recording state from the device. */
+    private fun startPoller() {
+        stopPoller()
+        pollJob = scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(15000L)
+                refreshStatus()
+            }
+        }
+    }
+
+    private fun stopPoller() {
+        pollJob?.cancel()
+        pollJob = null
+    }
+
+    /** Polls CMD 0x05 to sync the actual recording state from the device. */
     suspend fun refreshRecordingStatus() {
-        sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
+        refreshStatus()
     }
 
     // ------------------------------------------------------------------
@@ -493,78 +522,97 @@ class BleManager(private val context: Context) {
     // Public suspend methods
     // ------------------------------------------------------------------
 
-    suspend fun startRecording(): Boolean {
-        Log.i("BleManager", "startRecording: gatt=${bluetoothGatt != null} writeChar=${writeChar != null}")
-        if (writeChar == null || bluetoothGatt == null) return false
-        sendPacket(PKT_START_RECORDING)
-        // Optimistic update — device starts recording immediately on CMD 0x06; ACK is optional
-        _bleState.update { it.copy(isRecording = true) }
-        // Wait briefly for optional confirmation (don't require it)
-        val response = withTimeoutOrNull(2000L) { awaitResponse(0x06) }
-        Log.i("BleManager", "startRecording: optional confirmation=$response")
-        return true
-    }
-
-    suspend fun stopRecording(): Boolean {
-        Log.i("BleManager", "stopRecording")
-        val stopResp = sendAndAwait(PKT_STOP_RECORDING, expectedCmd = 0x08)
-        Log.i("BleManager", "stopRecording: response=$stopResp")
-        if (stopResp is ParsedResponse.RecordingStopped) {
-            sendAndAwait(PKT_CONFIRM_DONE, expectedCmd = 0x07)
-        }
-        // Always clear recording state — user intent was to stop, even if device
-        // already stopped (auto-stop on full storage, timeout, etc.)
-        _bleState.update { it.copy(isRecording = false) }
-        return stopResp is ParsedResponse.RecordingStopped
-    }
-
     suspend fun refreshStatus() {
         sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
+    }
+
+    suspend fun deleteFile(filename: String): Boolean {
+        Log.i("BleManager", "deleteFile: '$filename'")
+        // Two-phase delete: first 0x0D stages (payload=[0]), second 0x0D commits (payload=[1])
+        val stage = sendAndAwait(buildDeleteFile(filename), expectedCmd = 0x0D)
+        Log.i("BleManager", "deleteFile: stage=$stage")
+        val commit = sendAndAwait(buildDeleteFile(filename), expectedCmd = 0x0D)
+        Log.i("BleManager", "deleteFile: commit=$commit")
+        val deleted = commit is ParsedResponse.Unknown &&
+                commit.cmd == 0x0D &&
+                commit.payload.firstOrNull()?.toInt() == 1
+        if (!deleted) {
+            Log.w("BleManager", "deleteFile: commit failed, payload=${
+                (commit as? ParsedResponse.Unknown)?.payload?.toList()}")
+            return false
+        }
+        collectFileList()
+        val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
+        val stillPresent = _bleState.value.files.any { it.filename.equals(cleanName, ignoreCase = true) }
+        Log.i("BleManager", "deleteFile: stillPresent=$stillPresent")
+        return !stillPresent
     }
 
     suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? {
         val context = this.context
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
-        
-        // Command 0x06 with payload 0x10 0x00 + filename is used for download
-        val payload = byteArrayOf(0x10.toByte(), 0x00.toByte()) + 
-                     cleanName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
-        val downloadPkt = buildPacket(0x06, payload)
-        
+        val nameBytes = cleanName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
+
         val localDir = File(context.getExternalFilesDir(null), "Recordings").also { it.mkdirs() }
-        val safeName = File(cleanName).name + ".mp3"  // strip any path components from BLE-supplied name
+        val safeName = File(cleanName).name + ".mp3"
         val localFile = File(localDir, safeName).also { it.delete() }
 
-        sendPacket(downloadPkt)
-        
         var totalBytes = 0L
         val fos = FileOutputStream(localFile)
-        
+
+        // Protocol: send CMD 0x0B → device responds Ack(0x0B) "ready" → streams AudioChunks →
+        // signals Ack(0x0B) again when done. We treat the second Ack(0x0B) (after data) as EOF.
         try {
-            // Monitor B0B3 chunks and CMD 0x07 (Done)
-            val timeoutMs = 10000L // 10s of no data = stop
+            val pkt = buildPacket(0x0B, nameBytes + byteArrayOf(0x00, 0x00, 0x00, 0x00))
+            Log.i("BleManager", "downloadFile: CMD 0x0B '$cleanName'")
+            sendPacket(pkt)
+
+            var readyReceived = false
+            val timeoutMs = 10000L
             var lastDataTime = System.currentTimeMillis()
 
-            while (System.currentTimeMillis() - lastDataTime < timeoutMs) {
-                val response = withTimeoutOrNull(2000) { responseChannel.receive() } ?: continue
-                
+            outer@ while (System.currentTimeMillis() - lastDataTime < timeoutMs) {
+                val response = withTimeoutOrNull(2000) { responseChannel.receive() }
+                if (response == null) {
+                    Log.d("BleManager", "downloadFile: 2s idle, totalBytes=$totalBytes")
+                    continue
+                }
+
                 when (response) {
                     is ParsedResponse.AudioChunk -> {
+                        readyReceived = true
                         fos.write(response.data)
                         totalBytes += response.data.size
                         onProgress(totalBytes)
                         lastDataTime = System.currentTimeMillis()
+                        if (totalBytes % (64 * 1024) < response.data.size) {
+                            Log.d("BleManager", "downloadFile: $totalBytes bytes received")
+                        }
                     }
                     is ParsedResponse.Ack -> {
-                        if (response.cmd == 0x07) break // Transfer done
+                        Log.i("BleManager", "downloadFile: Ack cmd=0x${response.cmd.toString(16)} totalBytes=$totalBytes readyReceived=$readyReceived")
+                        when (response.cmd) {
+                            0x07 -> break@outer
+                            0x0B -> {
+                                if (!readyReceived) {
+                                    // Initial "ready" Ack — keep waiting for data
+                                    readyReceived = false  // stays false until first chunk
+                                    lastDataTime = System.currentTimeMillis()
+                                } else {
+                                    // End-of-file Ack
+                                    break@outer
+                                }
+                            }
+                        }
                     }
-                    else -> Unit
+                    else -> Log.d("BleManager", "downloadFile: unexpected=$response")
                 }
             }
         } finally {
             fos.close()
         }
 
+        Log.i("BleManager", "downloadFile: done '$cleanName', totalBytes=$totalBytes")
         return if (totalBytes > 0) localFile else null
     }
 
@@ -574,11 +622,38 @@ class BleManager(private val context: Context) {
         collectFileList()
     }
 
+    /** Probes CMD range 0x0D–0x17 with a filename payload to find the real delete command. */
+    suspend fun probeDeleteCmds(filename: String) {
+        val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
+        val nameBytes = cleanName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
+        val skipKnown = setOf(0x0F)  // 0x0F is the periodic status update, skip it
+
+        for (cmd in 0x0D..0x17) {
+            if (cmd in skipKnown) continue
+            Log.i("DeleteProbe", "Trying CMD 0x${cmd.toString(16).uppercase()} with filename '$cleanName'")
+            val pkt = buildPacket(cmd, nameBytes)
+            sendPacket(pkt)
+            val resp = withTimeoutOrNull(1500L) { awaitResponse(cmd) }
+            Log.i("DeleteProbe", "CMD 0x${cmd.toString(16).uppercase()} response: $resp")
+            kotlinx.coroutines.delay(300)
+
+            collectFileList()
+            val gone = _bleState.value.files.none { it.filename.equals(cleanName, ignoreCase = true) }
+            Log.i("DeleteProbe", "CMD 0x${cmd.toString(16).uppercase()} file gone=$gone")
+            if (gone) {
+                Log.i("DeleteProbe", "*** FOUND DELETE CMD: 0x${cmd.toString(16).uppercase()} ***")
+                return
+            }
+        }
+        Log.i("DeleteProbe", "No delete command found in 0x0D-0x17 range")
+    }
+
     // ------------------------------------------------------------------
     // File list collector
     // ------------------------------------------------------------------
 
     private suspend fun collectFileList() {
+        Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")
         sendPacket(PKT_LIST_FILES)
         val collected = mutableListOf<FileEntry>()
         val timeoutMs = 5000L
@@ -592,13 +667,18 @@ class BleManager(private val context: Context) {
 
             when (response) {
                 is ParsedResponse.FileList -> {
-                    if (response.entry == null) break   // end-of-list marker
+                    if (response.entry == null) {
+                        Log.i("BleManager", "collectFileList: end-of-list, ${collected.size} files")
+                        break
+                    }
+                    Log.i("BleManager", "collectFileList: entry=${response.entry.filename} ${response.entry.sizeBytes}B")
                     collected.add(response.entry)
                 }
                 else -> break
             }
         }
 
+        Log.i("BleManager", "collectFileList: done, ${collected.size} files")
         _bleState.update { it.copy(files = collected) }
     }
 
