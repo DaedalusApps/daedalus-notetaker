@@ -15,9 +15,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.wifi.WifiManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.Lifecycle
+import com.daedalus.notes.ble.ConnectionState
 import kotlinx.coroutines.launch
 import com.daedalus.notes.ui.NavGraph
 import com.daedalus.notes.ui.theme.DaedalusTheme
@@ -33,12 +36,11 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 "com.daedalus.notes.SYNC" -> {
-                    Log.i("DaedalusADB", "ADB Sync triggered")
-                    recordingViewModel.fullAutoSync()
+                    Log.i("DaedalusADB", "ADB BLE sync triggered")
+                    recordingViewModel.syncAllBleFiles(deviceViewModel.bleManager)
                 }
                 "com.daedalus.notes.PROBE" -> {
                     Log.i("DaedalusADB", "BLE probe triggered")
-                    if (BuildConfig.DEBUG) wifiScan()
                     lifecycleScope.launch {
                         deviceViewModel.bleManager.runProbe()
                     }
@@ -49,17 +51,24 @@ class MainActivity : ComponentActivity() {
                         deviceViewModel.bleManager.runServiceProbe()
                     }
                 }
+                "com.daedalus.notes.PROBE_DELETE" -> {
+                    val filename = intent?.getStringExtra("filename") ?: ""
+                    Log.i("DaedalusADB", "Delete probe triggered for '$filename'")
+                    if (filename.isNotBlank()) {
+                        lifecycleScope.launch {
+                            deviceViewModel.bleManager.probeDeleteCmds(filename)
+                        }
+                    }
+                }
+                "com.daedalus.notes.ANALYZE" -> {
+                    val filename = intent?.getStringExtra("filename") ?: ""
+                    Log.i("DaedalusADB", "Analyze triggered for '$filename'")
+                    if (filename.isNotBlank()) {
+                        lifecycleScope.launch { recordingViewModel.analyze(filename) }
+                    }
+                }
             }
         }
-    }
-
-    private fun wifiScan() {
-        val wifi = getSystemService(Context.WIFI_SERVICE) as WifiManager
-        Log.i("FW920_PROBE", "=== NEARBY WI-FI NETWORKS (cached scan) ===")
-        wifi.scanResults.sortedByDescending { it.level }.forEach { r ->
-            Log.i("FW920_PROBE", "  SSID=\"${r.SSID}\" BSSID=${r.BSSID} ${r.level} dBm")
-        }
-        if (wifi.scanResults.isEmpty()) Log.i("FW920_PROBE", "  (no cached results — check system Wi-Fi scan)")
     }
 
     private val permissionLauncher = registerForActivityResult(
@@ -71,15 +80,31 @@ class MainActivity : ComponentActivity() {
 
         requestRequiredPermissions()
 
-        val filter = IntentFilter().apply {
-            addAction("com.daedalus.notes.SYNC")
-            addAction("com.daedalus.notes.PROBE")
-            addAction("com.daedalus.notes.PROBE2")
+        if (BuildConfig.DEBUG) {
+            val filter = IntentFilter().apply {
+                addAction("com.daedalus.notes.SYNC")
+                addAction("com.daedalus.notes.PROBE")
+                addAction("com.daedalus.notes.PROBE2")
+                addAction("com.daedalus.notes.PROBE_DELETE")
+                addAction("com.daedalus.notes.ANALYZE")
+            }
+            ContextCompat.registerReceiver(this, adbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(adbReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(adbReceiver, filter)
+
+        // Auto-sync on first BLE connect. lastState lives outside repeatOnLifecycle so it
+        // survives stop/start cycles and doesn't re-trigger sync on every app resume.
+        var lastState = ConnectionState.DISCONNECTED
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                deviceViewModel.state.collect { bleState ->
+                    if (bleState.connectionState == ConnectionState.CONNECTED &&
+                        lastState != ConnectionState.CONNECTED) {
+                        Log.i("DaedalusADB", "BLE connected — auto-syncing")
+                        recordingViewModel.syncAllBleFiles(deviceViewModel.bleManager)
+                    }
+                    lastState = bleState.connectionState
+                }
+            }
         }
 
         setContent {

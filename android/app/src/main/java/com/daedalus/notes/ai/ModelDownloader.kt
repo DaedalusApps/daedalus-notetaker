@@ -11,6 +11,7 @@ import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipInputStream
 
 sealed class DownloadState {
     object Idle : DownloadState()
@@ -66,7 +67,34 @@ class ModelDownloader(private val context: Context) {
                         }
                     }
                 }
-                tmpFile.renameTo(destFile)
+                if (model.filename.endsWith(".zip")) {
+                    val outDir = modelsDir(context)
+                    val outDirCanonical = outDir.canonicalPath
+                    ZipInputStream(tmpFile.inputStream()).use { zis ->
+                        var entry = zis.nextEntry
+                        while (entry != null) {
+                            val outFile = File(outDir, entry.name)
+                            // Zip-slip guard: reject entries that escape the output directory
+                            check(outFile.canonicalPath.startsWith(outDirCanonical + File.separator)) {
+                                "Zip entry escapes output directory: ${entry.name}"
+                            }
+                            if (entry.isDirectory) {
+                                outFile.mkdirs()
+                            } else {
+                                outFile.parentFile?.mkdirs()
+                                FileOutputStream(outFile).use { zis.copyTo(it) }
+                            }
+                            entry = zis.nextEntry
+                        }
+                    }
+                    tmpFile.delete()
+                } else {
+                    if (!tmpFile.renameTo(destFile)) {
+                        // renameTo fails across filesystems; fall back to copy then delete
+                        tmpFile.inputStream().use { it.copyTo(destFile.outputStream()) }
+                        tmpFile.delete()
+                    }
+                }
                 _state.value = DownloadState.Done
             }
         } catch (e: Exception) {

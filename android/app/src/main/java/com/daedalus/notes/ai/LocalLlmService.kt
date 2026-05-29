@@ -10,29 +10,30 @@ import android.util.Log
 class LocalLlmService(private val context: Context) {
 
     private var inference: LlmInference? = null
-    private var loadedModelId: String? = null
 
     val isReady: Boolean get() = inference != null
 
-    suspend fun ensureLoaded(modelId: String = selectedModel(context).id) {
-        if (loadedModelId == modelId && inference != null) return
+    suspend fun ensureLoaded() {
+        if (inference != null) return
         withContext(Dispatchers.IO) {
-            Log.i("DaedalusAI", "Loading model: $modelId")
-            inference?.close()
-            inference = null
-            val file = modelFile(context, modelId)
+            val model = selectedModel(context)
+            Log.i("DaedalusAI", "Loading model: ${model.id}")
+            val file = modelFile(context)
             if (!file.exists()) {
                 Log.e("DaedalusAI", "Model file not found: ${file.absolutePath}")
                 error("Model not downloaded: ${file.absolutePath}")
             }
             try {
-                val options = LlmInference.LlmInferenceOptions.builder()
+                val optionsBuilder = LlmInference.LlmInferenceOptions.builder()
                     .setModelPath(file.absolutePath)
-                    .setMaxTokens(4096)
+                    .setMaxTokens(768)
                     .setMaxTopK(40)
-                    .build()
+                if (model.useGpu) {
+                    Log.i("DaedalusAI", "Requesting GPU backend for ${model.id}")
+                    optionsBuilder.setPreferredBackend(LlmInference.Backend.GPU)
+                }
+                val options = optionsBuilder.build()
                 inference = LlmInference.createFromOptions(context, options)
-                loadedModelId = modelId
                 Log.i("DaedalusAI", "Model loaded successfully")
             } catch (e: Exception) {
                 Log.e("DaedalusAI", "Failed to load MediaPipe inference engine", e)
@@ -69,6 +70,5 @@ class LocalLlmService(private val context: Context) {
     fun close() {
         inference?.close()
         inference = null
-        loadedModelId = null
     }
 }
