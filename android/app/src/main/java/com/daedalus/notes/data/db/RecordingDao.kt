@@ -30,6 +30,9 @@ interface RecordingDao {
     @Query("UPDATE recordings SET title = :title, shortSummary = :shortSummary WHERE filename = :filename")
     suspend fun updateTitleAndSummary(filename: String, title: String, shortSummary: String)
 
+    @Query("UPDATE recordings SET embedding = :embedding WHERE filename = :filename")
+    suspend fun updateEmbeddingBytes(filename: String, embedding: ByteArray)
+
     @Delete
     suspend fun delete(recording: Recording)
 }

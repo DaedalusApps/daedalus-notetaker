@@ -14,9 +14,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.daedalus.notes.ai.DownloadState
+import com.daedalus.notes.ai.EMBEDDING_MODEL_FILE
+import com.daedalus.notes.ai.EMBEDDING_MODEL_SIZE_BYTES
+import com.daedalus.notes.ai.EMBEDDING_MODEL_URL
 import com.daedalus.notes.ai.GEMMA3_1B
+import com.daedalus.notes.ai.LocalModel
+import com.daedalus.notes.ai.ModelDownloader
 import com.daedalus.notes.ai.WHISPER_TOTAL_BYTES
 import com.daedalus.notes.ai.WhisperDownloader
+import com.daedalus.notes.ai.embeddingModelFile
 import com.daedalus.notes.ai.isWhisperReady
 import kotlinx.coroutines.launch
 
@@ -33,6 +39,20 @@ fun SettingsScreen(onBack: () -> Unit, onNavigateToPromptEditor: () -> Unit = {}
     val whisperDownloader = remember { WhisperDownloader(context) }
     val whisperState by whisperDownloader.state.collectAsState()
     val whisperReady = remember(whisperState) { isWhisperReady(context) }
+
+    val embeddingModel = remember {
+        LocalModel(
+            id = "use_lite",
+            displayName = "Universal Sentence Encoder Lite",
+            description = "~26 MB · Semantic note search · On-device",
+            downloadUrl = EMBEDDING_MODEL_URL,
+            filename = EMBEDDING_MODEL_FILE,
+            sizeBytes = EMBEDDING_MODEL_SIZE_BYTES
+        )
+    }
+    val embeddingDownloader = remember { ModelDownloader(context) }
+    val embeddingState by embeddingDownloader.state.collectAsState()
+    val embeddingReady = remember(embeddingState) { embeddingModelFile(context).exists() }
 
     Scaffold(
         topBar = {
@@ -92,6 +112,33 @@ fun SettingsScreen(onBack: () -> Unit, onNavigateToPromptEditor: () -> Unit = {}
                         }
                         else -> Button(onClick = { scope.launch { whisperDownloader.download() } }, modifier = Modifier.fillMaxWidth()) {
                             Text("Download (~160 MB)")
+                        }
+                    }
+                }
+            }
+
+            // Embedding model (for semantic Ask Library)
+            Text("Semantic Search Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Card(colors = CardDefaults.cardColors(
+                containerColor = if (embeddingReady) MaterialTheme.colorScheme.primaryContainer
+                                 else MaterialTheme.colorScheme.surfaceVariant
+            )) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(embeddingModel.displayName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text(embeddingModel.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    when {
+                        embeddingReady -> Text("Active — Ask Library enabled", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                        embeddingState is DownloadState.Downloading -> {
+                            val dl = embeddingState as DownloadState.Downloading
+                            LinearProgressIndicator(progress = { dl.progressPct / 100f }, modifier = Modifier.fillMaxWidth())
+                            Text("Downloading… ${dl.progressPct}%  ·  ${dl.bytesDownloaded / 1_048_576} / ${EMBEDDING_MODEL_SIZE_BYTES / 1_048_576} MB", style = MaterialTheme.typography.bodySmall)
+                        }
+                        embeddingState is DownloadState.Failed -> {
+                            Text("Error: ${(embeddingState as DownloadState.Failed).message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                            OutlinedButton(onClick = { scope.launch { embeddingDownloader.download(embeddingModel) } }, modifier = Modifier.fillMaxWidth()) { Text("Retry") }
+                        }
+                        else -> Button(onClick = { scope.launch { embeddingDownloader.download(embeddingModel) } }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Download (~26 MB)")
                         }
                     }
                 }

@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.QuestionAnswer
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
@@ -96,9 +97,14 @@ fun HomeScreen(
     val syncProgress by recordingViewModel.syncProgress.collectAsState()
     val recordings by recordingViewModel.filteredRecordings.collectAsState()
     val searchQuery by recordingViewModel.searchQuery.collectAsState()
+    val libraryAnswer by recordingViewModel.libraryAnswer.collectAsState()
+    val librarySources by recordingViewModel.librarySources.collectAsState()
+    val isAsking by recordingViewModel.isAsking.collectAsState()
+    val aiError by recordingViewModel.aiError.collectAsState()
 
     var selectedFilenames by remember { mutableStateOf(setOf<String>()) }
     val isSelectionMode = selectedFilenames.isNotEmpty()
+    var showAskSheet by remember { mutableStateOf(false) }
 
     // Auto-scan when disconnected, refresh files when connected
     LaunchedEffect(bleState.connectionState) {
@@ -150,6 +156,9 @@ fun HomeScreen(
                         }
                         IconButton(onClick = onNavigateToGlobalMindMap) {
                             Icon(Icons.Default.Hub, contentDescription = "Global Mind Map")
+                        }
+                        IconButton(onClick = { showAskSheet = true; recordingViewModel.clearAskAnswer() }) {
+                            Icon(Icons.Default.QuestionAnswer, contentDescription = "Ask your notes")
                         }
                         IconButton(onClick = { recordingViewModel.syncAllBleFiles(viewModel.bleManager) }) {
                             Icon(Icons.Default.Sync, contentDescription = "Sync via BLE")
@@ -297,6 +306,18 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+    if (showAskSheet) {
+        AskLibrarySheet(
+            answer = libraryAnswer,
+            sources = librarySources,
+            isAsking = isAsking,
+            error = if (!isAsking) aiError else null,
+            onAsk = { q -> recordingViewModel.askLibraryQuestion(q) },
+            onNavigateToNote = onNavigateToNote,
+            onDismiss = { showAskSheet = false }
+        )
     }
 }
 

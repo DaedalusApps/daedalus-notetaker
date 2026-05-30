@@ -1,5 +1,6 @@
 package com.daedalus.notes.data
 
+import com.daedalus.notes.data.db.Converters
 import com.daedalus.notes.data.db.RecordingDao
 import com.daedalus.notes.data.model.Recording
 import kotlinx.coroutines.flow.Flow
@@ -23,6 +24,30 @@ class RecordingRepository(private val dao: RecordingDao) {
 
     suspend fun updateTitleAndSummary(filename: String, title: String, shortSummary: String) =
         dao.updateTitleAndSummary(filename, title, shortSummary)
+
+    suspend fun updateEmbedding(filename: String, embedding: FloatArray) {
+        val bytes = Converters().fromFloatArray(embedding) ?: return
+        dao.updateEmbeddingBytes(filename, bytes)
+    }
+
+    fun semanticSearch(queryEmbedding: FloatArray, candidates: List<Recording>, topK: Int = 5): List<Recording> {
+        return candidates
+            .mapNotNull { r ->
+                val emb = r.embedding ?: return@mapNotNull null
+                val score = cosineSimilarity(queryEmbedding, emb)
+                r to score
+            }
+            .sortedByDescending { it.second }
+            .take(topK)
+            .map { it.first }
+    }
+
+    private fun cosineSimilarity(a: FloatArray, b: FloatArray): Float {
+        if (a.size != b.size) return 0f
+        var dot = 0f
+        for (i in a.indices) dot += a[i] * b[i]
+        return dot
+    }
 
     suspend fun updateSummary(
         filename: String,

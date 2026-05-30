@@ -90,15 +90,14 @@ dependencies {
 
     // On-device AI — MediaPipe LLM Inference (tasks-genai .bin format models)
     implementation(libs.mediapipe.genai)
+    // On-device text embeddings for semantic note search
+    implementation(libs.mediapipe.tasks.text)
 
     // Audio playback
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
 
-    // Local speech-to-text (on-device, no internet)
-    implementation("com.alphacephei:vosk-android:0.3.47")
-
-    // Whisper STT via sherpa-onnx (better accuracy, falls back to Vosk if not downloaded)
+    // Whisper STT via sherpa-onnx
     implementation(files("libs/sherpa-onnx-1.13.2.aar"))
 
     implementation(libs.documentfile)

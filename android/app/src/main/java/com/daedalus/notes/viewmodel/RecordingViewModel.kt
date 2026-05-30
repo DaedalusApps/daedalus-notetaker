@@ -13,13 +13,14 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.daedalus.notes.ai.activePrompt
+import com.daedalus.notes.ai.EmbeddingService
 import com.daedalus.notes.ai.extractActionItems
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.MarkdownExporter
 import com.daedalus.notes.ai.SmartAnalysisParser
 import com.daedalus.notes.ai.TranscriptionService
+import com.daedalus.notes.ai.isWhisperReady
 import com.daedalus.notes.ai.selectedModel
-import com.daedalus.notes.ai.voskModelDir
 import com.daedalus.notes.ble.BleManager
 import com.daedalus.notes.ble.ConnectionState
 import com.daedalus.notes.data.RecordingRepository
@@ -51,7 +52,8 @@ class RecordingViewModel @JvmOverloads constructor(
     private val db: AppDatabase = AppDatabase.getInstance(application),
     private val repo: RecordingRepository = RecordingRepository(db.recordingDao()),
     private val llm: LocalLlmService = LocalLlmService(application),
-    private val transcriber: TranscriptionService = TranscriptionService(application)
+    private val transcriber: TranscriptionService = TranscriptionService(application),
+    private val embedder: EmbeddingService = EmbeddingService(application)
 ) : AndroidViewModel(application) {
 
     private val _syncProgress = MutableStateFlow<String?>(null)
@@ -70,6 +72,18 @@ class RecordingViewModel @JvmOverloads constructor(
 
     private val _aiError = MutableStateFlow<String?>(null)
     val aiError: StateFlow<String?> = _aiError
+
+    private val _isAsking = MutableStateFlow(false)
+    val isAsking: StateFlow<Boolean> = _isAsking
+
+    private val _askAnswer = MutableStateFlow<String?>(null)
+    val askAnswer: StateFlow<String?> = _askAnswer
+
+    private val _libraryAnswer = MutableStateFlow<String?>(null)
+    val libraryAnswer: StateFlow<String?> = _libraryAnswer
+
+    private val _librarySources = MutableStateFlow<List<Recording>>(emptyList())
+    val librarySources: StateFlow<List<Recording>> = _librarySources
 
     private val _currentNote = MutableStateFlow<Recording?>(null)
     val currentNote: StateFlow<Recording?> = _currentNote
@@ -339,7 +353,7 @@ class RecordingViewModel @JvmOverloads constructor(
                 Log.i("DaedalusAI", "Transcribing ${localFile.name}")
                 val transcript = transcriber.transcribe(localFile)
                 if (transcript.isBlank()) {
-                    val modelReady = com.daedalus.notes.ai.voskModelDir(getApplication<Application>()).exists()
+                    val modelReady = isWhisperReady(getApplication())
                     _aiError.value = if (modelReady) {
                         "No speech detected in this recording (too short or silent)."
                     } else {
@@ -377,6 +391,14 @@ class RecordingViewModel @JvmOverloads constructor(
                     shortSummary = analysis.shortSummary,
                     topics = analysis.topics
                 )
+
+                // Generate semantic embedding for library-wide Q&A (silent if model not ready)
+                if (embedder.isReady) {
+                    embedder.ensureLoaded()
+                    val embText = "${analysis.shortSummary} ${analysis.topics.joinToString(" ")}"
+                    embedder.embed(embText)?.let { repo.updateEmbedding(filename, it) }
+                }
+
                 _currentNote.value = repo.get(filename)
             } catch (e: Exception) {
                 Log.e("DaedalusAI", "Analysis failed", e)
@@ -494,8 +516,108 @@ class RecordingViewModel @JvmOverloads constructor(
         }
     }
 
+    fun clearAskAnswer() {
+        _askAnswer.value = null
+        _libraryAnswer.value = null
+        _librarySources.value = emptyList()
+    }
+
+    fun askNoteQuestion(filename: String, question: String) {
+        viewModelScope.launch {
+            _isAsking.value = true
+            _askAnswer.value = null
+            _aiError.value = null
+            try {
+                val note = repo.get(filename) ?: run {
+                    _aiError.value = "Note not found."
+                    return@launch
+                }
+                if (note.shortSummary.isBlank() && note.summary.isBlank()) {
+                    _aiError.value = "Analyze this note first to enable Q&A."
+                    return@launch
+                }
+                llm.ensureLoaded()
+                val context = "You are answering a question about a specific note. " +
+                    "Note title: ${note.title}. " +
+                    "Note summary: ${note.shortSummary.ifBlank { note.summary.take(400) }}. " +
+                    "Answer concisely based only on the note content. " +
+                    "If the answer is not in the note, say so clearly."
+                _askAnswer.value = llm.generate(context, question)
+            } catch (e: Exception) {
+                Log.e("DaedalusAI", "askNoteQuestion failed", e)
+                _aiError.value = e.message ?: "Q&A failed"
+            } finally {
+                _isAsking.value = false
+            }
+        }
+    }
+
+    fun askLibraryQuestion(question: String) {
+        viewModelScope.launch {
+            _isAsking.value = true
+            _libraryAnswer.value = null
+            _librarySources.value = emptyList()
+            _aiError.value = null
+            try {
+                if (!embedder.isReady) {
+                    _aiError.value = "Download the embedding model in Settings to use Ask Library."
+                    return@launch
+                }
+                embedder.ensureLoaded()
+                val queryEmbed = embedder.embed(question) ?: run {
+                    _aiError.value = "Could not embed question."
+                    return@launch
+                }
+                // Wait for the DB to emit rather than reading the potentially-empty initial StateFlow value
+                val all = repo.allRecordings.first().filter { it.summary.isNotBlank() }
+
+                Log.d("DaedalusAI", "askLibrary: ${all.size} analyzed notes, embedding backfill starting")
+                // Backfill embeddings for any notes that don't have them yet, updating DB and memory together
+                val withEmbeddings = mutableListOf<Recording>()
+                for (r in all) {
+                    val resolved = if (r.embedding != null) r
+                    else {
+                        val text = "${r.shortSummary} ${r.topics.joinToString(" ")}"
+                        val emb = embedder.embed(text)
+                        Log.d("DaedalusAI", "Backfill embed '${r.filename}': ${if (emb != null) "ok (${emb.size}d)" else "null"}")
+                        if (emb != null) {
+                            repo.updateEmbedding(r.filename, emb)
+                            r.copy(embedding = emb)
+                        } else r
+                    }
+                    withEmbeddings.add(resolved)
+                }
+
+                val sources = repo.semanticSearch(queryEmbed, withEmbeddings, topK = 5)
+                if (sources.isEmpty()) {
+                    _aiError.value = "No note embeddings found. Re-analyze your notes to enable library search."
+                    return@launch
+                }
+                _librarySources.value = sources
+                val context = buildString {
+                    append("Answer the question using the notes below. ")
+                    append("Cite note titles when relevant. ")
+                    append("If the answer is not in the notes, say so.\n\n")
+                    sources.forEachIndexed { i, r ->
+                        append("Note ${i + 1}: ${r.title.ifBlank { r.filename }}\n")
+                        append(r.shortSummary.ifBlank { r.summary.take(200) })
+                        append("\n\n")
+                    }
+                }
+                llm.ensureLoaded()
+                _libraryAnswer.value = llm.generate(context, question)
+            } catch (e: Exception) {
+                Log.e("DaedalusAI", "askLibraryQuestion failed", e)
+                _aiError.value = e.message ?: "Library Q&A failed"
+            } finally {
+                _isAsking.value = false
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         llm.close()
+        embedder.close()
     }
 }

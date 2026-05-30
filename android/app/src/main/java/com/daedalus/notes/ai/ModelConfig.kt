@@ -33,6 +33,15 @@ const val WHISPER_DECODER_URL  = "$WHISPER_HF/base.en-decoder.int8.onnx"
 const val WHISPER_TOKENS_URL   = "$WHISPER_HF/base.en-tokens.txt"
 const val WHISPER_TOTAL_BYTES  = 119_000_000L  // ~119 MB combined
 
+// Universal Sentence Encoder Lite — used by EmbeddingService for semantic note search
+const val EMBEDDING_MODEL_FILE = "universal_sentence_encoder.tflite"
+const val EMBEDDING_MODEL_SIZE_BYTES = 26_000_000L  // ~26 MB
+const val EMBEDDING_MODEL_URL =
+    "https://storage.googleapis.com/mediapipe-models/text_embedder/universal_sentence_encoder/float32/latest/universal_sentence_encoder.tflite"
+
+fun embeddingModelFile(context: Context): File =
+    File(modelsDir(context), EMBEDDING_MODEL_FILE)
+
 fun modelsDir(context: Context): File =
     File(context.filesDir, "models").also { it.mkdirs() }
 
@@ -45,9 +54,6 @@ fun isWhisperReady(context: Context): Boolean {
            File(dir, WHISPER_DECODER_FILE).exists() &&
            File(dir, WHISPER_TOKENS_FILE).exists()
 }
-
-fun voskModelDir(context: Context): File =
-    File(modelsDir(context), "vosk-model-small-en-us-0.15")
 
 fun modelFile(context: Context): File =
     File(modelsDir(context), GEMMA3_1B.filename)

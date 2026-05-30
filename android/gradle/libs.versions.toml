@@ -44,6 +44,7 @@ coroutines-android    = { group = "org.jetbrains.kotlinx", name = "kotlinx-corou
 core-ktx              = { group = "androidx.core", name = "core-ktx",                  version.ref = "core-ktx" }
 appcompat             = { group = "androidx.appcompat", name = "appcompat",            version.ref = "appcompat" }
 mediapipe-genai       = { group = "com.google.mediapipe", name = "tasks-genai",        version.ref = "mediapipe-genai" }
+mediapipe-tasks-text  = { group = "com.google.mediapipe", name = "tasks-text",         version.ref = "mediapipe-genai" }
 documentfile          = { group = "androidx.documentfile", name = "documentfile",        version.ref = "documentfile" }
 junit4                = { group = "junit", name = "junit",                                version.ref = "junit4" }
 mockk                 = { group = "io.mockk", name = "mockk", version.ref = "mockk" }

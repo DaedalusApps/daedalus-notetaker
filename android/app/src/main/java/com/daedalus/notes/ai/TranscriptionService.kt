@@ -11,8 +11,6 @@ import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.vosk.Model
-import org.vosk.Recognizer
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -23,13 +21,9 @@ private const val TARGET_SAMPLE_RATE = 16000
 class TranscriptionService(private val context: Context) {
 
     suspend fun transcribe(audioFile: File): String = withContext(Dispatchers.IO) {
-        if (isWhisperReady(context)) {
-            Log.i(TAG, "Using Whisper for ${audioFile.name}")
-            transcribeWithWhisper(audioFile)
-        } else {
-            Log.i(TAG, "Using Vosk for ${audioFile.name}")
-            transcribeWithVosk(audioFile)
-        }
+        if (!isWhisperReady(context)) return@withContext ""
+        Log.i(TAG, "Using Whisper for ${audioFile.name}")
+        transcribeWithWhisper(audioFile)
     }
 
     private fun transcribeWithWhisper(audioFile: File): String {
@@ -59,33 +53,6 @@ class TranscriptionService(private val context: Context) {
             text
         } finally {
             recognizer.release()
-        }
-    }
-
-    private fun transcribeWithVosk(audioFile: File): String {
-        val modelDir = voskModelDir(context)
-        if (!modelDir.exists()) error("No STT model found. Download Whisper or Vosk in Settings.")
-
-        Log.i(TAG, "Loading Vosk model from ${modelDir.absolutePath}")
-        val model = Model(modelDir.absolutePath)
-        val pcm = decodeToPcm(audioFile)
-        Log.i(TAG, "Decoded ${pcm.size} samples at ${TARGET_SAMPLE_RATE}Hz")
-
-        return Recognizer(model, TARGET_SAMPLE_RATE.toFloat()).use { rec ->
-            val chunkSamples = TARGET_SAMPLE_RATE * 4
-            var offset = 0
-            while (offset < pcm.size) {
-                val end = minOf(offset + chunkSamples, pcm.size)
-                val chunk = pcm.copyOfRange(offset, end)
-                val bytes = ByteBuffer.allocate(chunk.size * 2)
-                    .order(ByteOrder.LITTLE_ENDIAN)
-                    .apply { chunk.forEach { putShort(it) } }
-                    .array()
-                rec.acceptWaveForm(bytes, bytes.size)
-                offset = end
-            }
-            val result = rec.finalResult
-            Regex(""""text"\s*:\s*"([^"]*)"""").find(result)?.groupValues?.get(1) ?: ""
         }
     }
 

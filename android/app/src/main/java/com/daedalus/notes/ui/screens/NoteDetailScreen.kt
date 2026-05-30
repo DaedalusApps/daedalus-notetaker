@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -82,8 +83,10 @@ fun NoteDetailScreen(
     val prefs   = remember { context.getSharedPreferences("daedalus_prefs", android.content.Context.MODE_PRIVATE) }
     val note by recordingViewModel.currentNote.collectAsState()
     val isProcessing by recordingViewModel.isProcessing.collectAsState()
+    val isAsking by recordingViewModel.isAsking.collectAsState()
     val syncProgress by recordingViewModel.syncProgress.collectAsState()
     val aiError by recordingViewModel.aiError.collectAsState()
+    val askAnswer by recordingViewModel.askAnswer.collectAsState()
     val exportIntent by recordingViewModel.exportIntent.collectAsState()
 
     // Launch share sheet when export intent is ready
@@ -246,10 +249,13 @@ fun NoteDetailScreen(
                 .padding(innerPadding)
         ) {
             TabRow(selectedTabIndex = selectedTab) {
-                listOf("Transcript", "Summary", "Mind Map").forEachIndexed { index, title ->
+                listOf("Transcript", "Summary", "Mind Map", "Ask").forEachIndexed { index, title ->
                     Tab(
                         selected = selectedTab == index,
-                        onClick = { selectedTab = index },
+                        onClick = {
+                            selectedTab = index
+                            if (index != 3) recordingViewModel.clearAskAnswer()
+                        },
                         text = { Text(title) }
                     )
                 }
@@ -282,6 +288,11 @@ fun NoteDetailScreen(
                     0 -> TranscriptTab(transcript, inNoteQuery)
                     1 -> SummaryTab(summary, inNoteQuery)
                     2 -> MindMapTab(mindMap)
+                    3 -> AskTab(
+                        answer = askAnswer,
+                        isAsking = isAsking,
+                        onAsk = { q -> recordingViewModel.askNoteQuestion(filename, q) }
+                    )
                 }
             }
         }
@@ -358,6 +369,54 @@ private fun PlaceholderText(message: String) {
     }
 }
 
+
+@Composable
+private fun AskTab(
+    answer: String?,
+    isAsking: Boolean,
+    onAsk: (String) -> Unit
+) {
+    var question by remember { mutableStateOf("") }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        OutlinedTextField(
+            value = question,
+            onValueChange = { question = it },
+            placeholder = { Text("Ask a question about this note…") },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 2,
+            maxLines = 4
+        )
+        Button(
+            onClick = { if (question.isNotBlank()) onAsk(question) },
+            enabled = question.isNotBlank() && !isAsking,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            if (isAsking) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(if (isAsking) "Thinking…" else "Ask")
+        }
+        if (answer != null) {
+            Text(
+                text = answer,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        } else if (!isAsking) {
+            Text(
+                text = "Answers come from the note's summary.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
 
 /**
  * Turns a JSON summary blob into readable (header, text) pairs.
