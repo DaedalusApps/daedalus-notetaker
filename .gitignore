@@ -51,7 +51,9 @@ sync_result.xml
 window*.xml
 window_dump.xml
 screen_*.png
+_verify_*.png
 
 # Internal development plan files
 android/*_PLAN.md
+*_PLAN.md
 

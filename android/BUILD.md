@@ -1,4 +1,4 @@
-# CLAUDE.md (Android)
+# Build Guide (Android)
 
 This file provides guidance for working with the Android project in the `android/` directory.
 
@@ -34,6 +34,6 @@ This file provides guidance for working with the Android project in the `android
     - `com.daedalus.notes.viewmodel`: State management using ViewModels and StateFlow.
 
 ## Key Design Decisions
-- **On-Device AI**: Uses MediaPipe LLM Inference with Gemma 4 E4B models in `.bin` format. Models are downloaded on first launch or via Settings.
+- **On-Device AI**: Uses MediaPipe LLM Inference with the Gemma 3 1B model in `.task` format. Models are downloaded on first launch or via Settings.
 - **BLE Communication**: Handles the proprietary DOWAY protocol for the FW920 device (Recording start/stop, status).
 - **USB OTG**: Accesses audio files via Storage Access Framework (SAF) when the recorder is connected as a mass storage device.

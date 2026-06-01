@@ -29,7 +29,7 @@ def make_icon(size, output_path, rounded=False):
     img.save(str(output_path), "PNG")
     print(f"Created {output_path}")
 
-base = Path("/home/user/projects/notetaker/android/app/src/main/res")
+base = Path(__file__).resolve().parent.parent / "android" / "app" / "src" / "main" / "res"
 sizes = {"mipmap-mdpi": 48, "mipmap-hdpi": 72, "mipmap-xhdpi": 96, "mipmap-xxhdpi": 144, "mipmap-xxxhdpi": 192}
 for density, sz in sizes.items():
     make_icon(sz, base / density / "ic_launcher.png", rounded=False)

@@ -233,7 +233,7 @@ adb shell am broadcast -a com.daedalus.notes.PROBE2 -p com.daedalus.notes
 adb logcat -s DaedalusBLE DaedalusSync DaedalusAI DaedalusADB FW920_PROBE R2.a
 
 # Build APK
-cd /home/user/projects/notetaker/android && ./gradlew assembleDebug
+cd android && ./gradlew assembleDebug
 ```
 
 ---
@@ -254,7 +254,7 @@ cd /home/user/projects/notetaker/android && ./gradlew assembleDebug
 
 ## Next Session — Resume Steps
 
-1. `cd /home/user/projects/notetaker`
+1. `cd` into the repo root
 2. `git log --oneline -5` — verify you're on latest main
 3. Read this file
 4. Ensure phone ADB connected: `adb devices`
