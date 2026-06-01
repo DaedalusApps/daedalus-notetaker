@@ -1,5 +1,7 @@
 import java.util.Properties
+import java.io.File
 import java.io.FileInputStream
+import java.net.URI
 
 plugins {
     alias(libs.plugins.android.application)
@@ -23,6 +25,10 @@ val gitCommitCount = try {
 }
 
 val vName = versionProps.getProperty("VERSION_NAME", "1.0.0")
+
+// sherpa-onnx ships only a prebuilt Android .aar (no Maven artifact), so we fetch it
+// at build time instead of committing the 56 MB binary. See downloadSherpaOnnx below.
+val sherpaOnnxVersion = "1.13.2"
 
 android {
     namespace   = "com.daedalus.notes"
@@ -98,8 +104,8 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
 
-    // Whisper STT via sherpa-onnx
-    implementation(files("libs/sherpa-onnx-1.13.2.aar"))
+    // Whisper STT via sherpa-onnx (downloaded by the downloadSherpaOnnx task)
+    implementation(files("libs/sherpa-onnx-$sherpaOnnxVersion.aar"))
 
     implementation(libs.documentfile)
 
@@ -118,6 +124,29 @@ dependencies {
     androidTestImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.mockk.android)
 }
+
+// Fetch the prebuilt sherpa-onnx .aar from GitHub releases instead of committing it.
+val downloadSherpaOnnx by tasks.registering {
+    description = "Downloads the prebuilt sherpa-onnx Android .aar (not published to Maven)."
+    val aar = layout.projectDirectory.file("libs/sherpa-onnx-$sherpaOnnxVersion.aar").asFile
+    outputs.file(aar)
+    doLast {
+        if (aar.exists()) return@doLast
+        val url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/" +
+            "v$sherpaOnnxVersion/sherpa-onnx-$sherpaOnnxVersion.aar"
+        logger.lifecycle("Downloading sherpa-onnx $sherpaOnnxVersion .aar…")
+        aar.parentFile.mkdirs()
+        val tmp = File.createTempFile("sherpa-onnx", ".aar.part", aar.parentFile)
+        URI(url).toURL().openStream().use { input ->
+            tmp.outputStream().use { input.copyTo(it) }
+        }
+        if (!tmp.renameTo(aar)) {
+            tmp.copyTo(aar, overwrite = true); tmp.delete()
+        }
+    }
+}
+
+tasks.named("preBuild") { dependsOn(downloadSherpaOnnx) }
 
 // Reinstall the app after instrumented tests (test runner uninstalls it as cleanup)
 tasks.whenTaskAdded {

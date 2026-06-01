@@ -18,6 +18,8 @@ android/.kotlin/
 android/app/build/
 android/build/
 android/local.properties
+# sherpa-onnx .aar is downloaded at build time (downloadSherpaOnnx task), not committed
+android/app/libs/*.aar
 .idea/
 *.iml
 
