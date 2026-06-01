@@ -244,7 +244,6 @@ cd android && ./gradlew assembleDebug
 |---|---|
 | `reverse/doway.apk` | DOWAY Android app (Flutter + RN BLE bridge) |
 | `reverse/libapp_strings.txt` | String dump of `libapp.so` — all OTA/Wi-Fi strings are here |
-| `reverse/doway_analysis.json` | Structured analysis of DOWAY APK |
 | `reverse/analyze_doway.py` | Script used to extract strings/UUIDs from APK |
 | `reverse/intercept_proxy.py` | MITM proxy for firmware upgrade API (see MITM section above) |
 | `android/app/src/main/java/com/daedalus/notes/ble/BleManager.kt` | BLE protocol impl + probe methods |
