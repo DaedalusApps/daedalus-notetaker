@@ -12,61 +12,57 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-// Deep navy/blue palette
-private val NavyBlue = Color(0xFF0D2B4E)
-private val SteelBlue = Color(0xFF1565C0)
-private val CornflowerBlue = Color(0xFF4A90D9)
-private val LightSky = Color(0xFFBBDEFB)
-private val DeepNavyDark = Color(0xFF0A1929)
-private val NavySurface = Color(0xFF102A43)
-private val NavyVariant = Color(0xFF1C3D6E)
-private val OnNavy = Color(0xFFFFFFFF)
-private val OnNavyVariant = Color(0xFFBBCEE4)
-private val ErrorRed = Color(0xFFCF6679)
-private val ErrorRedDark = Color(0xFFB00020)
+// Modern AI-native palette
+private val PrimaryIndigo = Color(0xFF3F51B5)
+private val PrimaryLight = Color(0xFF757DE8)
+private val PrimaryDark = Color(0xFF002984)
+
+private val SecondaryTeal = Color(0xFF00BFA5)
+private val TertiaryViolet = Color(0xFF7C4DFF)
+
+private val DarkBackground = Color(0xFF0F172A)
+private val DarkSurface = Color(0xFF1E293B)
+private val DarkSurfaceVariant = Color(0xFF334155)
+
+private val LightBackground = Color(0xFFF8FAFC)
+private val LightSurface = Color(0xFFFFFFFF)
 
 private val DarkColorScheme = darkColorScheme(
-    primary = CornflowerBlue,
-    onPrimary = OnNavy,
-    primaryContainer = NavyVariant,
-    onPrimaryContainer = LightSky,
-    secondary = LightSky,
-    onSecondary = DeepNavyDark,
-    secondaryContainer = NavySurface,
-    onSecondaryContainer = LightSky,
-    tertiary = Color(0xFF82B1FF),
-    onTertiary = DeepNavyDark,
-    background = DeepNavyDark,
-    onBackground = Color(0xFFE1ECF7),
-    surface = NavySurface,
-    onSurface = Color(0xFFE1ECF7),
-    surfaceVariant = Color(0xFF1A3550),
-    onSurfaceVariant = OnNavyVariant,
-    error = ErrorRed,
-    onError = OnNavy,
-    outline = Color(0xFF4A6780),
+    primary = Color(0xFF818CF8), // Indigo 400
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF312E81),
+    onPrimaryContainer = Color(0xFFE0E7FF),
+    secondary = Color(0xFF2DD4BF), // Teal 400
+    onSecondary = Color(0xFF042F2E),
+    tertiary = Color(0xFFC084FC), // Violet 400
+    onTertiary = Color(0xFF3B0764),
+    background = DarkBackground,
+    onBackground = Color(0xFFF1F5F9),
+    surface = DarkSurface,
+    onSurface = Color(0xFFF1F5F9),
+    surfaceVariant = DarkSurfaceVariant,
+    onSurfaceVariant = Color(0xFFCBD5E1),
+    error = Color(0xFFF87171),
+    outline = Color(0xFF64748B),
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = SteelBlue,
-    onPrimary = OnNavy,
-    primaryContainer = LightSky,
-    onPrimaryContainer = NavyBlue,
-    secondary = NavyVariant,
-    onSecondary = OnNavy,
-    secondaryContainer = Color(0xFFDCEEFB),
-    onSecondaryContainer = NavyBlue,
-    tertiary = Color(0xFF1976D2),
-    onTertiary = OnNavy,
-    background = Color(0xFFF5F9FF),
-    onBackground = Color(0xFF0D1B2A),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF0D1B2A),
-    surfaceVariant = Color(0xFFDCE8F5),
-    onSurfaceVariant = Color(0xFF1C3D6E),
-    error = ErrorRedDark,
-    onError = OnNavy,
-    outline = Color(0xFF6B8EAE),
+    primary = Color(0xFF4F46E5), // Indigo 600
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFE0E7FF),
+    onPrimaryContainer = Color(0xFF312E81),
+    secondary = Color(0xFF0D9488), // Teal 600
+    onSecondary = Color.White,
+    tertiary = Color(0xFF9333EA), // Violet 600
+    onTertiary = Color.White,
+    background = LightBackground,
+    onBackground = Color(0xFF0F172A),
+    surface = LightSurface,
+    onSurface = Color(0xFF0F172A),
+    surfaceVariant = Color(0xFFF1F5F9),
+    onSurfaceVariant = Color(0xFF475569),
+    error = Color(0xFFDC2626),
+    outline = Color(0xFF94A3B8),
 )
 
 @Composable

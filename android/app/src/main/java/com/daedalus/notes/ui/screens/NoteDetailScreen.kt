@@ -68,6 +68,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import java.io.File
+import com.daedalus.notes.ui.components.DeviceStatusRow
 import com.daedalus.notes.ui.mindmap.MindMapCanvas
 import com.daedalus.notes.viewmodel.RecordingViewModel
 
@@ -167,16 +168,17 @@ fun NoteDetailScreen(
                 },
                 actions = {
                     IconButton(onClick = { showInNoteSearch = !showInNoteSearch; if (!showInNoteSearch) inNoteQuery = "" }) {
-                        Icon(Icons.Default.Search, contentDescription = "Search in note", tint = MaterialTheme.colorScheme.onPrimary)
+                        Icon(Icons.Default.Search, contentDescription = "Search in note")
                     }
                     IconButton(onClick = { showDeleteDialog = true }) {
-                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onPrimary)
+                        Icon(Icons.Default.Delete, contentDescription = "Delete")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                    actionIconContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         },
@@ -248,6 +250,12 @@ fun NoteDetailScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            DeviceStatusRow(
+                bleState = bleState,
+                onScan = { /* Detail screen usually doesn't trigger scan */ },
+                onCancelScan = { bleManager.disconnect() }
+            )
+
             TabRow(selectedTabIndex = selectedTab) {
                 listOf("Transcript", "Summary", "Mind Map", "Ask").forEachIndexed { index, title ->
                     Tab(

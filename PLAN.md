@@ -210,6 +210,14 @@ Port the validated Python prototype to a Kotlin Android app with on-device AI.
 - CLI → Jetpack Compose UI
 - whisper CLI → whisper.cpp JNI
 
+## Status & Milestones
+
+### Completed: AI-First UI Overhaul (May 2026)
+- Inverted app priority: AI Search & Global Knowledge Graph are now the landing screen.
+- Implemented universal device status monitoring across all views.
+- Overhauled Knowledge Graph with auto-zoom, precise hit-testing, and M3 aesthetics.
+- Added library-wide Q&A export (Markdown/Clipboard).
+
 ### Android Stack
 | Layer | Choice |
 |---|---|

@@ -22,4 +22,15 @@ object MarkdownExporter {
             appendLine(recording.mindMap)
         }
     }
+
+    fun exportQa(question: String, answer: String, sources: List<Recording>): String = buildString {
+        appendLine("# Ask: $question")
+        appendLine()
+        appendLine(answer)
+        if (sources.isNotEmpty()) {
+            appendLine()
+            appendLine("## Sources")
+            sources.forEach { appendLine("- ${it.title.ifBlank { it.filename }}") }
+        }
+    }
 }

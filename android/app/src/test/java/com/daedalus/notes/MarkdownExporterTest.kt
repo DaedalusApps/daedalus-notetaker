@@ -66,4 +66,19 @@ class MarkdownExporterTest {
         assertTrue(md.contains("# test.mp3"))
         assertFalse(md.contains("##"))
     }
+
+    @Test
+    fun exportQa_containsQuestionAnswerAndSources() {
+        val sources = listOf(
+            Recording(filename = "note1.mp3", title = "Note One"),
+            Recording(filename = "note2.mp3", title = "")
+        )
+        val md = MarkdownExporter.exportQa("What is AI?", "AI is cool.", sources)
+        
+        assertTrue(md.contains("# Ask: What is AI?"))
+        assertTrue(md.contains("AI is cool."))
+        assertTrue(md.contains("## Sources"))
+        assertTrue(md.contains("- Note One"))
+        assertTrue(md.contains("- note2.mp3"))
+    }
 }

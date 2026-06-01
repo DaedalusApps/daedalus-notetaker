@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,15 +30,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.daedalus.notes.ai.DEFAULT_PROMPT
+import com.daedalus.notes.ui.components.DeviceStatusRow
+import com.daedalus.notes.viewmodel.DeviceViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PromptEditorScreen(onBack: () -> Unit) {
+fun PromptEditorScreen(deviceViewModel: DeviceViewModel, onBack: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE) }
     var promptText by remember {
         mutableStateOf(prefs.getString("custom_prompt", null) ?: DEFAULT_PROMPT)
     }
+    val bleState by deviceViewModel.bleManager.bleState.collectAsState()
 
     Scaffold(
         topBar = {
@@ -49,9 +53,9 @@ fun PromptEditorScreen(onBack: () -> Unit) {
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         }
@@ -60,43 +64,54 @@ fun PromptEditorScreen(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = "This prompt is sent to Gemma before every transcript. The model must return JSON with the keys: title, shortSummary, topics, mindMap, fullSummary.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            DeviceStatusRow(
+                bleState = bleState,
+                onScan = { deviceViewModel.scan() },
+                onCancelScan = { deviceViewModel.disconnect() }
             )
 
-            OutlinedTextField(
-                value = promptText,
-                onValueChange = { promptText = it },
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                label = { Text("Prompt") }
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .fillMaxSize()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                OutlinedButton(
-                    onClick = {
-                        prefs.edit().remove("custom_prompt").apply()
-                        promptText = DEFAULT_PROMPT
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Reset to Default") }
+                Text(
+                    text = "This prompt is sent to Gemma before every transcript. The model must return JSON with the keys: title, shortSummary, topics, mindMap, fullSummary.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-                Button(
-                    onClick = {
-                        prefs.edit().putString("custom_prompt", promptText).apply()
-                        onBack()
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Save") }
+                OutlinedTextField(
+                    value = promptText,
+                    onValueChange = { promptText = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    label = { Text("Prompt") }
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            prefs.edit().remove("custom_prompt").apply()
+                            promptText = DEFAULT_PROMPT
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Reset to Default") }
+
+                    Button(
+                        onClick = {
+                            prefs.edit().putString("custom_prompt", promptText).apply()
+                            onBack()
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Save") }
+                }
             }
         }
     }

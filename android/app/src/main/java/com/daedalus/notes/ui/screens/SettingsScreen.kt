@@ -24,11 +24,17 @@ import com.daedalus.notes.ai.WHISPER_TOTAL_BYTES
 import com.daedalus.notes.ai.WhisperDownloader
 import com.daedalus.notes.ai.embeddingModelFile
 import com.daedalus.notes.ai.isWhisperReady
+import com.daedalus.notes.ui.components.DeviceStatusRow
+import com.daedalus.notes.viewmodel.DeviceViewModel
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onNavigateToPromptEditor: () -> Unit = {}) {
+fun SettingsScreen(
+    deviceViewModel: DeviceViewModel,
+    onBack: () -> Unit,
+    onNavigateToPromptEditor: () -> Unit = {}
+) {
     val context  = LocalContext.current
     val prefs    = remember { context.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE) }
     val scope    = rememberCoroutineScope()
@@ -54,6 +60,8 @@ fun SettingsScreen(onBack: () -> Unit, onNavigateToPromptEditor: () -> Unit = {}
     val embeddingState by embeddingDownloader.state.collectAsState()
     val embeddingReady = remember(embeddingState) { embeddingModelFile(context).exists() }
 
+    val bleState by deviceViewModel.bleManager.bleState.collectAsState()
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -64,9 +72,9 @@ fun SettingsScreen(onBack: () -> Unit, onNavigateToPromptEditor: () -> Unit = {}
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         },
@@ -76,119 +84,130 @@ fun SettingsScreen(onBack: () -> Unit, onNavigateToPromptEditor: () -> Unit = {}
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
-            // AI model — single active model, no picker needed
-            Text("AI Summarization Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(GEMMA3_1B.displayName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text(GEMMA3_1B.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Active", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                }
-            }
+            DeviceStatusRow(
+                bleState = bleState,
+                onScan = { deviceViewModel.scan() },
+                onCancelScan = { deviceViewModel.disconnect() }
+            )
 
-            // STT — Whisper only
-            Text("Speech-to-Text Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Card(colors = CardDefaults.cardColors(
-                containerColor = if (whisperReady) MaterialTheme.colorScheme.primaryContainer
-                                 else MaterialTheme.colorScheme.surfaceVariant
-            )) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Whisper base.en", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text("~160 MB · High accuracy · On-device", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    when {
-                        whisperReady -> Text("Active", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                        whisperState is DownloadState.Downloading -> {
-                            val dl = whisperState as DownloadState.Downloading
-                            LinearProgressIndicator(progress = { dl.progressPct / 100f }, modifier = Modifier.fillMaxWidth())
-                            Text("Downloading… ${dl.progressPct}%  ·  ${dl.bytesDownloaded / 1_048_576} / ${WHISPER_TOTAL_BYTES / 1_048_576} MB", style = MaterialTheme.typography.bodySmall)
-                        }
-                        whisperState is DownloadState.Failed -> {
-                            Text("Error: ${(whisperState as DownloadState.Failed).message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                            OutlinedButton(onClick = { scope.launch { whisperDownloader.download() } }, modifier = Modifier.fillMaxWidth()) { Text("Retry") }
-                        }
-                        else -> Button(onClick = { scope.launch { whisperDownloader.download() } }, modifier = Modifier.fillMaxWidth()) {
-                            Text("Download (~160 MB)")
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp)
+            ) {
+                // AI model — single active model, no picker needed
+                Text("AI Summarization Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(GEMMA3_1B.displayName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text(GEMMA3_1B.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Active", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+
+                // STT — Whisper only
+                Text("Speech-to-Text Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Card(colors = CardDefaults.cardColors(
+                    containerColor = if (whisperReady) MaterialTheme.colorScheme.primaryContainer
+                                     else MaterialTheme.colorScheme.surfaceVariant
+                )) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Whisper base.en", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text("~160 MB · High accuracy · On-device", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        when {
+                            whisperReady -> Text("Active", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                            whisperState is DownloadState.Downloading -> {
+                                val dl = whisperState as DownloadState.Downloading
+                                LinearProgressIndicator(progress = { dl.progressPct / 100f }, modifier = Modifier.fillMaxWidth())
+                                Text("Downloading… ${dl.progressPct}%  ·  ${dl.bytesDownloaded / 1_048_576} / ${WHISPER_TOTAL_BYTES / 1_048_576} MB", style = MaterialTheme.typography.bodySmall)
+                            }
+                            whisperState is DownloadState.Failed -> {
+                                Text("Error: ${(whisperState as DownloadState.Failed).message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                OutlinedButton(onClick = { scope.launch { whisperDownloader.download() } }, modifier = Modifier.fillMaxWidth()) { Text("Retry") }
+                            }
+                            else -> Button(onClick = { scope.launch { whisperDownloader.download() } }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Download (~160 MB)")
+                            }
                         }
                     }
                 }
-            }
 
-            // Embedding model (for semantic Ask Library)
-            Text("Semantic Search Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Card(colors = CardDefaults.cardColors(
-                containerColor = if (embeddingReady) MaterialTheme.colorScheme.primaryContainer
-                                 else MaterialTheme.colorScheme.surfaceVariant
-            )) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(embeddingModel.displayName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text(embeddingModel.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    when {
-                        embeddingReady -> Text("Active — Ask Library enabled", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                        embeddingState is DownloadState.Downloading -> {
-                            val dl = embeddingState as DownloadState.Downloading
-                            LinearProgressIndicator(progress = { dl.progressPct / 100f }, modifier = Modifier.fillMaxWidth())
-                            Text("Downloading… ${dl.progressPct}%  ·  ${dl.bytesDownloaded / 1_048_576} / ${EMBEDDING_MODEL_SIZE_BYTES / 1_048_576} MB", style = MaterialTheme.typography.bodySmall)
-                        }
-                        embeddingState is DownloadState.Failed -> {
-                            Text("Error: ${(embeddingState as DownloadState.Failed).message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                            OutlinedButton(onClick = { scope.launch { embeddingDownloader.download(embeddingModel) } }, modifier = Modifier.fillMaxWidth()) { Text("Retry") }
-                        }
-                        else -> Button(onClick = { scope.launch { embeddingDownloader.download(embeddingModel) } }, modifier = Modifier.fillMaxWidth()) {
-                            Text("Download (~26 MB)")
+                // Embedding model (for semantic Ask Library)
+                Text("Semantic Search Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Card(colors = CardDefaults.cardColors(
+                    containerColor = if (embeddingReady) MaterialTheme.colorScheme.primaryContainer
+                                     else MaterialTheme.colorScheme.surfaceVariant
+                )) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(embeddingModel.displayName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text(embeddingModel.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        when {
+                            embeddingReady -> Text("Active — Ask Library enabled", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                            embeddingState is DownloadState.Downloading -> {
+                                val dl = embeddingState as DownloadState.Downloading
+                                LinearProgressIndicator(progress = { dl.progressPct / 100f }, modifier = Modifier.fillMaxWidth())
+                                Text("Downloading… ${dl.progressPct}%  ·  ${dl.bytesDownloaded / 1_048_576} / ${EMBEDDING_MODEL_SIZE_BYTES / 1_048_576} MB", style = MaterialTheme.typography.bodySmall)
+                            }
+                            embeddingState is DownloadState.Failed -> {
+                                Text("Error: ${(embeddingState as DownloadState.Failed).message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                OutlinedButton(onClick = { scope.launch { embeddingDownloader.download(embeddingModel) } }, modifier = Modifier.fillMaxWidth()) { Text("Retry") }
+                            }
+                            else -> Button(onClick = { scope.launch { embeddingDownloader.download(embeddingModel) } }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Download (~26 MB)")
+                            }
                         }
                     }
                 }
-            }
 
-            // Management
-            Text("Management", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                // Management
+                Text("Management", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
 
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Analysis Prompt", style = MaterialTheme.typography.bodyMedium)
-                Text("The prompt sent to Gemma for every analysis. You can view and customize it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedButton(onClick = onNavigateToPromptEditor, modifier = Modifier.fillMaxWidth()) {
-                    Text("Configure Prompt")
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Analysis Prompt", style = MaterialTheme.typography.bodyMedium)
+                    Text("The prompt sent to Gemma for every analysis. You can view and customize it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedButton(onClick = onNavigateToPromptEditor, modifier = Modifier.fillMaxWidth()) {
+                        Text("Configure Prompt")
+                    }
                 }
-            }
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Auto-analyze on sync", style = MaterialTheme.typography.bodyMedium)
-                    Text("Analyze recordings automatically when synced via BLE", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Auto-analyze on sync", style = MaterialTheme.typography.bodyMedium)
+                        Text("Analyze recordings automatically when synced via BLE", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(checked = autoProcess, onCheckedChange = { autoProcess = it })
                 }
-                Switch(checked = autoProcess, onCheckedChange = { autoProcess = it })
-            }
 
-            Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(8.dp))
 
-            Button(
-                onClick = {
-                    prefs.edit().putBoolean("auto_process", autoProcess).apply()
-                    scope.launch { snackbar.showSnackbar("Settings saved") }
-                    onBack()
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Save Settings") }
+                Button(
+                    onClick = {
+                        prefs.edit().putBoolean("auto_process", autoProcess).apply()
+                        scope.launch { snackbar.showSnackbar("Settings saved") }
+                        onBack()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Save Settings") }
 
-            val packageInfo = remember {
-                try { context.packageManager.getPackageInfo(context.packageName, 0) } catch (e: Exception) { null }
-            }
-            val versionName = packageInfo?.versionName ?: "Unknown"
-            val versionCode = packageInfo?.let {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) it.longVersionCode
-                else @Suppress("DEPRECATION") it.versionCode.toLong()
-            } ?: 0L
+                val packageInfo = remember {
+                    try { context.packageManager.getPackageInfo(context.packageName, 0) } catch (e: Exception) { null }
+                }
+                val versionName = packageInfo?.versionName ?: "Unknown"
+                val versionCode = packageInfo?.let {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) it.longVersionCode
+                    else @Suppress("DEPRECATION") it.versionCode.toLong()
+                } ?: 0L
 
-            Box(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "Version $versionName (Build $versionCode)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                )
+                Box(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "Version $versionName (Build $versionCode)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
             }
         }
     }

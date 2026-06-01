@@ -85,6 +85,9 @@ class RecordingViewModel @JvmOverloads constructor(
     private val _librarySources = MutableStateFlow<List<Recording>>(emptyList())
     val librarySources: StateFlow<List<Recording>> = _librarySources
 
+    private val _libraryQuestion = MutableStateFlow("")
+    val libraryQuestion: StateFlow<String> = _libraryQuestion
+
     private val _currentNote = MutableStateFlow<Recording?>(null)
     val currentNote: StateFlow<Recording?> = _currentNote
 
@@ -516,6 +519,26 @@ class RecordingViewModel @JvmOverloads constructor(
         }
     }
 
+    fun exportLibraryAnswer() {
+        val answer = _libraryAnswer.value ?: return
+        viewModelScope.launch {
+            val content = MarkdownExporter.exportQa(_libraryQuestion.value, answer, _librarySources.value)
+            val context = getApplication<Application>()
+
+            val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            val outFile = File(downloadsDir, "ask-${System.currentTimeMillis()}.md")
+            withContext(Dispatchers.IO) { outFile.writeText(content) }
+
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", outFile)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/markdown"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            _exportIntent.value = Intent.createChooser(shareIntent, "Export answer as Markdown")
+        }
+    }
+
     fun clearAskAnswer() {
         _askAnswer.value = null
         _libraryAnswer.value = null
@@ -555,6 +578,7 @@ class RecordingViewModel @JvmOverloads constructor(
     fun askLibraryQuestion(question: String) {
         viewModelScope.launch {
             _isAsking.value = true
+            _libraryQuestion.value = question
             _libraryAnswer.value = null
             _librarySources.value = emptyList()
             _aiError.value = null

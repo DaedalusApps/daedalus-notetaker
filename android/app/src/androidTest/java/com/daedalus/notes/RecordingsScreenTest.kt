@@ -6,7 +6,7 @@ import com.daedalus.notes.ble.BleManager
 import com.daedalus.notes.ble.BleState
 import com.daedalus.notes.ble.ConnectionState
 import com.daedalus.notes.data.model.Recording
-import com.daedalus.notes.ui.screens.HomeScreen
+import com.daedalus.notes.ui.screens.RecordingsScreen
 import com.daedalus.notes.ui.theme.DaedalusTheme
 import com.daedalus.notes.viewmodel.DeviceViewModel
 import com.daedalus.notes.viewmodel.RecordingViewModel
@@ -17,7 +17,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 
-class HomeScreenTest {
+class RecordingsScreenTest {
 
     @get:Rule
     val composeTestRule = createComposeRule()
@@ -41,17 +41,16 @@ class HomeScreenTest {
     }
 
     @Test
-    fun homeScreen_disconnected_showsNotConnectedBanner() {
+    fun recordingsScreen_disconnected_showsNotConnectedBanner() {
         bleStateFlow.value = BleState(connectionState = ConnectionState.DISCONNECTED)
 
         composeTestRule.setContent {
             DaedalusTheme {
-                HomeScreen(
+                RecordingsScreen(
                     viewModel = deviceViewModel,
                     recordingViewModel = recordingViewModel,
                     onNavigateToNote = {},
-                    onNavigateToGlobalMindMap = {},
-                    onNavigateToSettings = {}
+                    onBack = {}
                 )
             }
         }
@@ -60,7 +59,7 @@ class HomeScreenTest {
     }
 
     @Test
-    fun homeScreen_connected_showsDeviceStatusRow() {
+    fun recordingsScreen_connected_showsDeviceStatusRow() {
         bleStateFlow.value = BleState(
             connectionState = ConnectionState.CONNECTED,
             batteryPct = 85
@@ -68,12 +67,11 @@ class HomeScreenTest {
 
         composeTestRule.setContent {
             DaedalusTheme {
-                HomeScreen(
+                RecordingsScreen(
                     viewModel = deviceViewModel,
                     recordingViewModel = recordingViewModel,
                     onNavigateToNote = {},
-                    onNavigateToGlobalMindMap = {},
-                    onNavigateToSettings = {}
+                    onBack = {}
                 )
             }
         }
@@ -83,7 +81,7 @@ class HomeScreenTest {
     }
 
     @Test
-    fun homeScreen_recordingCard_displaysTitle_and_summary() {
+    fun recordingsScreen_recordingCard_displaysTitle_and_summary() {
         val recording = Recording(
             filename = "20260524213434.mp3",
             title = "Project Meeting",
@@ -93,12 +91,11 @@ class HomeScreenTest {
 
         composeTestRule.setContent {
             DaedalusTheme {
-                HomeScreen(
+                RecordingsScreen(
                     viewModel = deviceViewModel,
                     recordingViewModel = recordingViewModel,
                     onNavigateToNote = {},
-                    onNavigateToGlobalMindMap = {},
-                    onNavigateToSettings = {}
+                    onBack = {}
                 )
             }
         }
@@ -108,19 +105,18 @@ class HomeScreenTest {
     }
 
     @Test
-    fun homeScreen_longPress_entersSelectionMode() {
+    fun recordingsScreen_longPress_entersSelectionMode() {
         val recording1 = Recording(filename = "file1.mp3", title = "Note 1")
         val recording2 = Recording(filename = "file2.mp3", title = "Note 2")
         filteredRecordingsFlow.value = listOf(recording1, recording2)
 
         composeTestRule.setContent {
             DaedalusTheme {
-                HomeScreen(
+                RecordingsScreen(
                     viewModel = deviceViewModel,
                     recordingViewModel = recordingViewModel,
                     onNavigateToNote = {},
-                    onNavigateToGlobalMindMap = {},
-                    onNavigateToSettings = {}
+                    onBack = {}
                 )
             }
         }

@@ -1,7 +1,7 @@
 package com.daedalus.notes.ui.screens
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
@@ -12,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -29,11 +30,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.daedalus.notes.ui.mindmap.GlobalGraph
 import com.daedalus.notes.ui.mindmap.GraphNode
-import android.graphics.Paint
+import com.daedalus.notes.ui.components.DeviceStatusRow
+import com.daedalus.notes.viewmodel.DeviceViewModel
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.random.Random
 
 data class PositionedGraphNode(
     val node: GraphNode,
@@ -46,10 +47,12 @@ data class PositionedGraphNode(
 @Composable
 fun GlobalMindMapScreen(
     graph: GlobalGraph,
+    deviceViewModel: DeviceViewModel,
     onNavigateToNote: (String) -> Unit,
     onBack: () -> Unit
 ) {
     var showHelp by remember { mutableStateOf(false) }
+    val bleState by deviceViewModel.bleManager.bleState.collectAsState()
 
     if (showHelp) {
         AlertDialog(
@@ -98,23 +101,36 @@ fun GlobalMindMapScreen(
                 },
                 actions = {
                     IconButton(onClick = { showHelp = true }) {
-                        Icon(Icons.Default.Info, contentDescription = "How to use", tint = MaterialTheme.colorScheme.onPrimary)
+                        Icon(Icons.Default.Info, contentDescription = "How to use")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                    actionIconContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         }
     ) { innerPadding ->
-        if (graph.nodes.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(innerPadding), contentAlignment = Alignment.Center) {
-                Text("No topics analyzed yet.", style = MaterialTheme.typography.titleMedium)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            DeviceStatusRow(
+                bleState = bleState,
+                onScan = { deviceViewModel.scan() },
+                onCancelScan = { deviceViewModel.disconnect() }
+            )
+
+            if (graph.nodes.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No topics analyzed yet.", style = MaterialTheme.typography.titleMedium)
+                }
+            } else {
+                GlobalMindMapCanvas(graph, onNavigateToNote)
             }
-        } else {
-            GlobalMindMapCanvas(graph, onNavigateToNote, Modifier.padding(innerPadding))
         }
     }
 }
@@ -128,24 +144,40 @@ fun GlobalMindMapCanvas(
     val density = LocalDensity.current.density
     val textMeasurer = rememberTextMeasurer()
     
-    var scale by remember { mutableStateOf(0.8f) }
+    var scale by remember { mutableStateOf(0.5f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    var isInitialized by remember { mutableStateOf(false) }
+
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         scale = (scale * zoomChange).coerceIn(0.1f, 5f)
         offset += panChange
     }
 
-    val primaryColor = MaterialTheme.colorScheme.primary
-    val secondaryColor = MaterialTheme.colorScheme.secondary
-    val tertiaryColor = MaterialTheme.colorScheme.tertiary
+    val primaryContainer = MaterialTheme.colorScheme.primaryContainer
+    val onPrimaryContainer = MaterialTheme.colorScheme.onPrimaryContainer
+    val secondaryContainer = MaterialTheme.colorScheme.secondaryContainer
+    val onSecondaryContainer = MaterialTheme.colorScheme.onSecondaryContainer
 
     var selectedTopic by remember { mutableStateOf<PositionedGraphNode?>(null) }
 
-    BoxWithConstraints(modifier.fillMaxSize().transformable(transformState)) {
+    BoxWithConstraints(
+        modifier
+            .fillMaxSize()
+            .clipToBounds()
+            .transformable(transformState)
+    ) {
         val cx = constraints.maxWidth / 2f
         val cy = constraints.maxHeight / 2f
 
-        val positionedNodes = remember(graph, cx, cy) {
+        // Initial zoom to fit topics
+        if (!isInitialized && constraints.maxWidth > 0) {
+            val topicRadiusPx = 350f * density
+            val targetScale = (constraints.maxWidth * 0.8f) / (topicRadiusPx * 2f)
+            scale = targetScale.coerceIn(0.1f, 2f)
+            isInitialized = true
+        }
+
+        val positionedNodes = remember(graph, cx, cy, density) {
             val result = mutableListOf<PositionedGraphNode>()
             val topicNodes = graph.nodes.filter { it.type == GraphNode.Type.TOPIC }
             val recordingNodes = graph.nodes.filter { it.type == GraphNode.Type.RECORDING }
@@ -175,39 +207,16 @@ fun GlobalMindMapCanvas(
             AlertDialog(
                 onDismissRequest = { selectedTopic = null },
                 title = { Text(topic.node.label) },
-                text = if (connectedRecordings.isNotEmpty()) ({
-                    Text("Recordings:\n" + connectedRecordings.joinToString("\n") { "• $it" })
-                }) else null,
+                text = if (connectedRecordings.isNotEmpty()) {
+                    { Text("Connected recordings:\n" + connectedRecordings.joinToString("\n") { "• $it" }) }
+                } else null,
                 confirmButton = {
                     TextButton(onClick = { selectedTopic = null }) { Text("OK") }
                 }
             )
         }
 
-        Canvas(
-            Modifier
-                .fillMaxSize()
-                .pointerInput(positionedNodes, scale, offset) {
-                    detectTapGestures { tapOffset ->
-                        // Calculate where the tap was in the untransformed canvas space
-                        val transformedTapX = (tapOffset.x - offset.x - cx) / scale + cx
-                        val transformedTapY = (tapOffset.y - offset.y - cy) / scale + cy
-                        val transformedTap = Offset(transformedTapX, transformedTapY)
-
-                        positionedNodes.forEach { p ->
-                            if (p.node.type == GraphNode.Type.TOPIC && p.rect.contains(transformedTap)) {
-                                selectedTopic = p
-                                return@detectTapGestures
-                            }
-                            if (p.node.type == GraphNode.Type.RECORDING && p.rect.contains(transformedTap)) {
-                                val filename = p.node.id.removePrefix("rec_")
-                                onNavigateToNote(filename)
-                                return@detectTapGestures
-                            }
-                        }
-                    }
-                }
-        ) {
+        Canvas(Modifier.fillMaxSize()) {
             withTransform({
                 translate(offset.x, offset.y)
                 scale(scale, scale, Offset(cx, cy))
@@ -217,64 +226,69 @@ fun GlobalMindMapCanvas(
                     val from = nodeMap[edge.fromId] ?: return@forEach
                     val to = nodeMap[edge.toId] ?: return@forEach
                     drawLine(
-                        color = Color.Gray.copy(alpha = 0.4f),
+                        color = Color.Gray.copy(alpha = 0.3f),
                         start = Offset(from.x, from.y),
                         end = Offset(to.x, to.y),
-                        strokeWidth = 2f
+                        strokeWidth = 2f / scale // Keep lines readable when zoomed out
                     )
                 }
             }
         }
 
-        // Render Nodes as Composables for testability and accessibility
+        // Render Nodes as Composables
         Box(Modifier.fillMaxSize()) {
             positionedNodes.forEach { p ->
-                val label = p.node.label.take(20)
                 val isTopic = p.node.type == GraphNode.Type.TOPIC
+                val label = if (isTopic) p.node.label.take(24) else p.node.label.take(18)
                 
-                // Calculate position considering scale and offset
-                // This is tricky because these are Composables inside a Box.
-                // We'll use absolute offsets and scale modifier.
-                
-                val paddingH = if (isTopic) 10.dp else 8.dp
-                val paddingV = if (isTopic) 6.dp else 4.dp
-                val color = if (isTopic) secondaryColor else tertiaryColor
+                val color = if (isTopic) primaryContainer else secondaryContainer
+                val textColor = if (isTopic) onPrimaryContainer else onSecondaryContainer
+                val shape = if (isTopic) androidx.compose.foundation.shape.CircleShape 
+                            else androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
 
-                // Pre-calculate rect for tap detection in Canvas (already done in previous version but we need to update it here)
-                // Actually, let's keep the rect calculation in a way that matches what we draw.
-                val textStyle = TextStyle(color = Color.White, fontSize = if (isTopic) 14.sp else 12.sp, fontWeight = if (isTopic) FontWeight.Bold else FontWeight.Normal)
-                val textLayout = textMeasurer.measure(label, textStyle)
-                val rectW = (textLayout.size.width / density + paddingH.value * 2).dp
-                val rectH = (textLayout.size.height / density + paddingV.value * 2).dp
+                val fontSize = (if (isTopic) 14.sp else 11.sp) * scale
+                val fontWeight = if (isTopic) FontWeight.Bold else FontWeight.Normal
                 
-                // Update rect for tap detection (untransformed space)
-                val paddingHPx = with(LocalDensity.current) { paddingH.toPx() }
-                val paddingVPx = with(LocalDensity.current) { paddingV.toPx() }
-                val topLeftUntransformed = Offset(p.x - (textLayout.size.width + paddingHPx * 2) / 2, p.y - (textLayout.size.height + paddingVPx * 2) / 2)
-                p.rect = androidx.compose.ui.geometry.Rect(topLeftUntransformed, Size(textLayout.size.width + paddingHPx * 2, textLayout.size.height + paddingVPx * 2))
+                val textStyle = TextStyle(
+                    fontSize = fontSize,
+                    fontWeight = fontWeight,
+                    textAlign = TextAlign.Center
+                )
+                
+                val paddingH = (if (isTopic) 14.dp else 10.dp) * scale
+                val paddingV = (if (isTopic) 8.dp else 6.dp) * scale
 
                 Surface(
                     color = color,
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(6.dp),
+                    shape = shape,
+                    shadowElevation = (1.dp.value * scale).dp,
                     modifier = Modifier
                         .offset {
+                            // Calculate measured size in pixels
+                            val measured = textMeasurer.measure(label, textStyle)
+                            val totalWPx = measured.size.width + (paddingH.toPx() * 2)
+                            val totalHPx = measured.size.height + (paddingV.toPx() * 2)
+                            
                             androidx.compose.ui.unit.IntOffset(
-                                (offset.x + (p.x - cx) * scale + cx - (textLayout.size.width + paddingHPx * 2) * scale / 2).toInt(),
-                                (offset.y + (p.y - cy) * scale + cy - (textLayout.size.height + paddingVPx * 2) * scale / 2).toInt()
+                                (offset.x + (p.x - cx) * scale + cx - totalWPx / 2).toInt(),
+                                (offset.y + (p.y - cy) * scale + cy - totalHPx / 2).toInt()
                             )
                         }
-                        .size(rectW * scale, rectH * scale)
+                        .clickable {
+                            if (isTopic) {
+                                selectedTopic = p
+                            } else {
+                                onNavigateToNote(p.node.id.removePrefix("rec_"))
+                            }
+                        }
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = label,
-                            color = Color.White,
-                            fontSize = (if (isTopic) 14.sp else 12.sp) * scale,
-                            fontWeight = if (isTopic) FontWeight.Bold else FontWeight.Normal,
-                            textAlign = TextAlign.Center,
-                            maxLines = 1
-                        )
-                    }
+                    Text(
+                        text = label,
+                        color = textColor,
+                        style = textStyle,
+                        modifier = Modifier.padding(horizontal = paddingH, vertical = paddingV),
+                        maxLines = 1
+                    )
                 }
             }
         }

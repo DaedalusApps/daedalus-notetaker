@@ -1,11 +1,13 @@
 package com.daedalus.notes
 
 import android.app.Application
+import android.util.Log
 import com.daedalus.notes.ble.BleManager
 import com.daedalus.notes.ble.BleState
 import com.daedalus.notes.ble.ConnectionState
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
+import com.daedalus.notes.ai.EmbeddingService
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.data.model.Recording
@@ -34,15 +36,20 @@ class RecordingViewModelTest {
     private val application = mockk<Application>(relaxed = true)
     private val repo = mockk<RecordingRepository>(relaxed = true)
     private val bleManager = mockk<BleManager>(relaxed = true)
+    private val embedder = mockk<EmbeddingService>(relaxed = true)
+    private val llm = mockk<LocalLlmService>(relaxed = true)
     
-    // We will inject these via reflection or refactoring if needed, 
-    // but for TDD we'll first define the desired behavior.
     private lateinit var viewModel: RecordingViewModel
     private val testDispatcher = StandardTestDispatcher()
 
     @Before
     fun setup() {
         Dispatchers.setMain(testDispatcher)
+        mockkStatic(Log::class)
+        every { Log.d(any(), any()) } returns 0
+        every { Log.i(any(), any()) } returns 0
+        every { Log.e(any(), any()) } returns 0
+        every { Log.e(any(), any(), any()) } returns 0
         
         every { repo.allRecordings } returns flowOf(emptyList())
         every { bleManager.bleState } returns MutableStateFlow(
@@ -51,7 +58,6 @@ class RecordingViewModelTest {
         
         // Mock all dependencies that would touch Android internals
         val db = mockk<AppDatabase>(relaxed = true)
-        val llm = mockk<LocalLlmService>(relaxed = true)
         val transcriber = mockk<TranscriptionService>(relaxed = true)
         
         viewModel = RecordingViewModel(
@@ -59,13 +65,37 @@ class RecordingViewModelTest {
             db = db,
             repo = repo,
             llm = llm,
-            transcriber = transcriber
+            transcriber = transcriber,
+            embedder = embedder
         )
     }
 
     @After
     fun tearDown() {
         Dispatchers.resetMain()
+        unmockkStatic(Log::class)
+    }
+
+    @Test
+    fun askLibraryQuestion_updatesLibraryAnswer() = runTest {
+        val question = "What is the meaning of life?"
+        val answer = "42"
+        val recordings = listOf(
+            Recording("note1.mp3", title = "Note 1", summary = "Summary 1", shortSummary = "Short 1")
+        )
+        
+        every { embedder.isReady } returns true
+        coEvery { embedder.embed(any()) } returns floatArrayOf(0.1f, 0.2f)
+        every { repo.allRecordings } returns flowOf(recordings)
+        coEvery { repo.semanticSearch(any(), any(), any()) } returns recordings
+        coEvery { llm.generate(any(), any()) } returns answer
+
+        viewModel.askLibraryQuestion(question)
+        advanceUntilIdle()
+
+        assertEquals(answer, viewModel.libraryAnswer.value)
+        assertEquals(recordings, viewModel.librarySources.value)
+        assertEquals(question, viewModel.libraryQuestion.value)
     }
 
     @Test

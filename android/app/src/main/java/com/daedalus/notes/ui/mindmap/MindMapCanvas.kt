@@ -3,6 +3,7 @@ package com.daedalus.notes.ui.mindmap
 import android.graphics.Paint
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.AlertDialog
@@ -64,6 +65,7 @@ fun MindMapCanvas(markdown: String) {
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
+            .clipToBounds()
             .transformable(transformState)
     ) {
         val cx = constraints.maxWidth / 2f
