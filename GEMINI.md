@@ -105,7 +105,6 @@ adb shell am broadcast -a com.daedalus.notes.ANALYZE --es filename "202605242134
 - **GEMINI.md:** Foundational mandates and architecture (this file).
 - **ROADMAP.md:** Future feature development and backlog.
 - **PLAN.md:** Original design document and strategy.
-- **CLAUDE.md:** Environment-specific CLI guidance (root).
 - **android/BUILD.md:** Android build and environment documentation.
 
 ## Workflows
@@ -136,7 +135,8 @@ cd android
 .\gradlew :app:connectedDebugAndroidTest
 ```
 Maintain the regression test suite:
-- `HomeScreenTest.kt`: Core UI flows and selection mode.
+- `RecordingsScreenTest.kt`: Recording list, selection mode, swipe-to-delete.
+- `AskHomeScreenTest.kt`: Ask landing screen and library Q&A flow.
 - `GlobalMindMapScreenTest.kt`: Knowledge Graph rendering.
 - `SmartAnalysisParserTest.kt`: AI response normalization.
 - `RecordingDaoTest.kt`: Database integrity.
