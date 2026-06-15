@@ -220,14 +220,18 @@ adb devices
 # Install APK
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 
+# NOTE: use a bare `-a <action>` broadcast (no -p/-n) — on Android 14+, adb shell
+# broadcasts targeting a specific package/component aren't delivered to the
+# dynamically-registered AdbReceiver.
+
 # Trigger sync (USB OTG)
-adb shell am broadcast -a com.daedalus.notes.SYNC -p com.daedalus.notes
+adb shell am broadcast -a com.daedalus.notes.SYNC
 
 # Trigger BLE probe (logs all GATT services + probes CMD bytes)
-adb shell am broadcast -a com.daedalus.notes.PROBE -p com.daedalus.notes
+adb shell am broadcast -a com.daedalus.notes.PROBE
 
 # Trigger BLE service probe (FFD0/C0C0/E49A)
-adb shell am broadcast -a com.daedalus.notes.PROBE2 -p com.daedalus.notes
+adb shell am broadcast -a com.daedalus.notes.PROBE2
 
 # Watch relevant logs
 adb logcat -s DaedalusBLE DaedalusSync DaedalusAI DaedalusADB FW920_PROBE R2.a
@@ -263,15 +267,22 @@ recordings sync back to the device?
   command and **no upload function**.
 - The earlier `0x19–0x50` opcode probe found only `0x1A` responding (`[00]`); nothing accepted data.
 
-**Spike harness (implemented, pending hardware run):** `BleManager.probeUploadCmds()` tries each
-candidate opcode `0x0E–0x50` with a `filename(14)+size(4 LE)` "begin upload" payload, streams a
-512-byte dummy buffer + a candidate end-marker, then calls `listFiles()` to see if `UPLOADTEST01`
-appears. Trigger on a connected device:
+**Spike harness:** `BleManager.probeUploadCmds()` tries each candidate opcode `0x0E–0x50` with a
+`filename(14)+size(4 LE)` "begin upload" payload, streams a 512-byte dummy buffer + a candidate
+end-marker, then calls `listFiles()` to see if `UPLOADTEST01` appears. Trigger on a connected
+device:
 
 ```powershell
-adb shell am broadcast -a com.daedalus.notes.PROBE_UPLOAD -n com.daedalus.notes/.AdbReceiver
+adb shell am broadcast -a com.daedalus.notes.PROBE_UPLOAD
 adb logcat -s UploadProbe
 ```
+
+Note: use a bare `-a <action>` broadcast (no `-n`/`-p`) — on Android 14+, `adb shell` (uid 2000)
+broadcasts targeting a specific component/package are not delivered to a dynamically-registered
+receiver unless it's `RECEIVER_EXPORTED`. `AdbReceiver`'s registration was changed from
+`RECEIVER_NOT_EXPORTED` to `RECEIVER_EXPORTED` (still `BuildConfig.DEBUG`-gated) to make the whole
+family of ADB debug hooks (`SYNC`, `PROBE`, `PROBE2`, `PROBE_DELETE`, `PROBE_UPLOAD`, `ANALYZE`)
+work at all on this OS version.
 
 **Go/no-go gate:**
 - **GO** — an opcode acks *and* `UPLOADTEST01` shows up in the file list → implement
@@ -280,7 +291,18 @@ adb logcat -s UploadProbe
 - **NO-GO (expected)** — no opcode accepts the file → leave upload unimplemented. Local recordings
   already work fully in-app (transcribed/analyzed, listed alongside device files); no device upload.
 
-**Result**: _pending hardware run — record outcome here._
+**Result**: **NO-GO.** Ran against a connected FW920 (`xink_test`, fw status battery=100%,
+981632/998016 KB free) on 2026-06-14. All opcodes `0x0E–0x50` (except the known-mapped
+`0x0F/0x15/0x18/0x1A`) timed out with no Ack, except `0x2D` and `0x4A` which incidentally returned
+a `Status(cmd=5, ...)` response (the concurrent 15s status poller, not a real ack to those
+opcodes). No opcode accepted the upload payload and `UPLOADTEST01` never appeared in the file
+list. Log tail:
+```
+No upload command found in 0x0E–0x50. Protocol appears download-only.
+```
+Conclusion: the FW920 BLE protocol is confirmed download-only. Upload/sync-back is not
+implemented; local recordings remain fully usable in-app (transcribed, analyzed, listed) without
+syncing to the device.
 
 ---
 

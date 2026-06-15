@@ -95,7 +95,10 @@ class MainActivity : ComponentActivity() {
                 addAction("com.daedalus.notes.PROBE_UPLOAD")
                 addAction("com.daedalus.notes.ANALYZE")
             }
-            ContextCompat.registerReceiver(this, adbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+            // ADB shell (uid 2000) broadcasts are not delivered to RECEIVER_NOT_EXPORTED
+            // receivers on Android 14+; this receiver is debug-only and exists solely so
+            // `adb shell am broadcast` can trigger it during development.
+            ContextCompat.registerReceiver(this, adbReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
         }
 
         // Auto-sync on first BLE connect. lastState lives outside repeatOnLifecycle so it
