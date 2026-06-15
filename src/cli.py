@@ -329,6 +329,186 @@ def _print_categories() -> None:
     console.print(table)
 
 
+def cmd_export_backup(args: list[str]) -> None:
+    """Export all processed notes to a single JSON backup file."""
+    backup_file = Path(_require_arg(args, 0, "backup_json_path"))
+    
+    from src.categories import CATEGORIES
+    import re
+    
+    export_root = _export_dir()
+    recordings = []
+    
+    for path in export_root.iterdir():
+        if not path.is_dir() or path.name == "recordings":
+            continue
+        note_md = path / f"{path.name}_note.md"
+        if not note_md.exists():
+            continue
+            
+        try:
+            content = note_md.read_text(encoding="utf-8")
+            
+            title = ""
+            lines = content.splitlines()
+            if lines and lines[0].startswith("# "):
+                title = lines[0][2:].strip()
+                
+            category_name = "General"
+            category_id = 1
+            summary_text = ""
+            transcript = ""
+            mindmap = ""
+            
+            summary_match = re.search(r"## Summary \((.*?)\)\n(.*?)(?=## Transcript|$)", content, re.DOT_MATCHES_ALL)
+            if summary_match:
+                category_name = summary_match.group(1).strip()
+                summary_text = summary_match.group(2).strip()
+                for cat in CATEGORIES.values():
+                    if cat.name.lower() == category_name.lower():
+                        category_id = cat.id
+                        break
+                        
+            transcript_match = re.search(r"## Transcript\n(.*?)(?=## Mind Map|$)", content, re.DOT_MATCHES_ALL)
+            if transcript_match:
+                transcript = transcript_match.group(1).strip()
+                
+            mindmap_match = re.search(r"## Mind Map\n(.*)", content, re.DOT_MATCHES_ALL)
+            if mindmap_match:
+                mindmap = mindmap_match.group(1).strip()
+                
+            audio_extensions = [".mp3", ".m4a", ".wav"]
+            audio_file = None
+            for ext in audio_extensions:
+                cand = export_root / "recordings" / f"{path.name}{ext}"
+                if cand.exists():
+                    audio_file = cand
+                    break
+                    
+            size_bytes = audio_file.stat().st_size if audio_file else note_md.stat().st_size
+            created_at = int((audio_file or note_md).stat().st_mtime * 1000)
+            filename = audio_file.name if audio_file else f"{path.name}.mp3"
+            
+            short_summary = ""
+            if summary_text:
+                blocks = [b.strip() for b in summary_text.split("\n\n") if b.strip()]
+                if blocks:
+                    short_summary = re.sub(r"###.*?\n", "", blocks[0]).strip().replace("\n", " ")
+                    if len(short_summary) > 200:
+                        short_summary = short_summary[:197] + "..."
+            
+            recordings.append({
+                "filename": filename,
+                "localPath": str(audio_file) if audio_file else "",
+                "sizeBytes": size_bytes,
+                "transcript": transcript,
+                "summary": summary_text,
+                "mindMap": mindmap,
+                "category": category_id,
+                "createdAt": created_at,
+                "title": title or path.name,
+                "shortSummary": short_summary,
+                "topics": [],
+                "durationMillis": 0,
+                "isLocal": False
+            })
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] failed to parse note in {path.name}: {e}")
+            
+    backup_data = {
+        "backupVersion": 1,
+        "exportedAt": int(datetime.now().timestamp() * 1000),
+        "recordings": recordings
+    }
+    
+    try:
+        backup_file.write_text(json.dumps(backup_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        console.print(f"[green]Backup exported successfully to:[/green] {backup_file} ({len(recordings)} notes)")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] failed to write backup file: {e}")
+        sys.exit(1)
+
+
+def cmd_import_backup(args: list[str]) -> None:
+    """Import notes from a JSON backup file."""
+    import re
+    backup_file = Path(_require_arg(args, 0, "backup_json_path"))
+    
+    if not backup_file.exists():
+        console.print(f"[red]Error:[/red] backup file not found: {backup_file}")
+        sys.exit(1)
+        
+    try:
+        backup_data = json.loads(backup_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        console.print(f"[red]Error:[/red] failed to parse backup JSON: {e}")
+        sys.exit(1)
+        
+    from src.categories import CATEGORIES
+    
+    recordings = backup_data.get("recordings")
+    if not isinstance(recordings, list):
+        console.print("[red]Error:[/red] backup JSON is missing a valid 'recordings' list.")
+        sys.exit(1)
+        
+    imported_count = 0
+    
+    for r in recordings:
+        if not isinstance(r, dict):
+            continue
+            
+        filename = r.get("filename")
+        if not filename or not isinstance(filename, str):
+            continue
+            
+        # Security validation: prevent directory traversal via filename characters
+        if not re.match(r"^[A-Za-z0-9._-]+$", filename) or filename in (".", ".."):
+            console.print(f"[yellow]Warning:[/yellow] skipping invalid filename: {filename}")
+            continue
+            
+        stem = Path(filename).stem
+        title = r.get("title", stem)
+        transcript = r.get("transcript", "")
+        summary_text = r.get("summary", "")
+        mindmap = r.get("mindMap", "")
+        category_id = r.get("category", 1)
+        
+        category = CATEGORIES.get(category_id)
+        category_name = category.name if category else "General"
+        
+        export_root = _export_dir()
+        out_dir = export_root / stem
+        note_file = out_dir / f"{stem}_note.md"
+        
+        # Security validation: prevent directory traversal via resolved paths
+        try:
+            resolved_export_dir = export_root.resolve()
+            resolved_note_file = note_file.resolve()
+            if resolved_export_dir not in resolved_note_file.parents:
+                console.print(f"[yellow]Warning:[/yellow] skipping suspicious file path traversal: {filename}")
+                continue
+        except Exception:
+            continue
+            
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        content = (
+            f"# {title}\n\n"
+            f"## Summary ({category_name})\n\n"
+            f"{summary_text}\n\n"
+            f"## Transcript\n\n{transcript}\n\n"
+            f"## Mind Map\n\n{mindmap}\n"
+        )
+        
+        try:
+            note_file.write_text(content, encoding="utf-8")
+            imported_count += 1
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] failed to write note {stem}_note.md: {e}")
+            
+    console.print(f"[green]Backup imported successfully![/green] Restored {imported_count} notes.")
+
+
 # ---------------------------------------------------------------------------
 # Main dispatcher
 # ---------------------------------------------------------------------------
@@ -341,6 +521,8 @@ COMMANDS = {
     "process": (cmd_process, "<file> [--category N] [--lang en] — run AI pipeline"),
     "export": (cmd_export, "<file> --format md,pdf,docx,srt,wav [--dest gdrive]"),
     "categories": (cmd_categories, "List all 15 recording categories"),
+    "export-backup": (cmd_export_backup, "<backup_json> — export all processed notes to a JSON backup"),
+    "import-backup": (cmd_import_backup, "<backup_json> — import notes from a JSON backup file"),
 }
 
 

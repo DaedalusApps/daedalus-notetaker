@@ -1,6 +1,7 @@
 package com.daedalus.notes
 
 import android.app.Application
+import android.net.Uri
 import android.util.Log
 import com.daedalus.notes.ble.BleManager
 import com.daedalus.notes.ble.BleState
@@ -46,10 +47,15 @@ class RecordingViewModelTest {
     fun setup() {
         Dispatchers.setMain(testDispatcher)
         mockkStatic(Log::class)
-        every { Log.d(any(), any()) } returns 0
-        every { Log.i(any(), any()) } returns 0
-        every { Log.e(any(), any()) } returns 0
-        every { Log.e(any(), any(), any()) } returns 0
+        every { Log.d(any(), any()) } answers { println("DEBUG: ${args[0]}: ${args[1]}"); 0 }
+        every { Log.i(any(), any()) } answers { println("INFO: ${args[0]}: ${args[1]}"); 0 }
+        every { Log.w(any(), any() as String) } answers { println("WARN: ${args[0]}: ${args[1]}"); 0 }
+        every { Log.e(any(), any()) } answers { println("ERROR: ${args[0]}: ${args[1]}"); 0 }
+        every { Log.e(any(), any(), any()) } answers {
+            println("ERROR: ${args[0]}: ${args[1]}")
+            (args[2] as? Throwable)?.printStackTrace()
+            0
+        }
         
         every { repo.allRecordings } returns flowOf(emptyList())
         every { bleManager.bleState } returns MutableStateFlow(
@@ -66,7 +72,8 @@ class RecordingViewModelTest {
             repo = repo,
             llm = llm,
             transcriber = transcriber,
-            embedder = embedder
+            embedder = embedder,
+            ioDispatcher = testDispatcher
         )
     }
 
@@ -223,5 +230,177 @@ class RecordingViewModelTest {
         // Verify pending deletions are removed from database
         coVerify(exactly = 1) { repo.delete(pending[0]) }
         coVerify(exactly = 1) { repo.delete(pending[1]) }
+    }
+
+    @Test
+    fun wipeLocalAnalysis_callsRepoWipe() = runTest {
+        var successCalled = false
+        var errorMessage: String? = null
+        viewModel.wipeLocalAnalysis(
+            deleteLocalAudio = false,
+            onSuccess = { successCalled = true },
+            onError = { errorMessage = it }
+        )
+        
+        advanceUntilIdle()
+        
+        coVerify(exactly = 1) { repo.wipeAllAnalysis() }
+        assertNull(errorMessage, errorMessage)
+        assertEquals(true, successCalled)
+    }
+
+    @Test
+    fun importBackup_withValidData_importsSuccessfully() = runTest {
+        val uri = mockk<Uri>()
+        val contentResolver = mockk<android.content.ContentResolver>()
+        every { application.contentResolver } returns contentResolver
+        coEvery { repo.get(any()) } returns null
+        
+        val tempDir = java.nio.file.Files.createTempDirectory("daedalus_test").toFile()
+        every { application.getExternalFilesDir(null) } returns tempDir
+        
+        val json = """
+            {
+              "recordings": [
+                {
+                  "filename": "valid_recording.mp3",
+                  "title": "Valid Note Title",
+                  "transcript": "Hello valid import",
+                  "category": 3,
+                  "createdAt": 123456789,
+                  "topics": ["test", "import"]
+                }
+              ]
+            }
+        """.trimIndent()
+        every { contentResolver.openInputStream(uri) } returns java.io.ByteArrayInputStream(json.toByteArray())
+        
+        var importedCount = 0
+        var errorMsg: String? = null
+        
+        viewModel.importBackup(
+            uri = uri,
+            onSuccess = { count -> importedCount = count },
+            onError = { errorMsg = it }
+        )
+        advanceUntilIdle()
+        
+        println("DEBUG TEST 1: importedCount = $importedCount, errorMsg = $errorMsg")
+        assertNull(errorMsg)
+        assertEquals(1, importedCount)
+        
+        // Verify save was called with the correct recording data
+        coVerify(exactly = 1) {
+            repo.save(match { recording ->
+                recording.filename == "valid_recording.mp3" &&
+                recording.title == "Valid Note Title" &&
+                recording.transcript == "Hello valid import" &&
+                recording.category == 3 &&
+                recording.createdAt == 123456789L &&
+                recording.topics == listOf("test", "import")
+            })
+        }
+    }
+
+    @Test
+    fun importBackup_withFilenamePathTraversal_skipsVulnerableEntry() = runTest {
+        val uri = mockk<Uri>()
+        val contentResolver = mockk<android.content.ContentResolver>()
+        every { application.contentResolver } returns contentResolver
+        coEvery { repo.get(any()) } returns null
+        
+        val tempDir = java.nio.file.Files.createTempDirectory("daedalus_test").toFile()
+        every { application.getExternalFilesDir(null) } returns tempDir
+        
+        val json = """
+            {
+              "recordings": [
+                {
+                  "filename": "../../../traversal.mp3",
+                  "title": "Vulnerable Note",
+                  "transcript": "Vulnerable entry"
+                },
+                {
+                  "filename": "valid_entry.mp3",
+                  "title": "Safe Note",
+                  "transcript": "Safe entry"
+                }
+              ]
+            }
+        """.trimIndent()
+        every { contentResolver.openInputStream(uri) } returns java.io.ByteArrayInputStream(json.toByteArray())
+        
+        var importedCount = 0
+        var errorMsg: String? = null
+        viewModel.importBackup(
+            uri = uri,
+            onSuccess = { count -> importedCount = count },
+            onError = { errorMsg = it }
+        )
+        advanceUntilIdle()
+        
+        println("DEBUG TEST 2: importedCount = $importedCount, errorMsg = $errorMsg")
+        assertNull(errorMsg)
+        
+        // Only the valid entry should be imported, the traversal one should be skipped
+        assertEquals(1, importedCount)
+        
+        // Verify only safe entry saved
+        coVerify(exactly = 1) {
+            repo.save(match { it.filename == "valid_entry.mp3" })
+        }
+        coVerify(exactly = 0) {
+            repo.save(match { it.filename.contains("traversal") })
+        }
+    }
+
+    @Test
+    fun importBackup_withLocalPathTraversal_ignoresVulnerableLocalPath() = runTest {
+        val uri = mockk<Uri>()
+        val contentResolver = mockk<android.content.ContentResolver>()
+        every { application.contentResolver } returns contentResolver
+        coEvery { repo.get(any()) } returns null
+        
+        val tempDir = java.nio.file.Files.createTempDirectory("daedalus_test").toFile()
+        every { application.getExternalFilesDir(null) } returns tempDir
+        
+        // Create a fake target file outside our app sandbox (represented by tempDir)
+        val outerTempFile = java.io.File(tempDir.parentFile, "should_not_access.mp3")
+        outerTempFile.createNewFile()
+        outerTempFile.deleteOnExit()
+        
+        val json = """
+            {
+              "recordings": [
+                {
+                  "filename": "recording_with_bad_path.mp3",
+                  "localPath": "${outerTempFile.absolutePath.replace("\\", "\\\\")}",
+                  "title": "Bad Local Path Note"
+                }
+              ]
+            }
+        """.trimIndent()
+        every { contentResolver.openInputStream(uri) } returns java.io.ByteArrayInputStream(json.toByteArray())
+        
+        var importedCount = 0
+        var errorMsg: String? = null
+        viewModel.importBackup(
+            uri = uri,
+            onSuccess = { count -> importedCount = count },
+            onError = { errorMsg = it }
+        )
+        advanceUntilIdle()
+        
+        println("DEBUG TEST 3: importedCount = $importedCount, errorMsg = $errorMsg")
+        assertNull(errorMsg)
+        assertEquals(1, importedCount)
+        
+        // The recording should be saved, but localPath must be empty/ignored
+        coVerify(exactly = 1) {
+            repo.save(match { recording ->
+                recording.filename == "recording_with_bad_path.mp3" &&
+                recording.localPath.isEmpty()
+            })
+        }
     }
 }

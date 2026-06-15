@@ -1,6 +1,9 @@
 package com.daedalus.notes.ui.screens
 
 import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -26,12 +29,14 @@ import com.daedalus.notes.ai.embeddingModelFile
 import com.daedalus.notes.ai.isWhisperReady
 import com.daedalus.notes.ui.components.DeviceStatusRow
 import com.daedalus.notes.viewmodel.DeviceViewModel
+import com.daedalus.notes.viewmodel.RecordingViewModel
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     deviceViewModel: DeviceViewModel,
+    recordingViewModel: RecordingViewModel,
     onBack: () -> Unit,
     onNavigateToPromptEditor: () -> Unit = {}
 ) {
@@ -61,6 +66,43 @@ fun SettingsScreen(
     val embeddingReady = remember(embeddingState) { embeddingModelFile(context).exists() }
 
     val bleState by deviceViewModel.bleManager.bleState.collectAsState()
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json"),
+        onResult = { uri ->
+            if (uri != null) {
+                recordingViewModel.exportBackup(
+                    uri = uri,
+                    onSuccess = {
+                        scope.launch { snackbar.showSnackbar("Backup exported successfully") }
+                    },
+                    onError = { err ->
+                        scope.launch { snackbar.showSnackbar("Export failed: $err") }
+                    }
+                )
+            }
+        }
+    )
+
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri ->
+            if (uri != null) {
+                recordingViewModel.importBackup(
+                    uri = uri,
+                    onSuccess = { count ->
+                        scope.launch { snackbar.showSnackbar("Imported $count recordings successfully") }
+                    },
+                    onError = { err ->
+                        scope.launch { snackbar.showSnackbar("Import failed: $err") }
+                    }
+                )
+            }
+        }
+    )
+
+    var showWipeConfirm by remember { mutableStateOf(false) }
+    var wipeDeleteAudio by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -179,6 +221,87 @@ fun SettingsScreen(
                         Text("Analyze recordings automatically when synced via BLE", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Switch(checked = autoProcess, onCheckedChange = { autoProcess = it })
+                }
+
+                // Backup & Recovery
+                Text("Backup & Recovery", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Export or import transcripts and summary metadata as a single JSON file. You can also wipe the local analysis to trigger re-analysis.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { exportLauncher.launch("daedalus_backup.json") },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Export Backup")
+                        }
+
+                        Button(
+                            onClick = { importLauncher.launch(arrayOf("application/json")) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Import Backup")
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = { showWipeConfirm = true },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Wipe Local Analysis")
+                    }
+                }
+
+                if (showWipeConfirm) {
+                    AlertDialog(
+                        onDismissRequest = { showWipeConfirm = false },
+                        title = { Text("Wipe Local Analysis") },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("This will clear all transcripts, summaries, mind maps, and topics from the local database. The original files on your voice recorder are unaffected.")
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Checkbox(
+                                        checked = wipeDeleteAudio,
+                                        onCheckedChange = { wipeDeleteAudio = it }
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Also delete audio files cached on phone", style = MaterialTheme.typography.bodyMedium)
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    showWipeConfirm = false
+                                    recordingViewModel.wipeLocalAnalysis(
+                                        deleteLocalAudio = wipeDeleteAudio,
+                                        onSuccess = {
+                                            scope.launch { snackbar.showSnackbar("Analysis wiped successfully") }
+                                        },
+                                        onError = { err ->
+                                            scope.launch { snackbar.showSnackbar("Wipe failed: $err") }
+                                        }
+                                    )
+                                },
+                                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                            ) {
+                                Text("Wipe")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showWipeConfirm = false }) {
+                                Text("Cancel")
+                            }
+                        }
+                    )
                 }
 
                 Spacer(Modifier.height(8.dp))

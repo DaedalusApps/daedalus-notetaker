@@ -90,6 +90,7 @@ fun NavGraph(
         composable("settings") {
             SettingsScreen(
                 deviceViewModel = deviceViewModel,
+                recordingViewModel = recordingViewModel,
                 onBack = { navController.popBackStack() },
                 onNavigateToPromptEditor = { navController.navigate("prompt_editor") }
             )

@@ -58,7 +58,8 @@ class RecordingViewModel @JvmOverloads constructor(
     private val repo: RecordingRepository = RecordingRepository(db.recordingDao()),
     private val llm: LocalLlmService = LocalLlmService(application),
     private val transcriber: TranscriptionService = TranscriptionService(application),
-    private val embedder: EmbeddingService = EmbeddingService(application)
+    private val embedder: EmbeddingService = EmbeddingService(application),
+    private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO
 ) : AndroidViewModel(application) {
 
     private val _syncProgress = MutableStateFlow<String?>(null)
@@ -585,7 +586,7 @@ class RecordingViewModel @JvmOverloads constructor(
 
             // Local-only recordings aren't on the FW920 — delete without requiring a device.
             if (recording.isLocal) {
-                recording.localPath.takeIf { it.isNotBlank() }?.let { File(it).delete() }
+                deleteFileSafely(recording.localPath)
                 repo.delete(recording)
                 _syncProgress.value = "Deleted successfully"
                 delay(1500)
@@ -595,7 +596,7 @@ class RecordingViewModel @JvmOverloads constructor(
 
             if (!isBleConnected(bleManager)) {
                 // Device not connected — delete local cache and queue delete for later
-                recording.localPath.takeIf { it.isNotBlank() }?.let { File(it).delete() }
+                deleteFileSafely(recording.localPath)
                 repo.markPendingDelete(filename)
                 _syncProgress.value = "Queued deletion"
                 delay(1500)
@@ -610,7 +611,7 @@ class RecordingViewModel @JvmOverloads constructor(
             
             if (bleSuccess) {
                 // 2. Remove local file
-                recording.localPath.takeIf { it.isNotBlank() }?.let { File(it).delete() }
+                deleteFileSafely(recording.localPath)
                 // 3. Remove from database
                 repo.delete(recording)
                 _syncProgress.value = "Deleted successfully"
@@ -639,14 +640,14 @@ class RecordingViewModel @JvmOverloads constructor(
                 _syncProgress.value = "Deleting $count of $total..."
 
                 if (recording.isLocal) {
-                    recording.localPath.takeIf { it.isNotBlank() }?.let { java.io.File(it).delete() }
+                    deleteFileSafely(recording.localPath)
                     repo.delete(recording)
                     continue
                 }
 
                 if (!connected) {
                     // Queue hardware deletion, remove local cache
-                    recording.localPath.takeIf { it.isNotBlank() }?.let { java.io.File(it).delete() }
+                    deleteFileSafely(recording.localPath)
                     repo.markPendingDelete(recording.filename)
                     queuedCount++
                     continue
@@ -657,7 +658,7 @@ class RecordingViewModel @JvmOverloads constructor(
 
                 if (bleSuccess) {
                     // 2. Local cleanup
-                    recording.localPath.takeIf { it.isNotBlank() }?.let { java.io.File(it).delete() }
+                    deleteFileSafely(recording.localPath)
                     repo.delete(recording)
                 } else {
                     Log.w("RecordingViewModel", "Failed to wipe ${recording.filename} from hardware")
@@ -816,6 +817,199 @@ class RecordingViewModel @JvmOverloads constructor(
             } finally {
                 _isAsking.value = false
             }
+        }
+    }
+
+    fun exportBackup(uri: Uri, onSuccess: () -> Unit, onError: (String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val recordings = withContext(ioDispatcher) {
+                    repo.allRecordings.first()
+                }
+                val rootJson = org.json.JSONObject().apply {
+                    put("backupVersion", 1)
+                    put("exportedAt", System.currentTimeMillis())
+                    
+                    val array = org.json.JSONArray()
+                    recordings.forEach { r ->
+                        val obj = org.json.JSONObject().apply {
+                            put("filename", r.filename)
+                            put("localPath", r.localPath)
+                            put("sizeBytes", r.sizeBytes)
+                            put("transcript", r.transcript)
+                            put("summary", r.summary)
+                            put("mindMap", r.mindMap)
+                            put("category", r.category)
+                            put("createdAt", r.createdAt)
+                            put("title", r.title)
+                            put("shortSummary", r.shortSummary)
+                            put("durationMillis", r.durationMillis)
+                            put("isLocal", r.isLocal)
+                            
+                            val topicsArr = org.json.JSONArray()
+                            r.topics.forEach { topicsArr.put(it) }
+                            put("topics", topicsArr)
+                            
+                            r.embedding?.let { emb ->
+                                val embArr = org.json.JSONArray()
+                                emb.forEach { embArr.put(it.toDouble()) }
+                                put("embedding", embArr)
+                            }
+                        }
+                        array.put(obj)
+                    }
+                    put("recordings", array)
+                }
+                
+                withContext(ioDispatcher) {
+                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(rootJson.toString(2).toByteArray(Charsets.UTF_8))
+                    }
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                Log.e("RecordingViewModel", "Failed to export backup", e)
+                onError(e.message ?: "Unknown error")
+            }
+        }
+    }
+
+    fun importBackup(uri: Uri, onSuccess: (Int) -> Unit, onError: (String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val context = getApplication<Application>()
+                val jsonStr = withContext(ioDispatcher) {
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        input.bufferedReader().readText()
+                    }
+                } ?: throw Exception("Could not open backup file")
+                
+                val root = org.json.JSONObject(jsonStr)
+                val array = root.optJSONArray("recordings") ?: throw Exception("Backup JSON is missing recordings list")
+                var importedCount = 0
+                
+                withContext(ioDispatcher) {
+                    val currentRecordingsDir = File(context.getExternalFilesDir(null), "Recordings")
+                    
+                    for (i in 0 until array.length()) {
+                        val obj = array.optJSONObject(i) ?: continue
+                        val filename = obj.optString("filename", "")
+                        
+                        // Security validation: prevent directory traversal via filename characters
+                        if (filename.isBlank() || !filename.matches(Regex("[A-Za-z0-9._-]+")) || filename == "." || filename == "..") {
+                            Log.w("RecordingViewModel", "Skipping invalid filename in backup: $filename")
+                            continue
+                        }
+                        
+                        val originalLocalPath = obj.optString("localPath", "")
+                        val fileInCurrentDir = File(currentRecordingsDir, filename)
+                        
+                        // Security validation: prevent directory traversal via resolved paths
+                        val isOriginalPathSafe = if (originalLocalPath.isNotEmpty()) {
+                            try {
+                                val originalFile = File(originalLocalPath).canonicalFile
+                                val appFilesDir = context.getExternalFilesDir(null)?.canonicalFile
+                                appFilesDir != null && originalFile.path.startsWith(appFilesDir.path + File.separator) && originalFile.exists()
+                            } catch (e: Exception) {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                        
+                        val resolvedLocalPath = when {
+                            fileInCurrentDir.exists() -> fileInCurrentDir.absolutePath
+                            isOriginalPathSafe -> originalLocalPath
+                            else -> ""
+                        }
+                        
+                        val topicsArr = obj.optJSONArray("topics")
+                        val topics = mutableListOf<String>()
+                        if (topicsArr != null) {
+                            for (j in 0 until topicsArr.length()) {
+                                val topic = topicsArr.optString(j, "")
+                                if (topic.isNotEmpty()) {
+                                    topics.add(topic)
+                                }
+                            }
+                        }
+                        
+                        val embArr = obj.optJSONArray("embedding")
+                        val embedding = if (embArr != null) {
+                            FloatArray(embArr.length()) { j -> embArr.optDouble(j, 0.0).toFloat() }
+                        } else {
+                            null
+                        }
+                        
+                        val existing = repo.get(filename)
+                        val recording = (existing ?: Recording(filename = filename)).copy(
+                            localPath = resolvedLocalPath.ifBlank { existing?.localPath ?: "" },
+                            sizeBytes = obj.optLong("sizeBytes", existing?.sizeBytes ?: 0L),
+                            transcript = obj.optString("transcript", existing?.transcript ?: ""),
+                            summary = obj.optString("summary", existing?.summary ?: ""),
+                            mindMap = obj.optString("mindMap", existing?.mindMap ?: ""),
+                            category = obj.optInt("category", existing?.category ?: 1),
+                            createdAt = obj.optLong("createdAt", existing?.createdAt ?: System.currentTimeMillis()),
+                            title = obj.optString("title", existing?.title ?: ""),
+                            shortSummary = obj.optString("shortSummary", existing?.shortSummary ?: ""),
+                            topics = topics,
+                            durationMillis = obj.optLong("durationMillis", existing?.durationMillis ?: 0L),
+                            embedding = embedding ?: existing?.embedding,
+                            isLocal = obj.optBoolean("isLocal", existing?.isLocal ?: false)
+                        )
+                        
+                        repo.save(recording)
+                        importedCount++
+                    }
+                }
+                onSuccess(importedCount)
+            } catch (e: Exception) {
+                Log.e("RecordingViewModel", "Failed to import backup", e)
+                onError(e.message ?: "Unknown error")
+            }
+        }
+    }
+
+    fun wipeLocalAnalysis(deleteLocalAudio: Boolean, onSuccess: () -> Unit, onError: (String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                withContext(ioDispatcher) {
+                    if (deleteLocalAudio) {
+                        val recordings = repo.allRecordings.first()
+                        recordings.forEach { r ->
+                            deleteFileSafely(r.localPath)
+                        }
+                    }
+                    repo.wipeAllAnalysis()
+                    if (deleteLocalAudio) {
+                        val recordings = repo.allRecordings.first()
+                        recordings.forEach { r ->
+                            repo.save(r.copy(localPath = "", sizeBytes = 0L))
+                        }
+                    }
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                Log.e("RecordingViewModel", "Failed to wipe analysis", e)
+                onError(e.message ?: "Unknown error")
+            }
+        }
+    }
+
+    private fun deleteFileSafely(path: String) {
+        if (path.isBlank()) return
+        try {
+            val f = File(path).canonicalFile
+            val appFilesDir = getApplication<Application>().getExternalFilesDir(null)?.canonicalFile
+            if (appFilesDir != null && f.path.startsWith(appFilesDir.path + File.separator)) {
+                if (f.exists()) {
+                    f.delete()
+                }
+            } else {
+                Log.w("RecordingViewModel", "Skipped deleting out-of-sandbox file: $path")
+            }
+        } catch (e: Exception) {
+            Log.e("RecordingViewModel", "Failed to safely delete file: $path", e)
         }
     }
 

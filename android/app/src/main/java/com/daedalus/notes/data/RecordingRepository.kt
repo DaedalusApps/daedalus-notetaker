@@ -70,4 +70,6 @@ class RecordingRepository(private val dao: RecordingDao) {
             topics = topics
         ))
     }
+
+    suspend fun wipeAllAnalysis() = dao.wipeAllAnalysis()
 }
