@@ -27,6 +27,7 @@ import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.AudioUtils
 import com.daedalus.notes.data.model.Recording
+import com.daedalus.notes.recording.AudioRecorder
 import com.daedalus.notes.ui.mindmap.GlobalGraph
 import com.daedalus.notes.ui.mindmap.GraphBuilder
 import kotlinx.coroutines.CancellationException
@@ -45,6 +46,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class RecordingViewModel @JvmOverloads constructor(
@@ -94,6 +98,24 @@ class RecordingViewModel @JvmOverloads constructor(
     private val _exportIntent = MutableStateFlow<Intent?>(null)
     val exportIntent: StateFlow<Intent?> = _exportIntent
 
+    // Local audio recording (phone mic) — fallback when no FW920 is connected.
+    // Lazy so construction doesn't touch AudioManager until a recording actually starts.
+    private val audioRecorder by lazy { AudioRecorder(getApplication()) }
+    private var recordingTimerJob: Job? = null
+    private var currentRecordingFile: File? = null
+    private var recordingStartMillis: Long = 0L
+
+    private val _isRecording = MutableStateFlow(false)
+    val isRecording: StateFlow<Boolean> = _isRecording
+
+    private val _isPaused = MutableStateFlow(false)
+    val isPaused: StateFlow<Boolean> = _isPaused
+
+    private val _recordingDurationSeconds = MutableStateFlow(0L)
+    val recordingDurationSeconds: StateFlow<Long> = _recordingDurationSeconds
+
+    val useBluetoothMic = MutableStateFlow(false)
+
     val allRecordings: StateFlow<List<Recording>> = repo.allRecordings
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
@@ -111,6 +133,10 @@ class RecordingViewModel @JvmOverloads constructor(
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     init {
+        useBluetoothMic.value = application
+            .getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+            .getBoolean("use_bluetooth_mic", false)
+
         // Heal missing durations for already synced files
         viewModelScope.launch(Dispatchers.IO) {
             repo.allRecordings.first().forEach { recording ->
@@ -125,6 +151,109 @@ class RecordingViewModel @JvmOverloads constructor(
     }
 
     fun setSearchQuery(q: String) { _searchQuery.value = q }
+
+    // ------------------------------------------------------------------
+    // Local recording (phone mic) — fallback when no FW920 is connected
+    // ------------------------------------------------------------------
+
+    fun setUseBluetoothMic(enabled: Boolean) {
+        useBluetoothMic.value = enabled
+        getApplication<Application>()
+            .getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("use_bluetooth_mic", enabled)
+            .apply()
+    }
+
+    fun startLocalRecording() {
+        if (_isRecording.value) return
+        val context = getApplication<Application>()
+        val dir = File(context.getExternalFilesDir(null), "Recordings").also { it.mkdirs() }
+        val sdf = SimpleDateFormat("yyyyMMddHHmmss", Locale.US)
+        val file = File(dir, "${sdf.format(Date())}.m4a")
+        currentRecordingFile = file
+
+        _recordingDurationSeconds.value = 0L
+        recordingStartMillis = System.currentTimeMillis()
+
+        try {
+            audioRecorder.start(file, useBluetoothMic.value)
+            _isRecording.value = true
+            _isPaused.value = false
+            _aiError.value = null
+
+            recordingTimerJob?.cancel()
+            recordingTimerJob = viewModelScope.launch(Dispatchers.Default) {
+                var elapsed = 0L
+                while (true) {
+                    delay(1000)
+                    elapsed++
+                    _recordingDurationSeconds.value = elapsed
+                }
+            }
+            Log.i("RecordingViewModel", "Started local recording: ${file.name}")
+        } catch (e: Exception) {
+            Log.e("RecordingViewModel", "Failed to start local recording", e)
+            _aiError.value = "Failed to start recording: ${e.message}"
+            _isRecording.value = false
+            currentRecordingFile = null
+        }
+    }
+
+    fun pauseLocalRecording() {
+        if (!_isRecording.value || _isPaused.value) return
+        audioRecorder.pause()
+        _isPaused.value = true
+        recordingTimerJob?.cancel()
+    }
+
+    fun resumeLocalRecording() {
+        if (!_isRecording.value || !_isPaused.value) return
+        audioRecorder.resume()
+        _isPaused.value = false
+        recordingTimerJob = viewModelScope.launch(Dispatchers.Default) {
+            var elapsed = _recordingDurationSeconds.value
+            while (true) {
+                delay(1000)
+                elapsed++
+                _recordingDurationSeconds.value = elapsed
+            }
+        }
+    }
+
+    fun stopLocalRecording() {
+        if (!_isRecording.value) return
+        audioRecorder.stop()
+        recordingTimerJob?.cancel()
+        _isRecording.value = false
+        _isPaused.value = false
+
+        val file = currentRecordingFile ?: return
+        currentRecordingFile = null
+        if (file.exists() && file.length() > 0) {
+            val duration = System.currentTimeMillis() - recordingStartMillis
+            val name = file.name
+            viewModelScope.launch {
+                repo.save(
+                    Recording(
+                        filename = name,
+                        localPath = file.absolutePath,
+                        sizeBytes = file.length(),
+                        durationMillis = duration,
+                        createdAt = System.currentTimeMillis(),
+                        isLocal = true
+                    )
+                )
+                Log.i("RecordingViewModel", "Saved local recording: $name (${file.length()} bytes)")
+
+                val prefs = getApplication<Application>()
+                    .getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+                if (prefs.getBoolean("auto_process", false)) {
+                    doAnalyze(name)
+                }
+            }
+        }
+    }
 
     fun syncAllBleFiles(bleManager: BleManager) {
         syncJob = viewModelScope.launch {
@@ -431,11 +560,22 @@ class RecordingViewModel @JvmOverloads constructor(
 
     fun deleteRecording(filename: String, bleManager: BleManager) {
         viewModelScope.launch {
+            val recording = repo.get(filename) ?: return@launch
+
+            // Local-only recordings aren't on the FW920 — delete without requiring a device.
+            if (recording.isLocal) {
+                recording.localPath.takeIf { it.isNotBlank() }?.let { File(it).delete() }
+                repo.delete(recording)
+                _syncProgress.value = "Deleted successfully"
+                delay(1500)
+                _syncProgress.value = null
+                return@launch
+            }
+
             if (!isBleConnected(bleManager)) {
                 _aiError.value = "Device not connected. Connect the FW920 before deleting."
                 return@launch
             }
-            val recording = repo.get(filename) ?: return@launch
 
             // 1. Try to delete from physical device via BLE
             _syncProgress.value = "Deleting from device…"
@@ -459,30 +599,36 @@ class RecordingViewModel @JvmOverloads constructor(
 
     fun deleteMultipleRecordings(filenames: List<String>, bleManager: BleManager) {
         viewModelScope.launch {
-            if (!isBleConnected(bleManager)) {
+            val recordings = filenames.mapNotNull { repo.get(it) }
+            // Only require a device if at least one selected recording lives on the FW920.
+            if (recordings.any { !it.isLocal } && !isBleConnected(bleManager)) {
                 _aiError.value = "Device not connected. Connect the FW920 before deleting."
                 return@launch
             }
             _isProcessing.value = true
             var count = 0
             var failedCount = 0
-            val total = filenames.size
-            
-            for (filename in filenames) {
+            val total = recordings.size
+
+            for (recording in recordings) {
                 count++
                 _syncProgress.value = "Deleting $count of $total..."
-                
-                val recording = repo.get(filename) ?: continue
-                
+
+                if (recording.isLocal) {
+                    recording.localPath.takeIf { it.isNotBlank() }?.let { java.io.File(it).delete() }
+                    repo.delete(recording)
+                    continue
+                }
+
                 // 1. Hardware wipe
-                val bleSuccess = bleManager.deleteFile(filename)
-                
+                val bleSuccess = bleManager.deleteFile(recording.filename)
+
                 if (bleSuccess) {
                     // 2. Local cleanup
                     recording.localPath.takeIf { it.isNotBlank() }?.let { java.io.File(it).delete() }
                     repo.delete(recording)
                 } else {
-                    Log.w("RecordingViewModel", "Failed to wipe $filename from hardware")
+                    Log.w("RecordingViewModel", "Failed to wipe ${recording.filename} from hardware")
                     failedCount++
                 }
             }
@@ -506,7 +652,7 @@ class RecordingViewModel @JvmOverloads constructor(
             val context = getApplication<Application>()
 
             val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val outFile = File(downloadsDir, "${filename.removeSuffix(".mp3")}.md")
+            val outFile = File(downloadsDir, "${File(filename).nameWithoutExtension}.md")
             withContext(Dispatchers.IO) { outFile.writeText(content) }
 
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", outFile)

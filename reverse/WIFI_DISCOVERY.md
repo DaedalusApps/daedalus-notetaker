@@ -251,6 +251,39 @@ cd android && ./gradlew assembleDebug
 
 ---
 
+## File Upload (app→device) — Discovery Spike
+
+**Question**: Can a phone-recorded file be pushed *onto* FW920 storage over BLE, so local
+recordings sync back to the device?
+
+**Prior evidence (all point to NO):**
+- GEMINI.md protocol table (HCI snoop of DOWAY) lists only `0x0B` download and `0x0D` delete for
+  file transfer — no write/upload opcode.
+- The deleted Python prototype (`daedalus-echo` `src/ble/protocol.py`) has builders for every
+  command and **no upload function**.
+- The earlier `0x19–0x50` opcode probe found only `0x1A` responding (`[00]`); nothing accepted data.
+
+**Spike harness (implemented, pending hardware run):** `BleManager.probeUploadCmds()` tries each
+candidate opcode `0x0E–0x50` with a `filename(14)+size(4 LE)` "begin upload" payload, streams a
+512-byte dummy buffer + a candidate end-marker, then calls `listFiles()` to see if `UPLOADTEST01`
+appears. Trigger on a connected device:
+
+```powershell
+adb shell am broadcast -a com.daedalus.notes.PROBE_UPLOAD -n com.daedalus.notes/.AdbReceiver
+adb logcat -s UploadProbe
+```
+
+**Go/no-go gate:**
+- **GO** — an opcode acks *and* `UPLOADTEST01` shows up in the file list → implement
+  `BleManager.uploadFile()` mirroring `downloadFile()` and call it from
+  `RecordingViewModel.stopLocalRecording()` when a device is connected.
+- **NO-GO (expected)** — no opcode accepts the file → leave upload unimplemented. Local recordings
+  already work fully in-app (transcribed/analyzed, listed alongside device files); no device upload.
+
+**Result**: _pending hardware run — record outcome here._
+
+---
+
 ## Next Session — Resume Steps
 
 1. `cd` into the repo root

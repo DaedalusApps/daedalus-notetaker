@@ -60,6 +60,12 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                "com.daedalus.notes.PROBE_UPLOAD" -> {
+                    Log.i("DaedalusADB", "Upload probe triggered")
+                    lifecycleScope.launch {
+                        deviceViewModel.bleManager.probeUploadCmds()
+                    }
+                }
                 "com.daedalus.notes.ANALYZE" -> {
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Analyze triggered for '$filename'")
@@ -86,6 +92,7 @@ class MainActivity : ComponentActivity() {
                 addAction("com.daedalus.notes.PROBE")
                 addAction("com.daedalus.notes.PROBE2")
                 addAction("com.daedalus.notes.PROBE_DELETE")
+                addAction("com.daedalus.notes.PROBE_UPLOAD")
                 addAction("com.daedalus.notes.ANALYZE")
             }
             ContextCompat.registerReceiver(this, adbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)

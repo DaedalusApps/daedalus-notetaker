@@ -295,8 +295,10 @@ class BleManager(private val context: Context) {
                 batteryPct     = if (s.batteryPct > 0) s.batteryPct else current.batteryPct,
                 storageFreeKb  = if (s.storageFreeKb > 0) s.storageFreeKb else current.storageFreeKb,
                 storageTotalKb = if (s.storageTotalKb > 0) s.storageTotalKb else current.storageTotalKb,
-                // Never update isRecording from status polls — only CMD 0x06/0x08 events are reliable.
-                isRecording    = current.isRecording,
+                // CMD 0x05 carries the device's authoritative recording flag (payload[12]); trust it so
+                // the poller self-heals when the device drops a 0x08 stop event. CMD 0x0F is unreliable
+                // (payload[2] often reads 0x01 when idle), so keep ignoring it.
+                isRecording    = if (resp.cmd == 0x05) s.isRecording else current.isRecording,
                 fwVersion      = if (s.fwName.isNotEmpty()) s.fwName else current.fwVersion
             )
         }
@@ -646,6 +648,45 @@ class BleManager(private val context: Context) {
             }
         }
         Log.i("DeleteProbe", "No delete command found in 0x0D-0x17 range")
+    }
+
+    /**
+     * SPIKE: probe for an UPLOAD command (app→device file write). Every known source
+     * (GEMINI.md protocol table, the deleted Python prototype, the 0x19–0x50 probe) shows the
+     * FW920 protocol is download-only. This tries each candidate opcode with a filename+size
+     * "begin upload" payload, streams a small dummy buffer + a candidate end marker, then checks
+     * whether the file appears via listFiles(). Logs under tag "UploadProbe".
+     * Run on real hardware (device connected): adb broadcast com.daedalus.notes.PROBE_UPLOAD
+     */
+    suspend fun probeUploadCmds() {
+        val testName  = "UPLOADTEST01"
+        val nameBytes = testName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
+        val dummy     = ByteArray(512) { (it and 0xFF).toByte() }
+        val sizeLe    = byteArrayOf(
+            (dummy.size and 0xFF).toByte(),
+            ((dummy.size ushr 8) and 0xFF).toByte(),
+            ((dummy.size ushr 16) and 0xFF).toByte(),
+            ((dummy.size ushr 24) and 0xFF).toByte()
+        )
+        val skip = setOf(0x0F, 0x15, 0x18, 0x1A)  // periodic status / known-mapped opcodes
+        for (cmd in (0x0E..0x50).filter { it !in skip }) {
+            Log.i("UploadProbe", "Trying CMD 0x${cmd.toString(16).uppercase()} begin-upload (name+size)")
+            sendPacket(buildPacket(cmd, nameBytes + sizeLe))
+            val resp = withTimeoutOrNull(1200L) { responseChannel.receive() }
+            Log.i("UploadProbe", "  begin resp: $resp")
+            if (resp is ParsedResponse.Ack && resp.cmd == cmd) {
+                sendPacket(dummy)                        // candidate raw data chunk
+                sendPacket(buildPacket(cmd, nameBytes))  // candidate end-of-upload marker
+                kotlinx.coroutines.delay(300)
+            }
+            kotlinx.coroutines.delay(200)
+            collectFileList()
+            if (_bleState.value.files.any { it.filename.equals(testName, ignoreCase = true) }) {
+                Log.i("UploadProbe", "*** UPLOAD COMMAND FOUND: 0x${cmd.toString(16).uppercase()} — '$testName' is now on device ***")
+                return
+            }
+        }
+        Log.i("UploadProbe", "No upload command found in 0x0E–0x50. Protocol appears download-only.")
     }
 
     // ------------------------------------------------------------------
