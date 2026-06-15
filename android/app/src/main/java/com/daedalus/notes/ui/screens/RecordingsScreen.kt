@@ -169,7 +169,13 @@ fun RecordingsScreen(
                         IconButton(onClick = { filePickerLauncher.launch(arrayOf("audio/*")) }) {
                             Icon(Icons.Default.FolderOpen, contentDescription = "Import from USB OTG")
                         }
-                        IconButton(onClick = { recordingViewModel.syncAllBleFiles(viewModel.bleManager) }) {
+                        IconButton(onClick = {
+                            if (bleState.connectionState == ConnectionState.CONNECTED) {
+                                recordingViewModel.syncAllBleFiles(viewModel.bleManager)
+                            } else {
+                                viewModel.scan()
+                            }
+                        }) {
                             Icon(Icons.Default.Sync, contentDescription = "Sync via BLE")
                         }
                     }
@@ -190,7 +196,8 @@ fun RecordingsScreen(
                 bleState = bleState,
                 onScan = { viewModel.scan() },
                 onCancelScan = { viewModel.disconnect() },
-                allowScan = !isRecording
+                allowScan = !isRecording,
+                showDisconnected = false
             )
 
             // Sync progress

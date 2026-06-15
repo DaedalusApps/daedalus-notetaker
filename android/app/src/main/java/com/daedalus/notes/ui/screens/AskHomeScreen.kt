@@ -181,7 +181,8 @@ fun AskHomeScreen(
                 bleState = bleState,
                 onScan = { deviceViewModel.scan() },
                 onCancelScan = { deviceViewModel.disconnect() },
-                allowScan = !isRecording
+                allowScan = !isRecording,
+                showDisconnected = false
             )
 
             Column(

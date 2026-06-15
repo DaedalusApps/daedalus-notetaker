@@ -30,18 +30,21 @@ class RecordingsScreenTest {
     private val filteredRecordingsFlow = MutableStateFlow<List<Recording>>(emptyList())
     private val searchQueryFlow = MutableStateFlow("")
     private val syncProgressFlow = MutableStateFlow<String?>(null)
+    private val isRecordingFlow = MutableStateFlow(false)
 
     @Before
     fun setup() {
         every { deviceViewModel.bleManager } returns bleManager
         every { bleManager.bleState } returns bleStateFlow
+        every { deviceViewModel.shouldAutoConnect } returns true
         every { recordingViewModel.filteredRecordings } returns filteredRecordingsFlow
         every { recordingViewModel.searchQuery } returns searchQueryFlow
         every { recordingViewModel.syncProgress } returns syncProgressFlow
+        every { recordingViewModel.isRecording } returns isRecordingFlow
     }
 
     @Test
-    fun recordingsScreen_disconnected_showsNotConnectedBanner() {
+    fun recordingsScreen_disconnected_doesNotShowNotConnectedBanner() {
         bleStateFlow.value = BleState(connectionState = ConnectionState.DISCONNECTED)
 
         composeTestRule.setContent {
@@ -55,7 +58,7 @@ class RecordingsScreenTest {
             }
         }
 
-        composeTestRule.onNodeWithText("FW920 not connected").assertIsDisplayed()
+        composeTestRule.onNodeWithText("FW920 not connected").assertDoesNotExist()
     }
 
     @Test

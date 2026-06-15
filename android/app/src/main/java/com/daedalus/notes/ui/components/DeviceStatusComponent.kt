@@ -42,7 +42,8 @@ fun DeviceStatusRow(
     bleState: BleState,
     onScan: () -> Unit,
     onCancelScan: () -> Unit,
-    allowScan: Boolean = true
+    allowScan: Boolean = true,
+    showDisconnected: Boolean = true
 ) {
     when (bleState.connectionState) {
         ConnectionState.CONNECTED -> {
@@ -147,45 +148,47 @@ fun DeviceStatusRow(
         }
 
         ConnectionState.DISCONNECTED, ConnectionState.ERROR -> {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer
-                )
-            ) {
-                Row(
+            if (showDisconnected) {
+                Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
                 ) {
-                    Icon(
-                        Icons.Default.BluetoothDisabled,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                    Text(
-                        text = if (bleState.connectionState == ConnectionState.ERROR && bleState.errorMessage.isNotBlank())
-                            bleState.errorMessage else "FW920 not connected",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    TextButton(
-                        onClick = onScan,
-                        enabled = allowScan
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(
-                            "Scan",
-                            color = if (allowScan) MaterialTheme.colorScheme.onErrorContainer
-                            else MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.38f)
+                        Icon(
+                            Icons.Default.BluetoothDisabled,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onErrorContainer
                         )
+                        Text(
+                            text = if (bleState.connectionState == ConnectionState.ERROR && bleState.errorMessage.isNotBlank())
+                                bleState.errorMessage else "FW920 not connected",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        TextButton(
+                            onClick = onScan,
+                            enabled = allowScan
+                        ) {
+                            Text(
+                                "Scan",
+                                color = if (allowScan) MaterialTheme.colorScheme.onErrorContainer
+                                else MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.38f)
+                            )
+                        }
                     }
                 }
             }

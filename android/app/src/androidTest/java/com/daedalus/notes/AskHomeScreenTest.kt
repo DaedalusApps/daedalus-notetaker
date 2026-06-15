@@ -26,6 +26,10 @@ class AskHomeScreenTest {
     private val isAskingFlow = MutableStateFlow(false)
     private val globalGraphFlow = MutableStateFlow(com.daedalus.notes.ui.mindmap.GlobalGraph(emptyList(), emptyList()))
     private val bleStateFlow = MutableStateFlow(com.daedalus.notes.ble.BleState())
+    private val isRecordingFlow = MutableStateFlow(false)
+    private val isPausedFlow = MutableStateFlow(false)
+    private val recordingDurationSecondsFlow = MutableStateFlow(0L)
+    private val useBluetoothMicFlow = MutableStateFlow(false)
 
     @Before
     fun setup() {
@@ -36,8 +40,13 @@ class AskHomeScreenTest {
         every { recordingViewModel.aiError } returns MutableStateFlow(null)
         every { recordingViewModel.librarySources } returns MutableStateFlow(emptyList())
         every { recordingViewModel.exportIntent } returns MutableStateFlow(null)
+        every { recordingViewModel.isRecording } returns isRecordingFlow
+        every { recordingViewModel.isPaused } returns isPausedFlow
+        every { recordingViewModel.recordingDurationSeconds } returns recordingDurationSecondsFlow
+        every { recordingViewModel.useBluetoothMic } returns useBluetoothMicFlow
         
         every { deviceViewModel.bleManager.bleState } returns bleStateFlow
+        every { deviceViewModel.shouldAutoConnect } returns true
     }
 
     @Test
