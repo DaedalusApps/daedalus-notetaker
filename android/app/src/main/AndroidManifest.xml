@@ -50,14 +50,17 @@
 
         <receiver
             android:name=".AdbReceiver"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
                 <action android:name="com.daedalus.notes.SYNC" />
                 <action android:name="com.daedalus.notes.PROBE" />
                 <action android:name="com.daedalus.notes.PROBE2" />
                 <action android:name="com.daedalus.notes.PROBE_DELETE" />
                 <action android:name="com.daedalus.notes.PROBE_UPLOAD" />
+                <action android:name="com.daedalus.notes.START_RECORDING" />
+                <action android:name="com.daedalus.notes.STOP_RECORDING" />
                 <action android:name="com.daedalus.notes.ANALYZE" />
+                <action android:name="com.daedalus.notes.DELETE_FILE" />
             </intent-filter>
         </receiver>
 

@@ -66,11 +66,32 @@ class MainActivity : ComponentActivity() {
                         deviceViewModel.bleManager.probeUploadCmds()
                     }
                 }
+                "com.daedalus.notes.START_RECORDING" -> {
+                    Log.i("DaedalusADB", "Device start-recording triggered")
+                    lifecycleScope.launch { deviceViewModel.bleManager.startDeviceRecording() }
+                }
+                "com.daedalus.notes.STOP_RECORDING" -> {
+                    Log.i("DaedalusADB", "Device stop-recording triggered")
+                    lifecycleScope.launch { deviceViewModel.bleManager.stopDeviceRecording() }
+                }
                 "com.daedalus.notes.ANALYZE" -> {
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Analyze triggered for '$filename'")
                     if (filename.isNotBlank()) {
                         lifecycleScope.launch { recordingViewModel.analyze(filename) }
+                    }
+                }
+                "com.daedalus.notes.DELETE_FILE" -> {
+                    // Invokes the same hardware delete the app's delete path uses
+                    // (RecordingViewModel.deleteRecording -> BleManager.deleteFile), which
+                    // two-phase-deletes over BLE then re-lists to confirm the file is gone.
+                    val filename = intent?.getStringExtra("filename") ?: ""
+                    Log.i("DaedalusADB", "Hardware delete triggered for '$filename'")
+                    if (filename.isNotBlank()) {
+                        lifecycleScope.launch {
+                            val ok = deviceViewModel.bleManager.deleteFile(filename)
+                            Log.i("DaedalusADB", "Hardware delete result for '$filename': $ok")
+                        }
                     }
                 }
             }
@@ -93,7 +114,10 @@ class MainActivity : ComponentActivity() {
                 addAction("com.daedalus.notes.PROBE2")
                 addAction("com.daedalus.notes.PROBE_DELETE")
                 addAction("com.daedalus.notes.PROBE_UPLOAD")
+                addAction("com.daedalus.notes.START_RECORDING")
+                addAction("com.daedalus.notes.STOP_RECORDING")
                 addAction("com.daedalus.notes.ANALYZE")
+                addAction("com.daedalus.notes.DELETE_FILE")
             }
             // ADB shell (uid 2000) broadcasts are not delivered to RECEIVER_NOT_EXPORTED
             // receivers on Android 14+; this receiver is debug-only and exists solely so
@@ -101,18 +125,28 @@ class MainActivity : ComponentActivity() {
             ContextCompat.registerReceiver(this, adbReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
         }
 
-        // Auto-sync on first BLE connect. lastState lives outside repeatOnLifecycle so it
-        // survives stop/start cycles and doesn't re-trigger sync on every app resume.
+        // Auto-sync on first BLE connect and when hardware recording finishes.
+        // lastState and lastIsRecording live outside repeatOnLifecycle.
         var lastState = ConnectionState.DISCONNECTED
+        var lastIsRecording = false
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 deviceViewModel.state.collect { bleState ->
-                    if (bleState.connectionState == ConnectionState.CONNECTED &&
-                        lastState != ConnectionState.CONNECTED) {
+                    val isConnected = bleState.connectionState == ConnectionState.CONNECTED
+                    val wasConnected = lastState == ConnectionState.CONNECTED
+
+                    if (isConnected && !wasConnected) {
                         Log.i("DaedalusADB", "BLE connected — auto-syncing")
                         recordingViewModel.syncAllBleFiles(deviceViewModel.bleManager)
                     }
+
+                    if (isConnected && lastIsRecording && !bleState.isRecording) {
+                        Log.i("DaedalusADB", "Hardware recording finished — auto-syncing")
+                        recordingViewModel.syncAllBleFiles(deviceViewModel.bleManager)
+                    }
+
                     lastState = bleState.connectionState
+                    lastIsRecording = bleState.isRecording
                 }
             }
         }
@@ -135,6 +169,8 @@ class MainActivity : ComponentActivity() {
         val permissions = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.MODIFY_AUDIO_SETTINGS,
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions += listOf(

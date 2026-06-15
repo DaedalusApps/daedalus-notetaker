@@ -11,18 +11,25 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface RecordingDao {
 
-    @Query("SELECT * FROM recordings ORDER BY createdAt DESC")
+    @Query("SELECT * FROM recordings WHERE pendingDelete = 0 ORDER BY createdAt DESC")
     fun getAllFlow(): Flow<List<Recording>>
 
     @Query("SELECT * FROM recordings WHERE filename = :filename")
     suspend fun get(filename: String): Recording?
 
     @Query("""SELECT * FROM recordings WHERE
-    filename LIKE '%' || :q || '%' OR
+    (filename LIKE '%' || :q || '%' OR
     transcript LIKE '%' || :q || '%' OR
-    summary LIKE '%' || :q || '%'
+    summary LIKE '%' || :q || '%') AND
+    pendingDelete = 0
     ORDER BY createdAt DESC""")
     fun searchFlow(q: String): Flow<List<Recording>>
+
+    @Query("SELECT * FROM recordings WHERE pendingDelete = 1")
+    suspend fun getPendingDeletes(): List<Recording>
+
+    @Query("UPDATE recordings SET pendingDelete = :pendingDelete WHERE filename = :filename")
+    suspend fun updatePendingDelete(filename: String, pendingDelete: Boolean)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(recording: Recording)

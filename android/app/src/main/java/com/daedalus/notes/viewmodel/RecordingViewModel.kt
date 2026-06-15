@@ -20,6 +20,7 @@ import com.daedalus.notes.ai.MarkdownExporter
 import com.daedalus.notes.ai.SmartAnalysisParser
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.isWhisperReady
+import com.daedalus.notes.ai.isTranscriptReadable
 import com.daedalus.notes.ai.selectedModel
 import com.daedalus.notes.ble.BleManager
 import com.daedalus.notes.ble.ConnectionState
@@ -262,12 +263,31 @@ class RecordingViewModel @JvmOverloads constructor(
                 _aiError.value = "Device not connected. Connect the FW920 before syncing."
                 return@launch
             }
+
+            // Process any pending deletions while connected
+            val pending = repo.getPendingDeletes()
+            if (pending.isNotEmpty()) {
+                var delCount = 0
+                val totalDel = pending.size
+                for (recording in pending) {
+                    delCount++
+                    _syncProgress.value = "Deleting pending $delCount of $totalDel..."
+                    val success = bleManager.deleteFile(recording.filename)
+                    if (success) {
+                        repo.delete(recording)
+                    } else {
+                        Log.w("RecordingViewModel", "Failed to delete pending file ${recording.filename} from hardware during sync")
+                    }
+                }
+            }
+
             _syncProgress.value = "Listing files on device…"
             bleManager.listFiles()
             val files = bleManager.bleState.value.files
             if (files.isEmpty()) {
+                _syncProgress.value = "No files on device"
+                delay(1000)
                 _syncProgress.value = null
-                _aiError.value = "No files found on device. Make sure FW920 is connected."
                 return@launch
             }
             _aiError.value = null
@@ -484,16 +504,17 @@ class RecordingViewModel @JvmOverloads constructor(
                 _syncProgress.value = "Transcribing audio…"
                 Log.i("DaedalusAI", "Transcribing ${localFile.name}")
                 val transcript = transcriber.transcribe(localFile)
-                if (transcript.isBlank()) {
+                repo.save(note.copy(transcript = transcript))
+
+                if (!isTranscriptReadable(transcript)) {
                     val modelReady = isWhisperReady(getApplication())
                     _aiError.value = if (modelReady) {
-                        "No speech detected in this recording (too short or silent)."
+                        "No speech or readable content detected in this recording."
                     } else {
                         "Transcription model not found. Please download it in Settings."
                     }
                     return
                 }
-                repo.save(note.copy(transcript = transcript))
 
                 // Step 2: Summarize + mind map with Gemma (Single Pass)
                 _syncProgress.value = "Analyzing with Gemma…"
@@ -573,7 +594,12 @@ class RecordingViewModel @JvmOverloads constructor(
             }
 
             if (!isBleConnected(bleManager)) {
-                _aiError.value = "Device not connected. Connect the FW920 before deleting."
+                // Device not connected — delete local cache and queue delete for later
+                recording.localPath.takeIf { it.isNotBlank() }?.let { File(it).delete() }
+                repo.markPendingDelete(filename)
+                _syncProgress.value = "Queued deletion"
+                delay(1500)
+                _syncProgress.value = null
                 return@launch
             }
 
@@ -600,15 +626,13 @@ class RecordingViewModel @JvmOverloads constructor(
     fun deleteMultipleRecordings(filenames: List<String>, bleManager: BleManager) {
         viewModelScope.launch {
             val recordings = filenames.mapNotNull { repo.get(it) }
-            // Only require a device if at least one selected recording lives on the FW920.
-            if (recordings.any { !it.isLocal } && !isBleConnected(bleManager)) {
-                _aiError.value = "Device not connected. Connect the FW920 before deleting."
-                return@launch
-            }
             _isProcessing.value = true
             var count = 0
             var failedCount = 0
+            var queuedCount = 0
             val total = recordings.size
+
+            val connected = isBleConnected(bleManager)
 
             for (recording in recordings) {
                 count++
@@ -617,6 +641,14 @@ class RecordingViewModel @JvmOverloads constructor(
                 if (recording.isLocal) {
                     recording.localPath.takeIf { it.isNotBlank() }?.let { java.io.File(it).delete() }
                     repo.delete(recording)
+                    continue
+                }
+
+                if (!connected) {
+                    // Queue hardware deletion, remove local cache
+                    recording.localPath.takeIf { it.isNotBlank() }?.let { java.io.File(it).delete() }
+                    repo.markPendingDelete(recording.filename)
+                    queuedCount++
                     continue
                 }
 
@@ -636,6 +668,8 @@ class RecordingViewModel @JvmOverloads constructor(
             if (failedCount > 0) {
                 _syncProgress.value = "Done ($failedCount failed)"
                 _aiError.value = "Some files could not be deleted from the FW920 hardware."
+            } else if (queuedCount > 0) {
+                _syncProgress.value = "Queued $queuedCount deletion(s)"
             } else {
                 _syncProgress.value = "Deleted $total items"
             }

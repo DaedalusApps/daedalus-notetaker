@@ -2,6 +2,7 @@ package com.daedalus.notes
 
 import com.daedalus.notes.ai.SmartAnalysis
 import com.daedalus.notes.ai.SmartAnalysisParser
+import com.daedalus.notes.ai.isTranscriptReadable
 import com.daedalus.notes.data.model.DateUtils
 import org.junit.Assert.*
 import org.junit.Test
@@ -51,5 +52,40 @@ class SmartSummaryTest {
         assertEquals("", analysis.shortSummary)
         assertTrue(analysis.topics.isEmpty())
         assertTrue(analysis.fullSummary.contains("invalid json"))
+    }
+
+    @Test
+    fun isTranscriptReadable_blankOrEmpty_returnsFalse() {
+        assertFalse(isTranscriptReadable(""))
+        assertFalse(isTranscriptReadable("   "))
+    }
+
+    @Test
+    fun isTranscriptReadable_bracketTagsOnly_returnsFalse() {
+        assertFalse(isTranscriptReadable("[laughter]"))
+        assertFalse(isTranscriptReadable("  [music]  "))
+        assertFalse(isTranscriptReadable("(silent)"))
+        assertFalse(isTranscriptReadable("[laughter] (cough)"))
+    }
+
+    @Test
+    fun isTranscriptReadable_tooShort_returnsFalse() {
+        assertFalse(isTranscriptReadable("Hello."))
+        assertFalse(isTranscriptReadable("Yes sure."))
+        assertFalse(isTranscriptReadable("[laughter] Hello you")) // clean text has 2 words
+    }
+
+    @Test
+    fun isTranscriptReadable_whisperLoopHallucination_returnsFalse() {
+        // Single word repetition loop
+        assertFalse(isTranscriptReadable("Thank you. Thank you. Thank you. Thank you. Thank you. Thank you. Thank you. Thank you."))
+        // Two-word repetition loop
+        assertFalse(isTranscriptReadable("Is there Is there Is there Is there Is there Is there Is there Is there"))
+    }
+
+    @Test
+    fun isTranscriptReadable_normalReadableSpeech_returnsTrue() {
+        assertTrue(isTranscriptReadable("This is a normal recording with some readable speech."))
+        assertTrue(isTranscriptReadable("Meeting starts today at three PM [laughter] to discuss the project roadmap."))
     }
 }

@@ -13,9 +13,17 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
     val bleManager = BleManager(application)
     val state: StateFlow<BleState> = bleManager.bleState
 
-    fun scan() = bleManager.startScan()
+    var shouldAutoConnect: Boolean = true
 
-    fun disconnect() = bleManager.disconnect()
+    fun scan() {
+        shouldAutoConnect = true
+        bleManager.startScan()
+    }
+
+    fun disconnect() {
+        shouldAutoConnect = false
+        bleManager.disconnect()
+    }
 
     fun refreshFiles() = viewModelScope.launch {
         bleManager.listFiles()

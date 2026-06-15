@@ -15,17 +15,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -33,7 +33,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -55,11 +54,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import android.content.Context
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -82,33 +79,51 @@ fun RecordingsScreen(
     onNavigateToNote: (String) -> Unit,
     onBack: () -> Unit
 ) {
-    val context = LocalContext.current
     val bleState by viewModel.bleManager.bleState.collectAsState()
     val syncProgress by recordingViewModel.syncProgress.collectAsState()
     val recordings by recordingViewModel.filteredRecordings.collectAsState()
     val searchQuery by recordingViewModel.searchQuery.collectAsState()
 
-    val isLocalRecording by recordingViewModel.isRecording.collectAsState()
-    val isRecordingPaused by recordingViewModel.isPaused.collectAsState()
-    val recordingSeconds by recordingViewModel.recordingDurationSeconds.collectAsState()
-
-    val allowPhoneMic = remember {
-        context.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
-            .getBoolean("allow_phone_mic", false)
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            recordingViewModel.syncFiles(uris)
+        }
     }
+
+    val listState = rememberLazyListState()
+    var wasSyncing by remember { mutableStateOf(false) }
+
+    LaunchedEffect(syncProgress) {
+        if (syncProgress != null) {
+            wasSyncing = true
+        } else if (wasSyncing) {
+            wasSyncing = false
+            if (recordings.isNotEmpty()) {
+                listState.animateScrollToItem(0)
+            }
+        }
+    }
+
     val isConnected = bleState.connectionState == ConnectionState.CONNECTED
-    // Local recording is a fallback: only offered when enabled AND no FW920 is connected.
-    val canRecordLocally = allowPhoneMic && !isConnected
 
     var selectedFilenames by remember { mutableStateOf(setOf<String>()) }
     val isSelectionMode = selectedFilenames.isNotEmpty()
 
+    val isRecording by recordingViewModel.isRecording.collectAsState()
+
     // Auto-scan when disconnected, refresh files when connected
-    LaunchedEffect(bleState.connectionState) {
-        when (bleState.connectionState) {
-            ConnectionState.DISCONNECTED -> viewModel.scan()
-            ConnectionState.CONNECTED -> viewModel.refreshFiles()
-            else -> Unit
+    LaunchedEffect(bleState.connectionState, isRecording) {
+        if (isRecording) {
+            viewModel.shouldAutoConnect = false
+            viewModel.disconnect()
+        } else if (viewModel.shouldAutoConnect) {
+            when (bleState.connectionState) {
+                ConnectionState.DISCONNECTED -> viewModel.scan()
+                ConnectionState.CONNECTED -> viewModel.refreshFiles()
+                else -> Unit
+            }
         }
     }
 
@@ -134,8 +149,7 @@ fun RecordingsScreen(
                 actions = {
                     if (isSelectionMode) {
                         val selectedRecordings = recordings.filter { it.filename in selectedFilenames }
-                        val canDeleteSelection = isConnected ||
-                            (selectedRecordings.isNotEmpty() && selectedRecordings.all { it.isLocal })
+                        val canDeleteSelection = true
                         IconButton(
                             onClick = {
                                 recordingViewModel.deleteMultipleRecordings(
@@ -152,6 +166,9 @@ fun RecordingsScreen(
                             )
                         }
                     } else {
+                        IconButton(onClick = { filePickerLauncher.launch(arrayOf("audio/*")) }) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = "Import from USB OTG")
+                        }
                         IconButton(onClick = { recordingViewModel.syncAllBleFiles(viewModel.bleManager) }) {
                             Icon(Icons.Default.Sync, contentDescription = "Sync via BLE")
                         }
@@ -164,13 +181,6 @@ fun RecordingsScreen(
                     actionIconContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
-        },
-        floatingActionButton = {
-            if (canRecordLocally && !isLocalRecording && !isSelectionMode) {
-                FloatingActionButton(onClick = { recordingViewModel.startLocalRecording() }) {
-                    Icon(Icons.Default.Mic, contentDescription = "Record from phone mic")
-                }
-            }
         }
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
@@ -179,7 +189,8 @@ fun RecordingsScreen(
             DeviceStatusRow(
                 bleState = bleState,
                 onScan = { viewModel.scan() },
-                onCancelScan = { viewModel.disconnect() }
+                onCancelScan = { viewModel.disconnect() },
+                allowScan = !isRecording
             )
 
             // Sync progress
@@ -205,19 +216,6 @@ fun RecordingsScreen(
                         )
                     }
                 }
-            }
-
-            // Active local-recording controls
-            if (isLocalRecording) {
-                LocalRecordingBar(
-                    seconds = recordingSeconds,
-                    isPaused = isRecordingPaused,
-                    onPauseResume = {
-                        if (isRecordingPaused) recordingViewModel.resumeLocalRecording()
-                        else recordingViewModel.pauseLocalRecording()
-                    },
-                    onStop = { recordingViewModel.stopLocalRecording() }
-                )
             }
 
             // Search bar (hidden in selection mode)
@@ -270,10 +268,17 @@ fun RecordingsScreen(
                             Spacer(Modifier.width(8.dp))
                             Text("Sync via BLE")
                         }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(onClick = { filePickerLauncher.launch(arrayOf("audio/*")) }) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Import from USB OTG")
+                        }
                     }
                 }
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
@@ -336,7 +341,7 @@ private fun RecordingSwipeToDeleteCard(
     val bleState by bleManager.bleState.collectAsState()
     val isConnected = bleState.connectionState == ConnectionState.CONNECTED
     // Local recordings live only on the phone, so they can be deleted without a device.
-    val canDelete = isConnected || recording.isLocal
+    val canDelete = true
 
     var showConfirm by remember { mutableStateOf(false) }
     var showEditDialog by remember { mutableStateOf(false) }
@@ -394,8 +399,10 @@ private fun RecordingSwipeToDeleteCard(
                 Text(
                     if (recording.isLocal)
                         "This will permanently remove this local recording from the app."
+                    else if (isConnected)
+                        "This will remove the recording from BOTH this app and the FW920 permanently."
                     else
-                        "This will remove the recording from BOTH this app and the FW920 permanently. The device must be connected."
+                        "This will remove the recording from this app, and queue it to be deleted from the FW920 when it next connects."
                 )
             },
             confirmButton = {
@@ -548,51 +555,6 @@ private fun RecordingItem(
             }
         }
     }
-}
-
-@Composable
-private fun LocalRecordingBar(
-    seconds: Long,
-    isPaused: Boolean,
-    onPauseResume: () -> Unit,
-    onStop: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            Icons.Default.Mic,
-            contentDescription = null,
-            tint = Color.Red,
-            modifier = Modifier.size(20.dp)
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = if (isPaused) "Paused · ${formatRecordingTime(seconds)}"
-                   else "Recording · ${formatRecordingTime(seconds)}",
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.weight(1f)
-        )
-        IconButton(onClick = onPauseResume) {
-            Icon(
-                if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                contentDescription = if (isPaused) "Resume" else "Pause"
-            )
-        }
-        IconButton(onClick = onStop) {
-            Icon(Icons.Default.Stop, contentDescription = "Stop recording", tint = Color.Red)
-        }
-    }
-}
-
-private fun formatRecordingTime(seconds: Long): String {
-    val m = seconds / 60
-    val s = seconds % 60
-    return "%02d:%02d".format(m, s)
 }
 
 private fun formatFileSize(bytes: Long): String {

@@ -22,6 +22,10 @@ class RecordingRepository(private val dao: RecordingDao) {
 
     suspend fun delete(recording: Recording) = dao.delete(recording)
 
+    suspend fun getPendingDeletes(): List<Recording> = dao.getPendingDeletes()
+
+    suspend fun markPendingDelete(filename: String) = dao.updatePendingDelete(filename, true)
+
     suspend fun updateTitleAndSummary(filename: String, title: String, shortSummary: String) =
         dao.updateTitleAndSummary(filename, title, shortSummary)
 

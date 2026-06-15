@@ -107,7 +107,13 @@ class BleManager(private val context: Context) {
     }
 
     fun stopScan() {
-        leScanner?.stopScan(scanCallback)
+        try {
+            leScanner?.stopScan(scanCallback)
+        } catch (e: SecurityException) {
+            Log.e("BleManager", "SecurityException stopping scan", e)
+        } catch (e: Exception) {
+            Log.e("BleManager", "Error stopping scan", e)
+        }
         leScanner = null
         if (_bleState.value.connectionState == ConnectionState.SCANNING) {
             _bleState.update { it.copy(connectionState = ConnectionState.DISCONNECTED) }
@@ -149,6 +155,7 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     fun disconnect() {
+        stopScan()
         stopPoller()
         bluetoothGatt?.disconnect()
         bluetoothGatt?.close()
@@ -283,6 +290,16 @@ class BleManager(private val context: Context) {
             is ParsedResponse.Status  -> mergeStatus(parsed)
             is ParsedResponse.RecordingStarted -> _bleState.update { it.copy(isRecording = true) }
             is ParsedResponse.RecordingStopped -> _bleState.update { it.copy(isRecording = false) }
+            is ParsedResponse.Ack -> {
+                if (parsed.cmd == 0x07 || parsed.cmd == 0x08) {
+                    _bleState.update { it.copy(isRecording = false) }
+                }
+            }
+            is ParsedResponse.Unknown -> {
+                if (parsed.cmd == 0x07 || parsed.cmd == 0x08) {
+                    _bleState.update { it.copy(isRecording = false) }
+                }
+            }
             else -> Unit
         }
         responseChannel.trySend(parsed)
@@ -295,10 +312,13 @@ class BleManager(private val context: Context) {
                 batteryPct     = if (s.batteryPct > 0) s.batteryPct else current.batteryPct,
                 storageFreeKb  = if (s.storageFreeKb > 0) s.storageFreeKb else current.storageFreeKb,
                 storageTotalKb = if (s.storageTotalKb > 0) s.storageTotalKb else current.storageTotalKb,
-                // CMD 0x05 carries the device's authoritative recording flag (payload[12]); trust it so
-                // the poller self-heals when the device drops a 0x08 stop event. CMD 0x0F is unreliable
-                // (payload[2] often reads 0x01 when idle), so keep ignoring it.
-                isRecording    = if (resp.cmd == 0x05) s.isRecording else current.isRecording,
+                isRecording    = if (resp.cmd == 0x05) {
+                    if (s.fwName == "xink_test" || current.fwVersion == "xink_test") {
+                        s.isRecording || current.isRecording
+                    } else {
+                        s.isRecording
+                    }
+                } else current.isRecording,
                 fwVersion      = if (s.fwName.isNotEmpty()) s.fwName else current.fwVersion
             )
         }
@@ -371,6 +391,16 @@ class BleManager(private val context: Context) {
     /** Polls CMD 0x05 to sync the actual recording state from the device. */
     suspend fun refreshRecordingStatus() {
         refreshStatus()
+    }
+
+    /** Debug-only: tell the FW920 to start a live recording on its own mic (CMD 0x06). */
+    suspend fun startDeviceRecording() {
+        Log.i("BleManager", "startDeviceRecording: ${sendAndAwait(PKT_START_RECORDING, expectedCmd = 0x06)}")
+    }
+
+    /** Debug-only: tell the FW920 to stop the live recording and persist the file (CMD 0x08). */
+    suspend fun stopDeviceRecording() {
+        Log.i("BleManager", "stopDeviceRecording: ${sendAndAwait(PKT_STOP_RECORDING, expectedCmd = 0x08)}")
     }
 
     // ------------------------------------------------------------------

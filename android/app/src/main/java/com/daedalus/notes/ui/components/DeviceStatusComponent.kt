@@ -41,7 +41,8 @@ import com.daedalus.notes.ble.ConnectionState
 fun DeviceStatusRow(
     bleState: BleState,
     onScan: () -> Unit,
-    onCancelScan: () -> Unit
+    onCancelScan: () -> Unit,
+    allowScan: Boolean = true
 ) {
     when (bleState.connectionState) {
         ConnectionState.CONNECTED -> {
@@ -176,8 +177,15 @@ fun DeviceStatusRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    TextButton(onClick = onScan) {
-                        Text("Scan", color = MaterialTheme.colorScheme.onErrorContainer)
+                    TextButton(
+                        onClick = onScan,
+                        enabled = allowScan
+                    ) {
+                        Text(
+                            "Scan",
+                            color = if (allowScan) MaterialTheme.colorScheme.onErrorContainer
+                            else MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.38f)
+                        )
                     }
                 }
             }

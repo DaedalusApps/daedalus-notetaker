@@ -1,10 +1,6 @@
 package com.daedalus.notes.ui.screens
 
 import android.content.Context
-import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -45,17 +41,6 @@ fun SettingsScreen(
     val snackbar = remember { SnackbarHostState() }
 
     var autoProcess by remember { mutableStateOf(prefs.getBoolean("auto_process", false)) }
-    var allowPhoneMic by remember { mutableStateOf(prefs.getBoolean("allow_phone_mic", false)) }
-
-    val micPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        allowPhoneMic = granted
-        prefs.edit().putBoolean("allow_phone_mic", granted).apply()
-        if (!granted) {
-            scope.launch { snackbar.showSnackbar("Microphone permission is required for local recording") }
-        }
-    }
 
     val whisperDownloader = remember { WhisperDownloader(context) }
     val whisperState by whisperDownloader.state.collectAsState()
@@ -194,32 +179,6 @@ fun SettingsScreen(
                         Text("Analyze recordings automatically when synced via BLE", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Switch(checked = autoProcess, onCheckedChange = { autoProcess = it })
-                }
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Local recording (fallback)", style = MaterialTheme.typography.bodyMedium)
-                        Text("Record from the phone mic when no FW920 is connected", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Switch(
-                        checked = allowPhoneMic,
-                        onCheckedChange = { checked ->
-                            if (checked) {
-                                val granted = ContextCompat.checkSelfPermission(
-                                    context, android.Manifest.permission.RECORD_AUDIO
-                                ) == PackageManager.PERMISSION_GRANTED
-                                if (granted) {
-                                    allowPhoneMic = true
-                                    prefs.edit().putBoolean("allow_phone_mic", true).apply()
-                                } else {
-                                    micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                                }
-                            } else {
-                                allowPhoneMic = false
-                                prefs.edit().putBoolean("allow_phone_mic", false).apply()
-                            }
-                        }
-                    )
                 }
 
                 Spacer(Modifier.height(8.dp))

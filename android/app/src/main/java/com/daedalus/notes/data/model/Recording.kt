@@ -19,5 +19,6 @@ data class Recording(
     val topics: List<String> = emptyList(),
     val durationMillis: Long = 0,
     @ColumnInfo(typeAffinity = ColumnInfo.BLOB) val embedding: FloatArray? = null,
-    val isLocal: Boolean = false        // true = recorded on phone (not present on FW920)
+    val isLocal: Boolean = false,        // true = recorded on phone (not present on FW920)
+    val pendingDelete: Boolean = false
 )

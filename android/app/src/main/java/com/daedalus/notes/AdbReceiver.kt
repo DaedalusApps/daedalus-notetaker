@@ -10,6 +10,7 @@ import com.daedalus.notes.ai.SmartAnalysisParser
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.activePrompt
 import com.daedalus.notes.ai.extractActionItems
+import com.daedalus.notes.ai.isTranscriptReadable
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
 import kotlinx.coroutines.CoroutineScope
@@ -61,11 +62,12 @@ class AdbReceiver : BroadcastReceiver() {
 
             Log.i("DaedalusAI", "Transcribing $filename")
             val transcript = transcriber.transcribe(localFile)
-            if (transcript.isBlank()) {
-                Log.e("DaedalusAI", "Blank transcript for $filename")
+            repo.save(note.copy(transcript = transcript))
+
+            if (!isTranscriptReadable(transcript)) {
+                Log.w("DaedalusAI", "Aborting analysis: transcript is not readable for $filename")
                 return
             }
-            repo.save(note.copy(transcript = transcript))
 
             Log.i("DaedalusAI", "Running Gemma on $filename")
             llm.ensureLoaded()

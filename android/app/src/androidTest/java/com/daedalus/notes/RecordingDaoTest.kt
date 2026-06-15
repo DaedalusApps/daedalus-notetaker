@@ -46,4 +46,27 @@ class RecordingDaoTest {
         db.recordingDao().delete(rec)
         assertNull(db.recordingDao().get("test.mp3"))
     }
+
+    @Test
+    fun markPendingDelete_excludesFromFlows() = runBlocking {
+        val rec = Recording(filename = "test.mp3")
+        db.recordingDao().upsert(rec)
+        
+        // Initially visible in flow
+        var list = db.recordingDao().getAllFlow().first()
+        assertEquals(1, list.size)
+
+        // Mark pending delete
+        db.recordingDao().updatePendingDelete("test.mp3", true)
+
+        // Hidden from flow
+        list = db.recordingDao().getAllFlow().first()
+        assertTrue(list.isEmpty())
+
+        // Still present in get() and getPendingDeletes()
+        assertNotNull(db.recordingDao().get("test.mp3"))
+        val pending = db.recordingDao().getPendingDeletes()
+        assertEquals(1, pending.size)
+        assertEquals("test.mp3", pending[0].filename)
+    }
 }

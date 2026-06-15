@@ -4,7 +4,8 @@ An Android companion app for the **ELVANZA FW920** voice recorder. Syncs recordi
 
 ## Features
 
-- **BLE Sync** — Download recordings wirelessly from the FW920, skipping files already on-device
+- **BLE Sync & Queueing** — Download recordings wirelessly from the FW920, and queue deletions when disconnected to be executed on the physical device automatically when it next connects.
+- **Local Recording** — Record directly from the phone's microphone when the FW920 is not connected.
 - **On-Device Transcription** — Whisper base.en via sherpa-onnx; audio never leaves your phone
 - **AI Analysis** — Gemma 3 1B generates a title, summary, topics, and a structured mind map per recording
 - **Ask Your Notes** — Semantic Q&A across your whole library: relevant recordings are retrieved by meaning, then Gemma synthesizes an answer with cited sources

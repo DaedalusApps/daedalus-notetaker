@@ -150,12 +150,19 @@ fun NoteDetailScreen(
 
     val bleState by bleManager.bleState.collectAsState()
     val isConnected = bleState.connectionState == com.daedalus.notes.ble.ConnectionState.CONNECTED
+    val isLocal = note?.isLocal == true
+    val canDelete = isConnected || isLocal
 
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
             title = { Text("Delete recording?") },
-            text = { Text("This will remove the recording from BOTH this app and the FW920 hardware permanently. The device must remain connected.") },
+            text = {
+                Text(
+                    if (isLocal) "This will permanently remove this local recording from the app."
+                    else "This will remove the recording from BOTH this app and the FW920 hardware permanently. The device must remain connected."
+                )
+            },
             confirmButton = {
                 Button(
                     onClick = {
@@ -163,7 +170,7 @@ fun NoteDetailScreen(
                         recordingViewModel.deleteRecording(filename, bleManager)
                         onBack()
                     },
-                    enabled = isConnected
+                    enabled = canDelete
                 ) { Text("Delete") }
             },
             dismissButton = {

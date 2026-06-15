@@ -122,6 +122,31 @@ class RecordingViewModelTest {
     }
 
     @Test
+    fun deleteRecording_deviceFile_deletesFromHardware() = runTest {
+        coEvery { repo.get("dev.mp3") } returns Recording("dev.mp3", isLocal = false)
+        coEvery { bleManager.deleteFile("dev.mp3") } returns true
+
+        viewModel.deleteRecording("dev.mp3", bleManager)
+        advanceUntilIdle()
+
+        // Device recording must be wiped from the FW920 over BLE, then removed locally.
+        coVerify(exactly = 1) { bleManager.deleteFile("dev.mp3") }
+        coVerify(exactly = 1) { repo.delete(any()) }
+    }
+
+    @Test
+    fun deleteRecording_localFile_skipsHardware() = runTest {
+        coEvery { repo.get("local.m4a") } returns Recording("local.m4a", isLocal = true)
+
+        viewModel.deleteRecording("local.m4a", bleManager)
+        advanceUntilIdle()
+
+        // Local-only recordings aren't on the device — no BLE delete should be attempted.
+        coVerify(exactly = 0) { bleManager.deleteFile(any()) }
+        coVerify(exactly = 1) { repo.delete(any()) }
+    }
+
+    @Test
     fun cancelSync_clearsSyncProgress() = runTest {
         // cancelSync with no active job should not throw and should clear progress
         viewModel.cancelSync()
@@ -134,5 +159,69 @@ class RecordingViewModelTest {
         viewModel.updateTitleAndSummary("rec.mp3", "New Title", "New summary")
         advanceUntilIdle()
         coVerify(exactly = 1) { repo.updateTitleAndSummary("rec.mp3", "New Title", "New summary") }
+    }
+
+    @Test
+    fun deleteRecording_whenDisconnected_queuesDelete() = runTest {
+        val stateFlow = MutableStateFlow(BleState(connectionState = ConnectionState.DISCONNECTED))
+        every { bleManager.bleState } returns stateFlow
+        
+        coEvery { repo.get("dev.mp3") } returns Recording("dev.mp3", isLocal = false)
+
+        viewModel.deleteRecording("dev.mp3", bleManager)
+        advanceUntilIdle()
+
+        // Device recording must not be deleted over BLE, but must be marked as pending delete.
+        coVerify(exactly = 0) { bleManager.deleteFile(any()) }
+        coVerify(exactly = 1) { repo.markPendingDelete("dev.mp3") }
+    }
+
+    @Test
+    fun deleteMultipleRecordings_whenDisconnected_queuesDeletes() = runTest {
+        val stateFlow = MutableStateFlow(BleState(connectionState = ConnectionState.DISCONNECTED))
+        every { bleManager.bleState } returns stateFlow
+        
+        coEvery { repo.get("file1.mp3") } returns Recording("file1.mp3", isLocal = false)
+        coEvery { repo.get("file2.mp3") } returns Recording("file2.mp3", isLocal = false)
+
+        viewModel.deleteMultipleRecordings(listOf("file1.mp3", "file2.mp3"), bleManager)
+        advanceUntilIdle()
+
+        // Verify no BLE delete attempts
+        coVerify(exactly = 0) { bleManager.deleteFile(any()) }
+        // Verify repo markPendingDelete called
+        coVerify(exactly = 1) { repo.markPendingDelete("file1.mp3") }
+        coVerify(exactly = 1) { repo.markPendingDelete("file2.mp3") }
+    }
+
+    @Test
+    fun syncAllBleFiles_processesPendingDeletions() = runTest {
+        val pending = listOf(
+            Recording("pending1.mp3", isLocal = false, pendingDelete = true),
+            Recording("pending2.mp3", isLocal = false, pendingDelete = true)
+        )
+        coEvery { repo.getPendingDeletes() } returns pending
+        coEvery { bleManager.deleteFile(any()) } returns true
+        
+        // Mock listFiles to not throw
+        coEvery { bleManager.listFiles() } returns Unit
+        // Mock files list returned on bleState
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(
+                connectionState = ConnectionState.CONNECTED,
+                files = emptyList() // No files to download
+            )
+        )
+
+        viewModel.syncAllBleFiles(bleManager)
+        advanceUntilIdle()
+
+        // Verify pending deletions are processed via BLE
+        coVerify(exactly = 1) { bleManager.deleteFile("pending1.mp3") }
+        coVerify(exactly = 1) { bleManager.deleteFile("pending2.mp3") }
+        
+        // Verify pending deletions are removed from database
+        coVerify(exactly = 1) { repo.delete(pending[0]) }
+        coVerify(exactly = 1) { repo.delete(pending[1]) }
     }
 }
