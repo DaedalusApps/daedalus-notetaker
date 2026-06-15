@@ -24,6 +24,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -73,7 +75,8 @@ class BleManager(private val context: Context) {
     private var bluetoothGatt: BluetoothGatt? = null
     private var writeChar: BluetoothGattCharacteristic? = null
     private var leScanner: BluetoothLeScanner? = null
-    private var pollJob: kotlinx.coroutines.Job? = null
+    private var pollJob: Job? = null
+    private var scanTimeoutJob: Job? = null
 
     /** Single-consumer channel; responses flow here from onCharacteristicChanged. */
     private val responseChannel = Channel<ParsedResponse>(capacity = Channel.UNLIMITED)
@@ -88,7 +91,16 @@ class BleManager(private val context: Context) {
     // Scan
     // ------------------------------------------------------------------
 
+    /** Scan timeout: if the FW920 is not found within this duration the scan stops. */
+    private val SCAN_TIMEOUT_MS = 15_000L
+
     fun startScan() {
+        // Guard: don't start a second scan if one is already running.
+        if (_bleState.value.connectionState == ConnectionState.SCANNING) {
+            Log.d("BleManager", "startScan() called while already scanning — ignored")
+            return
+        }
+
         _bleState.update { it.copy(connectionState = ConnectionState.SCANNING, errorMessage = "") }
 
         val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE)
@@ -104,9 +116,21 @@ class BleManager(private val context: Context) {
             .build()
 
         leScanner?.startScan(listOf(filter), settings, scanCallback)
+
+        // Auto-cancel the scan after SCAN_TIMEOUT_MS if the device is never found.
+        scanTimeoutJob?.cancel()
+        scanTimeoutJob = scope.launch {
+            delay(SCAN_TIMEOUT_MS)
+            if (_bleState.value.connectionState == ConnectionState.SCANNING) {
+                Log.d("BleManager", "Scan timed out after ${SCAN_TIMEOUT_MS}ms — stopping")
+                stopScan()
+            }
+        }
     }
 
     fun stopScan() {
+        scanTimeoutJob?.cancel()
+        scanTimeoutJob = null
         try {
             leScanner?.stopScan(scanCallback)
         } catch (e: SecurityException) {
@@ -127,10 +151,16 @@ class BleManager(private val context: Context) {
         }
 
         override fun onScanFailed(errorCode: Int) {
+            // Go to DISCONNECTED (not ERROR) so the auto-connect LaunchedEffect can
+            // retry cleanly without leaving a permanent error banner on screen.
+            Log.w("BleManager", "Scan failed with error code $errorCode")
+            scanTimeoutJob?.cancel()
+            scanTimeoutJob = null
+            leScanner = null
             _bleState.update {
                 it.copy(
-                    connectionState = ConnectionState.ERROR,
-                    errorMessage    = "Scan failed: error $errorCode"
+                    connectionState = ConnectionState.DISCONNECTED,
+                    errorMessage    = ""
                 )
             }
         }
