@@ -18,6 +18,10 @@ import java.nio.ByteOrder
 private const val TAG = "Transcription"
 private const val TARGET_SAMPLE_RATE = 16000
 
+/** Whisper's encoder operates on a fixed ~30s window; longer audio must be chunked. */
+private const val CHUNK_DURATION_SECONDS = 30
+private const val CHUNK_SAMPLES = CHUNK_DURATION_SECONDS * TARGET_SAMPLE_RATE
+
 class TranscriptionService(private val context: Context) {
 
     suspend fun transcribe(audioFile: File): String = withContext(Dispatchers.IO) {
@@ -44,12 +48,23 @@ class TranscriptionService(private val context: Context) {
         return try {
             val pcm = decodeToPcmFloat(audioFile)
             Log.i(TAG, "Decoded ${pcm.size} float samples, feeding to Whisper")
-            val stream = recognizer.createStream()
-            stream.acceptWaveform(samples = pcm, sampleRate = TARGET_SAMPLE_RATE)
-            recognizer.decode(stream)
-            val text = recognizer.getResult(stream).text.trim()
-            stream.release()
-            Log.i(TAG, "Whisper complete: ${text.length} chars")
+
+            val parts = mutableListOf<String>()
+            var offset = 0
+            while (offset < pcm.size) {
+                val end = minOf(offset + CHUNK_SAMPLES, pcm.size)
+                val chunk = pcm.copyOfRange(offset, end)
+                val stream = recognizer.createStream()
+                stream.acceptWaveform(samples = chunk, sampleRate = TARGET_SAMPLE_RATE)
+                recognizer.decode(stream)
+                val chunkText = recognizer.getResult(stream).text.trim()
+                stream.release()
+                if (chunkText.isNotEmpty()) parts.add(chunkText)
+                offset = end
+            }
+
+            val text = parts.joinToString(" ")
+            Log.i(TAG, "Whisper complete: ${text.length} chars across ${parts.size} chunk(s)")
             text
         } finally {
             recognizer.release()
