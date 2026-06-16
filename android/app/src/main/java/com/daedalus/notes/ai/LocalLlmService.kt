@@ -5,6 +5,7 @@ import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.resume
 
 import android.util.Log
@@ -62,14 +63,17 @@ class LocalLlmService(private val context: Context) {
             try {
                 // generateResponse() crashes in MediaPipe 0.10.35 via nativePredictSync.
                 // generateResponseAsync uses a different native path that is stable.
-                suspendCancellableCoroutine { cont ->
-                    val sb = StringBuilder()
-                    llm.generateResponseAsync(prompt) { partialResult, done ->
-                        partialResult?.let { sb.append(it) }
-                        if (done && cont.isActive) {
-                            val response = sb.toString()
-                            Log.d("DaedalusAI", "Generation complete (response length: ${response.length})")
-                            cont.resume(response)
+                // 3-minute timeout guards against the callback never firing on native error.
+                withTimeout(180_000L) {
+                    suspendCancellableCoroutine { cont ->
+                        val sb = StringBuilder()
+                        llm.generateResponseAsync(prompt) { partialResult, done ->
+                            partialResult?.let { sb.append(it) }
+                            if (done && cont.isActive) {
+                                val response = sb.toString()
+                                Log.d("DaedalusAI", "Generation complete (response length: ${response.length})")
+                                cont.resume(response)
+                            }
                         }
                     }
                 }
