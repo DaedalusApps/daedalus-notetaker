@@ -22,6 +22,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.FolderOpen
@@ -109,7 +110,7 @@ fun RecordingsScreen(
     val isConnected = bleState.connectionState == ConnectionState.CONNECTED
 
     var selectedFilenames by remember { mutableStateOf(setOf<String>()) }
-    val isSelectionMode = selectedFilenames.isNotEmpty()
+    var isSelectionMode by remember { mutableStateOf(false) }
 
     val isRecording by recordingViewModel.isRecording.collectAsState()
 
@@ -137,7 +138,7 @@ fun RecordingsScreen(
                 },
                 navigationIcon = {
                     if (isSelectionMode) {
-                        IconButton(onClick = { selectedFilenames = emptySet() }) {
+                        IconButton(onClick = { isSelectionMode = false; selectedFilenames = emptySet() }) {
                             Icon(Icons.Default.Close, contentDescription = "Cancel selection")
                         }
                     } else {
@@ -148,17 +149,26 @@ fun RecordingsScreen(
                 },
                 actions = {
                     if (isSelectionMode) {
-                        val selectedRecordings = recordings.filter { it.filename in selectedFilenames }
-                        val canDeleteSelection = true
+                        val allSelected = remember(recordings, selectedFilenames) {
+                            recordings.all { it.filename in selectedFilenames }
+                        }
+                        IconButton(
+                            onClick = {
+                                selectedFilenames = if (allSelected) emptySet()
+                                else recordings.mapTo(HashSet(recordings.size)) { it.filename }
+                            }
+                        ) {
+                            Icon(Icons.Default.SelectAll, contentDescription = if (allSelected) "Deselect all" else "Select all")
+                        }
                         IconButton(
                             onClick = {
                                 recordingViewModel.deleteMultipleRecordings(
                                     selectedFilenames.toList(),
                                     viewModel.bleManager
                                 )
+                                isSelectionMode = false
                                 selectedFilenames = emptySet()
-                            },
-                            enabled = canDeleteSelection
+                            }
                         ) {
                             Icon(
                                 Icons.Default.Delete,
@@ -310,6 +320,7 @@ fun RecordingsScreen(
                                 }
                             },
                             onLongClick = {
+                                isSelectionMode = true
                                 selectedFilenames = selectedFilenames + recording.filename
                             },
                             onDelete = {

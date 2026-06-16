@@ -72,11 +72,13 @@ class TranscriptionService(private val context: Context) {
     }
 
     private fun decodeToPcmFloat(file: File): FloatArray {
-        val shorts = decodeToPcm(file)
-        return FloatArray(shorts.size) { shorts[it] / 32768f }
+        val (buffer, size) = decodeToPcm(file)
+        return FloatArray(size) { buffer[it] / 32768f }
     }
 
-    private fun decodeToPcm(file: File): ShortArray {
+    // Returns the over-allocated backing buffer and the number of valid samples written.
+    // Callers must use the returned size, not buffer.size.
+    private fun decodeToPcm(file: File): Pair<ShortArray, Int> {
         val extractor = MediaExtractor()
         extractor.setDataSource(file.absolutePath)
 
@@ -101,7 +103,10 @@ class TranscriptionService(private val context: Context) {
         codec.configure(format, null, null, 0)
         codec.start()
 
-        val pcmSamples = mutableListOf<Short>()
+        // Use a primitive ShortArray buffer to avoid boxing (mutableListOf<Short> would allocate
+        // ~24 bytes per sample as boxed objects — ~115 MB for a 5-min recording vs ~9.6 MB here).
+        var pcmBuffer = ShortArray(TARGET_SAMPLE_RATE * 60) // initial capacity: 1 minute
+        var pcmSize = 0
         val info = MediaCodec.BufferInfo()
         var sawEos = false
 
@@ -138,7 +143,13 @@ class TranscriptionService(private val context: Context) {
                     resample(mono, srcSampleRate, TARGET_SAMPLE_RATE)
                 } else mono
 
-                resampled.forEach { pcmSamples.add(it) }
+                val needed = pcmSize + resampled.size
+                if (needed > pcmBuffer.size) {
+                    pcmBuffer = pcmBuffer.copyOf(maxOf(needed, pcmBuffer.size * 2))
+                }
+                resampled.copyInto(pcmBuffer, pcmSize)
+                pcmSize += resampled.size
+
                 codec.releaseOutputBuffer(outputIdx, false)
                 outputIdx = codec.dequeueOutputBuffer(info, 0)
             }
@@ -147,7 +158,7 @@ class TranscriptionService(private val context: Context) {
         codec.stop()
         codec.release()
         extractor.release()
-        return pcmSamples.toShortArray()
+        return Pair(pcmBuffer, pcmSize)
     }
 
     private fun resample(input: ShortArray, fromRate: Int, toRate: Int): ShortArray {
