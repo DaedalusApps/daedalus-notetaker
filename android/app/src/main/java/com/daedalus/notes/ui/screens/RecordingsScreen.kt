@@ -41,13 +41,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -57,7 +54,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -69,6 +65,7 @@ import com.daedalus.notes.data.model.AudioUtils
 import com.daedalus.notes.data.model.DateUtils
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.ui.components.DeviceStatusRow
+import com.daedalus.notes.ui.components.SwipeToDeleteCard
 import com.daedalus.notes.viewmodel.DeviceViewModel
 import com.daedalus.notes.viewmodel.RecordingViewModel
 
@@ -358,10 +355,7 @@ private fun RecordingSwipeToDeleteCard(
 ) {
     val bleState by bleManager.bleState.collectAsState()
     val isConnected = bleState.connectionState == ConnectionState.CONNECTED
-    // Local recordings live only on the phone, so they can be deleted without a device.
-    val canDelete = true
 
-    var showConfirm by remember { mutableStateOf(false) }
     var showEditDialog by remember { mutableStateOf(false) }
     var editTitle by remember(recording.filename) { mutableStateOf(recording.title) }
     var editShortSummary by remember(recording.filename) { mutableStateOf(recording.shortSummary) }
@@ -400,61 +394,8 @@ private fun RecordingSwipeToDeleteCard(
         )
     }
 
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.EndToStart && !isSelectionMode) {
-                showConfirm = true
-            }
-            false
-        }
-    )
-
-    if (showConfirm) {
-        AlertDialog(
-            onDismissRequest = { showConfirm = false },
-            title = { Text("Delete recording?") },
-            text = {
-                Text(
-                    if (recording.isLocal)
-                        "This will permanently remove this local recording from the app."
-                    else if (isConnected)
-                        "This will remove the recording from BOTH this app and the FW920 permanently."
-                    else
-                        "This will remove the recording from this app, and queue it to be deleted from the FW920 when it next connects."
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = { showConfirm = false; onDelete() },
-                    enabled = canDelete
-                ) { Text("Delete") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showConfirm = false }) { Text("Cancel") }
-            }
-        )
-    }
-
-    SwipeToDismissBox(
-        state = dismissState,
-        enableDismissFromStartToEnd = false,
-        backgroundContent = {
-            if (!isSelectionMode) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 8.dp),
-                    contentAlignment = Alignment.CenterEnd
-                ) {
-                    Icon(
-                        Icons.Default.Delete,
-                        contentDescription = "Delete",
-                        tint = if (canDelete) Color.Red else Color.Red.copy(alpha = 0.3f)
-                    )
-                }
-            }
-        }
-    ) {
+    // Swipe-to-delete is disabled in selection mode, so skip the wrapper entirely there.
+    if (isSelectionMode) {
         RecordingItem(
             recording = recording,
             isSelected = isSelected,
@@ -463,6 +404,26 @@ private fun RecordingSwipeToDeleteCard(
             onLongClick = onLongClick,
             onEdit = { showEditDialog = true }
         )
+    } else {
+        SwipeToDeleteCard(
+            confirmTitle = "Delete recording?",
+            confirmText = if (recording.isLocal)
+                "This will permanently remove this local recording from the app."
+            else if (isConnected)
+                "This will remove the recording from BOTH this app and the FW920 permanently."
+            else
+                "This will remove the recording from this app, and queue it to be deleted from the FW920 when it next connects.",
+            onDelete = onDelete
+        ) {
+            RecordingItem(
+                recording = recording,
+                isSelected = isSelected,
+                isSelectionMode = isSelectionMode,
+                onPlay = onPlay,
+                onLongClick = onLongClick,
+                onEdit = { showEditDialog = true }
+            )
+        }
     }
 }
 

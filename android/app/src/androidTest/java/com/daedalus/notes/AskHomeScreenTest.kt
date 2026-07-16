@@ -59,7 +59,8 @@ class AskHomeScreenTest {
                     onNavigateToNote = {},
                     onNavigateToRecordings = {},
                     onNavigateToExpandedMap = {},
-                    onNavigateToSettings = {}
+                    onNavigateToSettings = {},
+                    onNavigateToTodos = {}
                 )
             }
         }
@@ -86,7 +87,8 @@ class AskHomeScreenTest {
                     onNavigateToNote = {},
                     onNavigateToRecordings = {},
                     onNavigateToExpandedMap = {},
-                    onNavigateToSettings = {}
+                    onNavigateToSettings = {},
+                    onNavigateToTodos = {}
                 )
             }
         }
