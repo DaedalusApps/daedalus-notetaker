@@ -178,4 +178,27 @@ class BackupManagerTest {
         assertFalse(prefs().contains("custom_prompt"))
         target.close()
     }
+
+    @Test
+    fun runAutoBackup_noFolderConfigured_returnsFailureWithoutThrowing() = runBlocking {
+        // backup_folder_uri intentionally absent from prefs.
+        val db = newDb()
+        val result = BackupManager(context, db).runAutoBackup()
+
+        assertTrue(result.isFailure)
+        assertEquals("No backup folder configured", result.exceptionOrNull()?.message)
+        assertTrue(prefs().contains("last_backup_error"))
+        db.close()
+    }
+
+    @Test
+    fun runAutoBackup_folderUriNotGranted_returnsFailure() = runBlocking {
+        prefs().edit().putString("backup_folder_uri", "content://com.example/tree/fake").commit()
+        val db = newDb()
+        val result = BackupManager(context, db).runAutoBackup()
+
+        assertTrue(result.isFailure)
+        assertTrue(prefs().contains("last_backup_error"))
+        db.close()
+    }
 }

@@ -3,6 +3,7 @@ package com.daedalus.notes.data.backup
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import androidx.documentfile.provider.DocumentFile
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.Recording
@@ -11,6 +12,9 @@ import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Reusable backup export/import logic, usable from a ViewModel or a WorkManager worker
@@ -217,6 +221,60 @@ class BackupManager(
         }
     }
 
+    /**
+     * Runs an automatic backup to the configured folder (SAF tree URI stored in prefs),
+     * then applies retention by deleting the oldest backups beyond `backup_max_count`.
+     * Never throws; failures are reported via the returned Result and recorded in
+     * the `last_backup_error` pref.
+     */
+    suspend fun runAutoBackup(): Result<Unit> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        try {
+            val storedUri = prefs.getString(PREF_BACKUP_FOLDER_URI, null)
+            if (storedUri.isNullOrBlank()) {
+                return failAutoBackup(prefs, "No backup folder configured")
+            }
+
+            val hasWriteGrant = context.contentResolver.persistedUriPermissions.any {
+                it.uri.toString() == storedUri && it.isWritePermission
+            }
+            val uri = Uri.parse(storedUri)
+            val dir = if (hasWriteGrant) DocumentFile.fromTreeUri(context, uri) else null
+            if (dir == null || !dir.exists() || !dir.canWrite()) {
+                return failAutoBackup(prefs, "Backup folder is not accessible")
+            }
+
+            val filename = "daedalus_backup_" +
+                SimpleDateFormat("yyyy-MM-dd_HHmm", Locale.US).format(Date()) + ".json"
+            val file = dir.createFile("application/json", filename)
+                ?: return failAutoBackup(prefs, "Could not create backup file")
+
+            val json = buildBackupJson()
+            context.contentResolver.openOutputStream(file.uri)?.use { out ->
+                out.write(json.toString(2).toByteArray(Charsets.UTF_8))
+            } ?: return failAutoBackup(prefs, "Could not open backup file for writing")
+
+            val maxCount = prefs.getInt(PREF_BACKUP_MAX_COUNT, DEFAULT_MAX_BACKUP_COUNT)
+            val names = dir.listFiles().mapNotNull { it.name }
+            val toDelete = selectBackupsToDelete(names, maxCount)
+            dir.listFiles().filter { it.name in toDelete }.forEach { it.delete() }
+
+            prefs.edit()
+                .putLong(PREF_LAST_BACKUP_TIME, System.currentTimeMillis())
+                .remove(PREF_LAST_BACKUP_ERROR)
+                .apply()
+
+            return Result.success(Unit)
+        } catch (e: Exception) {
+            return failAutoBackup(prefs, e.message ?: "Unknown backup error")
+        }
+    }
+
+    private fun failAutoBackup(prefs: android.content.SharedPreferences, message: String): Result<Unit> {
+        prefs.edit().putString(PREF_LAST_BACKUP_ERROR, message).apply()
+        return Result.failure(Exception(message))
+    }
+
     private fun applySettings(settings: JSONObject?) {
         if (settings == null) return
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -237,6 +295,13 @@ class BackupManager(
 
     companion object {
         private const val PREFS_NAME = "daedalus_prefs"
+        private const val PREF_BACKUP_FOLDER_URI = "backup_folder_uri"
+        private const val PREF_BACKUP_MAX_COUNT = "backup_max_count"
+        private const val PREF_LAST_BACKUP_TIME = "last_backup_time"
+        private const val PREF_LAST_BACKUP_ERROR = "last_backup_error"
+        private const val DEFAULT_MAX_BACKUP_COUNT = 7
+
+        private val BACKUP_FILENAME_REGEX = Regex("daedalus_backup_.*\\.json")
 
         private val SETTINGS_KEYS = listOf(
             "use_bluetooth_mic",
@@ -252,5 +317,20 @@ class BackupManager(
                 .replace(Regex("[^a-z0-9\\s]"), "")
                 .replace(Regex("\\s+"), " ")
                 .trim()
+
+        /**
+         * Given all filenames in the backup folder, returns the names of backups that
+         * should be deleted to keep at most [maxCount] backups. Non-matching filenames
+         * are ignored entirely (neither counted nor deleted). Oldest backups (by ascending
+         * lexicographic sort, since names embed a sortable timestamp) are selected first.
+         * [maxCount] <= 0 is coerced to 1 (always keep at least the newest backup).
+         */
+        fun selectBackupsToDelete(names: List<String>, maxCount: Int): List<String> {
+            val effectiveMax = maxCount.coerceAtLeast(1)
+            val backups = names.filter { it.matches(BACKUP_FILENAME_REGEX) }.sorted()
+            val overflow = backups.size - effectiveMax
+            if (overflow <= 0) return emptyList()
+            return backups.take(overflow)
+        }
     }
 }
