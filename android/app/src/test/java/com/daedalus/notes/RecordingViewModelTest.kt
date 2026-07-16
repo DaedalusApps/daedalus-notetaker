@@ -39,7 +39,12 @@ class RecordingViewModelTest {
     private val bleManager = mockk<BleManager>(relaxed = true)
     private val embedder = mockk<EmbeddingService>(relaxed = true)
     private val llm = mockk<LocalLlmService>(relaxed = true)
-    
+    // Backup import/export now runs through BackupManager, which builds its own
+    // RecordingRepository from db.recordingDao(); the import tests below verify
+    // against this DAO rather than the injected repo.
+    private val recordingDao = mockk<com.daedalus.notes.data.db.RecordingDao>(relaxed = true)
+    private val db = mockk<AppDatabase>(relaxed = true)
+
     private lateinit var viewModel: RecordingViewModel
     private val testDispatcher = StandardTestDispatcher()
 
@@ -63,7 +68,8 @@ class RecordingViewModelTest {
         )
         
         // Mock all dependencies that would touch Android internals
-        val db = mockk<AppDatabase>(relaxed = true)
+        every { db.recordingDao() } returns recordingDao
+        coEvery { recordingDao.get(any()) } returns null
         val transcriber = mockk<TranscriptionService>(relaxed = true)
         
         viewModel = RecordingViewModel(
@@ -291,7 +297,7 @@ class RecordingViewModelTest {
         
         // Verify save was called with the correct recording data
         coVerify(exactly = 1) {
-            repo.save(match { recording ->
+            recordingDao.upsert(match { recording ->
                 recording.filename == "valid_recording.mp3" &&
                 recording.title == "Valid Note Title" &&
                 recording.transcript == "Hello valid import" &&
@@ -347,10 +353,10 @@ class RecordingViewModelTest {
         
         // Verify only safe entry saved
         coVerify(exactly = 1) {
-            repo.save(match { it.filename == "valid_entry.mp3" })
+            recordingDao.upsert(match { it.filename == "valid_entry.mp3" })
         }
         coVerify(exactly = 0) {
-            repo.save(match { it.filename.contains("traversal") })
+            recordingDao.upsert(match { it.filename.contains("traversal") })
         }
     }
 
@@ -397,7 +403,7 @@ class RecordingViewModelTest {
         
         // The recording should be saved, but localPath must be empty/ignored
         coVerify(exactly = 1) {
-            repo.save(match { recording ->
+            recordingDao.upsert(match { recording ->
                 recording.filename == "recording_with_bad_path.mp3" &&
                 recording.localPath.isEmpty()
             })
