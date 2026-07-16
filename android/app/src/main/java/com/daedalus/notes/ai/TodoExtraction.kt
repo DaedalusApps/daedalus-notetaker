@@ -38,6 +38,11 @@ fun normalizeTodoText(s: String): String =
 
 private const val MIN_CONTAINMENT_LENGTH = 8
 
+private val DEDUP_STOPWORDS = setOf(
+    "the", "a", "an", "to", "for", "of", "about", "regarding", "re", "your", "my", "our",
+    "his", "her", "their", "on", "in", "at", "with", "and"
+)
+
 fun isDuplicateTodo(candidate: String, existing: Collection<String>): Boolean {
     val norm = normalizeTodoText(candidate)
     if (norm.isEmpty()) return false
@@ -50,15 +55,27 @@ fun isDuplicateTodo(candidate: String, existing: Collection<String>): Boolean {
  * Exact normalized equality always counts as a duplicate. Containment (either direction)
  * only counts when the SHORTER of the two normalized strings is at least
  * [MIN_CONTAINMENT_LENGTH] chars, so short todos like "buy" or "call" don't suppress every
- * longer todo that happens to contain them.
+ * longer todo that happens to contain them. A third rule catches paraphrases: if the
+ * stopword-filtered word sets of both strings are non-empty and exactly equal (again guarded
+ * by [MIN_CONTAINMENT_LENGTH] on the shorter normalized string), they count as a duplicate.
+ * Subset relationships are deliberately NOT treated as duplicates here — e.g. "call dad" is
+ * not a duplicate of "call mom and dad" — since that would over-suppress distinct todos that
+ * merely share some words against the full persistent todo history.
  */
 internal fun isDuplicateTodoNormalized(candidateNorm: String, trackedNorms: List<String>): Boolean {
     if (candidateNorm.isEmpty()) return false
+    val candidateWords = candidateNorm.split(" ").filter { it.isNotEmpty() && it !in DEDUP_STOPWORDS }.toSet()
     return trackedNorms.any { existingNorm ->
         if (existingNorm.isEmpty()) return@any false
         if (existingNorm == candidateNorm) return@any true
         val shorterLength = minOf(existingNorm.length, candidateNorm.length)
-        shorterLength >= MIN_CONTAINMENT_LENGTH &&
+        if (shorterLength >= MIN_CONTAINMENT_LENGTH &&
             (existingNorm.contains(candidateNorm) || candidateNorm.contains(existingNorm))
+        ) {
+            return@any true
+        }
+        val existingWords = existingNorm.split(" ").filter { it.isNotEmpty() && it !in DEDUP_STOPWORDS }.toSet()
+        if (candidateWords.isEmpty() || existingWords.isEmpty()) return@any false
+        candidateWords == existingWords && shorterLength >= MIN_CONTAINMENT_LENGTH
     }
 }
