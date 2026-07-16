@@ -20,9 +20,6 @@ interface TodoDao {
     @Insert
     suspend fun insert(item: TodoItem): Long
 
-    @Insert
-    suspend fun insertAll(items: List<TodoItem>)
-
     @Update
     suspend fun update(item: TodoItem)
 
