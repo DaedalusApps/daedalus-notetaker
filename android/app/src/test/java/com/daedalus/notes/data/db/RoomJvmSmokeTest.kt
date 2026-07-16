@@ -11,6 +11,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
+/**
+ * Wiring smoke test only: proves Room + Robolectric run as a JVM unit test
+ * (no device). Real DAO behavior coverage lives in androidTest/RecordingDaoTest
+ * and in the JVM DB tests added alongside new features — don't grow this file.
+ */
 @RunWith(RobolectricTestRunner::class)
 class RoomJvmSmokeTest {
 
