@@ -3,6 +3,7 @@ package com.daedalus.notes.data.backup
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.daedalus.notes.ai.normalizeTodoText
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.data.model.TodoItem
@@ -232,7 +233,7 @@ class BackupManagerTest {
     }
 
     private fun normalizeMatchesBuyMilk(text: String): Boolean =
-        BackupManager.normalizeTodoText(text) == "buy milk"
+        normalizeTodoText(text) == "buy milk"
 
     @Test
     fun runAutoBackup_noFolderConfigured_returnsFailureWithoutThrowing() = runBlocking {
