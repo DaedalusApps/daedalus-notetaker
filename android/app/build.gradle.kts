@@ -71,6 +71,18 @@ android {
             excludes += "META-INF/LICENSE-notice.md"
         }
     }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+}
+
+kapt {
+    arguments {
+        arg("room.schemaLocation", "$projectDir/schemas")
+    }
 }
 
 dependencies {
@@ -117,6 +129,9 @@ dependencies {
     testImplementation(libs.coroutines.test)
     testImplementation(libs.androidx.arch.core.testing)
     testImplementation("org.json:json:20240303")
+    testImplementation(libs.robolectric)
+    testImplementation(libs.room.testing)
+    testImplementation(libs.androidx.test.core)
 
     androidTestImplementation(libs.androidx.test.ext)
     androidTestImplementation(libs.androidx.test.runner)
