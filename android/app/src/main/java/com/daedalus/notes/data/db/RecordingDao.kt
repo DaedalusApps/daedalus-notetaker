@@ -28,6 +28,9 @@ interface RecordingDao {
     @Query("SELECT * FROM recordings WHERE pendingDelete = 1")
     suspend fun getPendingDeletes(): List<Recording>
 
+    @Query("SELECT * FROM recordings WHERE createdAt >= :cutoff AND pendingDelete = 0 ORDER BY createdAt DESC")
+    suspend fun getSince(cutoff: Long): List<Recording>
+
     @Query("UPDATE recordings SET pendingDelete = :pendingDelete WHERE filename = :filename")
     suspend fun updatePendingDelete(filename: String, pendingDelete: Boolean)
 
