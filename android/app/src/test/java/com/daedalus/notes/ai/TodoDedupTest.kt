@@ -63,4 +63,29 @@ class TodoDedupTest {
     fun isDuplicateTodo_exactMatchShortStringStillDuplicate() {
         assertTrue(isDuplicateTodo("call", listOf("Call!")))
     }
+
+    @Test
+    fun isDuplicateTodo_tokenSetParaphraseExtraStopword() {
+        assertTrue(isDuplicateTodo("Buy stamps for office", listOf("buy stamps for the office")))
+    }
+
+    @Test
+    fun isDuplicateTodo_tokenSetParaphraseSynonymStopword() {
+        assertTrue(
+            isDuplicateTodo(
+                "Contact dentists office regarding insurance claim",
+                listOf("Contact dentists office about insurance claim")
+            )
+        )
+    }
+
+    @Test
+    fun isDuplicateTodo_tokenSetDifferentContentNotDuplicate() {
+        assertFalse(isDuplicateTodo("Review policy details", listOf("Review budget details")))
+    }
+
+    @Test
+    fun isDuplicateTodo_tokenSetShortSubsetNotSuppressed() {
+        assertFalse(isDuplicateTodo("call", listOf("call the vendor")))
+    }
 }
