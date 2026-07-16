@@ -88,4 +88,14 @@ class TodoDedupTest {
     fun isDuplicateTodo_tokenSetShortSubsetNotSuppressed() {
         assertFalse(isDuplicateTodo("call", listOf("call the vendor")))
     }
+
+    @Test
+    fun isDuplicateTodo_tokenSetSubsetNotDuplicate() {
+        assertFalse(isDuplicateTodo("call dad", listOf("call mom and dad")))
+    }
+
+    @Test
+    fun isDuplicateTodo_tokenSetAllStopwordsNotDuplicate() {
+        assertFalse(isDuplicateTodo("on it", listOf("for the")))
+    }
 }

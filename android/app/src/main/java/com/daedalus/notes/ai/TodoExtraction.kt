@@ -55,10 +55,12 @@ fun isDuplicateTodo(candidate: String, existing: Collection<String>): Boolean {
  * Exact normalized equality always counts as a duplicate. Containment (either direction)
  * only counts when the SHORTER of the two normalized strings is at least
  * [MIN_CONTAINMENT_LENGTH] chars, so short todos like "buy" or "call" don't suppress every
- * longer todo that happens to contain them. A third rule catches paraphrases: comparing the
- * stopword-filtered word sets, either exact set equality or one set being a subset of the
- * other (again guarded by [MIN_CONTAINMENT_LENGTH] on the shorter normalized string) counts
- * as a duplicate.
+ * longer todo that happens to contain them. A third rule catches paraphrases: if the
+ * stopword-filtered word sets of both strings are non-empty and exactly equal (again guarded
+ * by [MIN_CONTAINMENT_LENGTH] on the shorter normalized string), they count as a duplicate.
+ * Subset relationships are deliberately NOT treated as duplicates here — e.g. "call dad" is
+ * not a duplicate of "call mom and dad" — since that would over-suppress distinct todos that
+ * merely share some words against the full persistent todo history.
  */
 internal fun isDuplicateTodoNormalized(candidateNorm: String, trackedNorms: List<String>): Boolean {
     if (candidateNorm.isEmpty()) return false
@@ -74,9 +76,6 @@ internal fun isDuplicateTodoNormalized(candidateNorm: String, trackedNorms: List
         }
         val existingWords = existingNorm.split(" ").filter { it.isNotEmpty() && it !in DEDUP_STOPWORDS }.toSet()
         if (candidateWords.isEmpty() || existingWords.isEmpty()) return@any false
-        val setsRelated = candidateWords == existingWords ||
-            candidateWords.containsAll(existingWords) ||
-            existingWords.containsAll(candidateWords)
-        setsRelated && shorterLength >= MIN_CONTAINMENT_LENGTH
+        candidateWords == existingWords && shorterLength >= MIN_CONTAINMENT_LENGTH
     }
 }
