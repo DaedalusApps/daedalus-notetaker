@@ -51,6 +51,9 @@ private val BACKUP_INTERVAL_OPTIONS = listOf(
 private fun backupIntervalLabel(hours: Long): String =
     BACKUP_INTERVAL_OPTIONS.firstOrNull { it.first == hours }?.second ?: "Every $hours hours"
 
+private fun todoLookbackLabel(hours: Long): String =
+    LOOKBACK_OPTIONS.firstOrNull { it.hours == hours }?.label ?: "Last $hours hours"
+
 private fun formatLastBackupTime(millis: Long): String {
     if (millis <= 0L) return "never"
     return java.text.SimpleDateFormat("MMM d, yyyy h:mm a", java.util.Locale.getDefault()).format(java.util.Date(millis))
@@ -77,6 +80,8 @@ fun SettingsScreen(
     var lastBackupTime by remember { mutableStateOf(prefs.getLong(BackupPrefs.LAST_BACKUP_TIME, 0L)) }
     var lastBackupError by remember { mutableStateOf(prefs.getString(BackupPrefs.LAST_BACKUP_ERROR, null)) }
     var backupIntervalMenuExpanded by remember { mutableStateOf(false) }
+    var todoLookbackHours by remember { mutableStateOf(prefs.getLong(TODO_LOOKBACK_HOURS_KEY, TODO_LOOKBACK_HOURS_DEFAULT)) }
+    var todoLookbackMenuExpanded by remember { mutableStateOf(false) }
     var isBackingUp by remember { mutableStateOf(false) }
     val backupFolderName = remember(backupFolderUri) {
         backupFolderUri?.let { uriStr ->
@@ -278,6 +283,41 @@ fun SettingsScreen(
                         Text("Analyze recordings automatically when synced via BLE", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Switch(checked = autoProcess, onCheckedChange = { autoProcess = it })
+                }
+
+                // Todo List
+                Text("Todo List", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ExposedDropdownMenuBox(
+                        expanded = todoLookbackMenuExpanded,
+                        onExpandedChange = { todoLookbackMenuExpanded = it }
+                    ) {
+                        OutlinedTextField(
+                            readOnly = true,
+                            value = todoLookbackLabel(todoLookbackHours),
+                            onValueChange = {},
+                            label = { Text("Default AI lookback") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = todoLookbackMenuExpanded) },
+                            modifier = Modifier
+                                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                                .fillMaxWidth()
+                        )
+                        ExposedDropdownMenu(
+                            expanded = todoLookbackMenuExpanded,
+                            onDismissRequest = { todoLookbackMenuExpanded = false }
+                        ) {
+                            LOOKBACK_OPTIONS.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label) },
+                                    onClick = {
+                                        todoLookbackHours = option.hours
+                                        prefs.edit().putLong(TODO_LOOKBACK_HOURS_KEY, option.hours).apply()
+                                        todoLookbackMenuExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // Backup & Recovery
