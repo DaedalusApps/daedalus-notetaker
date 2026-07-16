@@ -77,6 +77,13 @@ android {
             isIncludeAndroidResources = true
         }
     }
+
+    // Expose the exported Room schema JSONs to Robolectric MigrationTestHelper.
+    // Robolectric reads the merged debug assets (not the test sourceSet), so the
+    // schemas are attached to the debug variant — they stay out of the release APK.
+    sourceSets.getByName("debug") {
+        assets.srcDir(files("$projectDir/schemas"))
+    }
 }
 
 kapt {
