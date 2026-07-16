@@ -20,6 +20,7 @@ import com.daedalus.notes.ai.extractActionItems
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.MarkdownExporter
 import com.daedalus.notes.ai.SmartAnalysisParser
+import com.daedalus.notes.ai.stripCodeFences
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.isWhisperReady
 import com.daedalus.notes.ai.isTranscriptReadable
@@ -573,14 +574,6 @@ class RecordingViewModel @JvmOverloads constructor(
                 _isProcessing.value = false
                 _syncProgress.value = null
             }
-    }
-
-    private fun stripCodeFences(text: String): String {
-        // Gemma sometimes wraps output in ```json ... ``` fences — strip them
-        val stripped = text.trim()
-            .removePrefix("```json").removePrefix("```")
-            .removeSuffix("```").trim()
-        return stripped
     }
 
     fun clearExportIntent() { _exportIntent.value = null }

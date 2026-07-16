@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
+import com.daedalus.notes.ai.normalizeTodoText as normalizeTodoTextShared
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.Recording
@@ -321,11 +322,7 @@ class BackupManager(
             BackupPrefs.MAX_COUNT
         )
 
-        internal fun normalizeTodoText(s: String): String =
-            s.lowercase()
-                .replace(Regex("[^a-z0-9\\s]"), "")
-                .replace(Regex("\\s+"), " ")
-                .trim()
+        internal fun normalizeTodoText(s: String): String = normalizeTodoTextShared(s)
 
         /**
          * Given all filenames in the backup folder, returns the names of backups that
