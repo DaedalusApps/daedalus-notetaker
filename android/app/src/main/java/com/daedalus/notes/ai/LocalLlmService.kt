@@ -91,12 +91,10 @@ class LocalLlmService(private val context: Context) {
             }
         }
 
-    fun close() {
-        inference?.close()
-        inference = null
-    }
-
     companion object {
+        // The singleton is intentionally never closed: it lives for the process, and native
+        // teardown here previously raced an in-flight generateResponseAsync call and caused
+        // a SIGSEGV. Native memory is reclaimed when the process dies.
         @Volatile
         private var INSTANCE: LocalLlmService? = null
 

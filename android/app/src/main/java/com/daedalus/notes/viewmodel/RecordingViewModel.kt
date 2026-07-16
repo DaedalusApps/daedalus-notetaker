@@ -1026,7 +1026,6 @@ class RecordingViewModel @JvmOverloads constructor(
 
     override fun onCleared() {
         super.onCleared()
-        llm.close()
         embedder.close()
     }
 }

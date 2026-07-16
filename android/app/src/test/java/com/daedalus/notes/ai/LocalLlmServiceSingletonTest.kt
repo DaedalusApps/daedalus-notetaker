@@ -3,10 +3,19 @@ package com.daedalus.notes.ai
 import android.content.Context
 import io.mockk.every
 import io.mockk.mockk
+import org.junit.After
 import org.junit.Assert.assertSame
 import org.junit.Test
 
 class LocalLlmServiceSingletonTest {
+
+    @After
+    fun resetSingleton() {
+        LocalLlmService::class.java.getDeclaredField("INSTANCE").apply {
+            isAccessible = true
+            set(null, null)
+        }
+    }
 
     @Test
     fun getInstance_returnsSameInstanceForSameContext() {
