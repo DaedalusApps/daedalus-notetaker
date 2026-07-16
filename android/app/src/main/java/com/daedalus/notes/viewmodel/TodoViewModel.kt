@@ -6,7 +6,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.TODO_EXTRACTION_PROMPT
-import com.daedalus.notes.ai.isDuplicateTodo
+import com.daedalus.notes.ai.isDuplicateTodoNormalized
+import com.daedalus.notes.ai.normalizeTodoText
 import com.daedalus.notes.ai.parseTodoLines
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.TodoItem
@@ -119,20 +120,24 @@ class TodoViewModel @JvmOverloads constructor(
         val batches = packBatches(blocks)
 
         llm.ensureLoaded()
-        val existing = db.todoDao().getAll().map { it.text }.toMutableList()
+        val existing = db.todoDao().getAll().map { it.text }
+        val trackedTexts = existing.toMutableList()
+        val trackedNorms = existing.mapTo(mutableListOf()) { normalizeTodoText(it) }
         val insertedThisRun = mutableListOf<String>()
 
         for (batchText in batches) {
-            val alreadyTracked = (existing + insertedThisRun)
-            val trackedBlock = if (alreadyTracked.isEmpty()) "(none)"
-                else alreadyTracked.takeLast(30).joinToString("\n") { "- $it" }
+            val trackedBlock = if (trackedTexts.isEmpty()) "(none)"
+                else trackedTexts.takeLast(30).joinToString("\n") { "- $it" }
             val prompt = TODO_EXTRACTION_PROMPT +
                 "\n\nAlready tracked (do not repeat):\n" + trackedBlock
             val response = llm.generate(prompt, batchText)
             parseTodoLines(response).forEach { candidate ->
-                if (!isDuplicateTodo(candidate, existing + insertedThisRun)) {
+                val candidateNorm = normalizeTodoText(candidate)
+                if (!isDuplicateTodoNormalized(candidateNorm, trackedNorms)) {
                     db.todoDao().insert(TodoItem(text = candidate, isAiGenerated = true))
                     insertedThisRun += candidate
+                    trackedTexts += candidate
+                    trackedNorms += candidateNorm
                 }
             }
         }

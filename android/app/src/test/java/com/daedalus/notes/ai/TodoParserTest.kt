@@ -69,6 +69,24 @@ class TodoParserTest {
     }
 
     @Test
+    fun parseTodoLines_nonePeriod_returnsEmpty() {
+        assertEquals(emptyList<String>(), parseTodoLines("- None."))
+    }
+
+    @Test
+    fun parseTodoLines_noNewTasks_returnsEmpty() {
+        assertEquals(emptyList<String>(), parseTodoLines("- No new tasks."))
+    }
+
+    @Test
+    fun parseTodoLines_realTaskContainingNoneMidSentence_stillParses() {
+        assertEquals(
+            listOf("Leave none of the boxes unpacked"),
+            parseTodoLines("- Leave none of the boxes unpacked")
+        )
+    }
+
+    @Test
     fun parseTodoLines_cappedAtTen() {
         val raw = (1..15).joinToString("\n") { "- Task number $it is here" }
         assertEquals(10, parseTodoLines(raw).size)

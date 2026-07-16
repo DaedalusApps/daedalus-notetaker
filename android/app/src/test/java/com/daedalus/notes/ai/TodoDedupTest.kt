@@ -48,4 +48,19 @@ class TodoDedupTest {
         assertFalse(isDuplicateTodo("?!?", listOf(":)")))
         assertFalse(isDuplicateTodo("", listOf("")))
     }
+
+    @Test
+    fun isDuplicateTodo_shortContainmentNotSuppressed() {
+        assertFalse(isDuplicateTodo("call", listOf("call the vendor")))
+    }
+
+    @Test
+    fun isDuplicateTodo_eightCharContainmentStillDuplicate() {
+        assertTrue(isDuplicateTodo("buy milk", listOf("buy milk tomorrow")))
+    }
+
+    @Test
+    fun isDuplicateTodo_exactMatchShortStringStillDuplicate() {
+        assertTrue(isDuplicateTodo("call", listOf("Call!")))
+    }
 }
