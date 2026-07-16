@@ -27,6 +27,7 @@ import com.daedalus.notes.ai.selectedModel
 import com.daedalus.notes.ble.BleManager
 import com.daedalus.notes.ble.ConnectionState
 import com.daedalus.notes.data.RecordingRepository
+import com.daedalus.notes.data.backup.BackupManager
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.AudioUtils
 import com.daedalus.notes.data.model.Recording
@@ -831,51 +832,13 @@ class RecordingViewModel @JvmOverloads constructor(
         }
     }
 
+    private val backupManager by lazy { BackupManager(getApplication(), db) }
+
     fun exportBackup(uri: Uri, onSuccess: () -> Unit, onError: (String) -> Unit) {
         viewModelScope.launch {
             try {
-                val recordings = withContext(ioDispatcher) {
-                    repo.allRecordings.first()
-                }
-                val rootJson = org.json.JSONObject().apply {
-                    put("backupVersion", 1)
-                    put("exportedAt", System.currentTimeMillis())
-                    
-                    val array = org.json.JSONArray()
-                    recordings.forEach { r ->
-                        val obj = org.json.JSONObject().apply {
-                            put("filename", r.filename)
-                            put("localPath", r.localPath)
-                            put("sizeBytes", r.sizeBytes)
-                            put("transcript", r.transcript)
-                            put("summary", r.summary)
-                            put("mindMap", r.mindMap)
-                            put("category", r.category)
-                            put("createdAt", r.createdAt)
-                            put("title", r.title)
-                            put("shortSummary", r.shortSummary)
-                            put("durationMillis", r.durationMillis)
-                            put("isLocal", r.isLocal)
-                            
-                            val topicsArr = org.json.JSONArray()
-                            r.topics.forEach { topicsArr.put(it) }
-                            put("topics", topicsArr)
-                            
-                            r.embedding?.let { emb ->
-                                val embArr = org.json.JSONArray()
-                                emb.forEach { embArr.put(it.toDouble()) }
-                                put("embedding", embArr)
-                            }
-                        }
-                        array.put(obj)
-                    }
-                    put("recordings", array)
-                }
-                
                 withContext(ioDispatcher) {
-                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
-                        out.write(rootJson.toString(2).toByteArray(Charsets.UTF_8))
-                    }
+                    backupManager.exportToUri(uri)
                 }
                 onSuccess()
             } catch (e: Exception) {
@@ -888,90 +851,8 @@ class RecordingViewModel @JvmOverloads constructor(
     fun importBackup(uri: Uri, onSuccess: (Int) -> Unit, onError: (String) -> Unit) {
         viewModelScope.launch {
             try {
-                val context = getApplication<Application>()
-                val jsonStr = withContext(ioDispatcher) {
-                    context.contentResolver.openInputStream(uri)?.use { input ->
-                        input.bufferedReader().readText()
-                    }
-                } ?: throw Exception("Could not open backup file")
-                
-                val root = org.json.JSONObject(jsonStr)
-                val array = root.optJSONArray("recordings") ?: throw Exception("Backup JSON is missing recordings list")
-                var importedCount = 0
-                
-                withContext(ioDispatcher) {
-                    val currentRecordingsDir = File(context.getExternalFilesDir(null), "Recordings")
-                    
-                    for (i in 0 until array.length()) {
-                        val obj = array.optJSONObject(i) ?: continue
-                        val filename = obj.optString("filename", "")
-                        
-                        // Security validation: prevent directory traversal via filename characters
-                        if (filename.isBlank() || !filename.matches(Regex("[A-Za-z0-9._-]+")) || filename == "." || filename == "..") {
-                            Log.w("RecordingViewModel", "Skipping invalid filename in backup: $filename")
-                            continue
-                        }
-                        
-                        val originalLocalPath = obj.optString("localPath", "")
-                        val fileInCurrentDir = File(currentRecordingsDir, filename)
-                        
-                        // Security validation: prevent directory traversal via resolved paths
-                        val isOriginalPathSafe = if (originalLocalPath.isNotEmpty()) {
-                            try {
-                                val originalFile = File(originalLocalPath).canonicalFile
-                                val appFilesDir = context.getExternalFilesDir(null)?.canonicalFile
-                                appFilesDir != null && originalFile.path.startsWith(appFilesDir.path + File.separator) && originalFile.exists()
-                            } catch (e: Exception) {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                        
-                        val resolvedLocalPath = when {
-                            fileInCurrentDir.exists() -> fileInCurrentDir.absolutePath
-                            isOriginalPathSafe -> originalLocalPath
-                            else -> ""
-                        }
-                        
-                        val topicsArr = obj.optJSONArray("topics")
-                        val topics = mutableListOf<String>()
-                        if (topicsArr != null) {
-                            for (j in 0 until topicsArr.length()) {
-                                val topic = topicsArr.optString(j, "")
-                                if (topic.isNotEmpty()) {
-                                    topics.add(topic)
-                                }
-                            }
-                        }
-                        
-                        val embArr = obj.optJSONArray("embedding")
-                        val embedding = if (embArr != null) {
-                            FloatArray(embArr.length()) { j -> embArr.optDouble(j, 0.0).toFloat() }
-                        } else {
-                            null
-                        }
-                        
-                        val existing = repo.get(filename)
-                        val recording = (existing ?: Recording(filename = filename)).copy(
-                            localPath = resolvedLocalPath.ifBlank { existing?.localPath ?: "" },
-                            sizeBytes = obj.optLong("sizeBytes", existing?.sizeBytes ?: 0L),
-                            transcript = obj.optString("transcript", existing?.transcript ?: ""),
-                            summary = obj.optString("summary", existing?.summary ?: ""),
-                            mindMap = obj.optString("mindMap", existing?.mindMap ?: ""),
-                            category = obj.optInt("category", existing?.category ?: 1),
-                            createdAt = obj.optLong("createdAt", existing?.createdAt ?: System.currentTimeMillis()),
-                            title = obj.optString("title", existing?.title ?: ""),
-                            shortSummary = obj.optString("shortSummary", existing?.shortSummary ?: ""),
-                            topics = topics,
-                            durationMillis = obj.optLong("durationMillis", existing?.durationMillis ?: 0L),
-                            embedding = embedding ?: existing?.embedding,
-                            isLocal = obj.optBoolean("isLocal", existing?.isLocal ?: false)
-                        )
-                        
-                        repo.save(recording)
-                        importedCount++
-                    }
+                val importedCount = withContext(ioDispatcher) {
+                    backupManager.importFromUri(uri)
                 }
                 onSuccess(importedCount)
             } catch (e: Exception) {
