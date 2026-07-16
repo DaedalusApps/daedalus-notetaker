@@ -287,35 +287,33 @@ fun SettingsScreen(
 
                 // Todo List
                 Text("Todo List", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ExposedDropdownMenuBox(
+                ExposedDropdownMenuBox(
+                    expanded = todoLookbackMenuExpanded,
+                    onExpandedChange = { todoLookbackMenuExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        readOnly = true,
+                        value = todoLookbackLabel(todoLookbackHours),
+                        onValueChange = {},
+                        label = { Text("Default AI lookback") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = todoLookbackMenuExpanded) },
+                        modifier = Modifier
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                            .fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(
                         expanded = todoLookbackMenuExpanded,
-                        onExpandedChange = { todoLookbackMenuExpanded = it }
+                        onDismissRequest = { todoLookbackMenuExpanded = false }
                     ) {
-                        OutlinedTextField(
-                            readOnly = true,
-                            value = todoLookbackLabel(todoLookbackHours),
-                            onValueChange = {},
-                            label = { Text("Default AI lookback") },
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = todoLookbackMenuExpanded) },
-                            modifier = Modifier
-                                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
-                                .fillMaxWidth()
-                        )
-                        ExposedDropdownMenu(
-                            expanded = todoLookbackMenuExpanded,
-                            onDismissRequest = { todoLookbackMenuExpanded = false }
-                        ) {
-                            LOOKBACK_OPTIONS.forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text(option.label) },
-                                    onClick = {
-                                        todoLookbackHours = option.hours
-                                        prefs.edit().putLong(TODO_LOOKBACK_HOURS_KEY, option.hours).apply()
-                                        todoLookbackMenuExpanded = false
-                                    }
-                                )
-                            }
+                        LOOKBACK_OPTIONS.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option.label) },
+                                onClick = {
+                                    todoLookbackHours = option.hours
+                                    prefs.edit().putLong(TODO_LOOKBACK_HOURS_KEY, option.hours).apply()
+                                    todoLookbackMenuExpanded = false
+                                }
+                            )
                         }
                     }
                 }

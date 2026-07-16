@@ -21,7 +21,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -39,13 +38,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -55,7 +51,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -64,6 +59,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import android.content.Context
 import com.daedalus.notes.data.model.TodoItem
+import com.daedalus.notes.ui.components.SwipeToDeleteCard
 import com.daedalus.notes.viewmodel.TodoViewModel
 
 /** Preset lookback options shown in the "update from recordings" dialog. */
@@ -78,6 +74,9 @@ val LOOKBACK_OPTIONS = listOf(
 
 const val TODO_LOOKBACK_HOURS_KEY = "todo_lookback_hours"
 const val TODO_LOOKBACK_HOURS_DEFAULT = 72L
+
+/** Sentinel hours value marking the "Custom" radio option (not a real lookback duration). */
+private const val CUSTOM_HOURS_SENTINEL = -2L
 
 /** Result of mapping a stored/selected hours value onto the radio list: either a known preset, or Custom. */
 sealed class LookbackSelection {
@@ -107,6 +106,14 @@ fun TodoScreen(
 
     var showLookbackDialog by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
+
+    // TodoViewModel is Activity-scoped, so a completion/error from a previous visit to this
+    // screen can still be sitting in state. Clear it once on entry, before the snackbar
+    // effects below observe it, so only fresh completions from this visit show a snackbar.
+    LaunchedEffect(Unit) {
+        todoViewModel.clearLastExtractCount()
+        todoViewModel.clearError()
+    }
 
     LaunchedEffect(lastExtractCount) {
         if (lastExtractCount != null) {
@@ -235,7 +242,6 @@ private fun TodoSwipeToDeleteCard(
     onDelete: () -> Unit,
     onEditSave: (String) -> Unit
 ) {
-    var showConfirm by remember { mutableStateOf(false) }
     var showEditDialog by remember { mutableStateOf(false) }
     var editText by remember(todo.id) { mutableStateOf(todo.text) }
 
@@ -265,42 +271,10 @@ private fun TodoSwipeToDeleteCard(
         )
     }
 
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.EndToStart) {
-                showConfirm = true
-            }
-            false
-        }
-    )
-
-    if (showConfirm) {
-        AlertDialog(
-            onDismissRequest = { showConfirm = false },
-            title = { Text("Delete todo?") },
-            text = { Text("This will permanently remove this todo.") },
-            confirmButton = {
-                Button(onClick = { showConfirm = false; onDelete() }) { Text("Delete") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showConfirm = false }) { Text("Cancel") }
-            }
-        )
-    }
-
-    SwipeToDismissBox(
-        state = dismissState,
-        enableDismissFromStartToEnd = false,
-        backgroundContent = {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 8.dp),
-                contentAlignment = Alignment.CenterEnd
-            ) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Red)
-            }
-        }
+    SwipeToDeleteCard(
+        confirmTitle = "Delete todo?",
+        confirmText = "This will permanently remove this todo.",
+        onDelete = onDelete
     ) {
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -369,12 +343,12 @@ private fun LookbackDialog(
     val initialSelection = remember { lookbackOptionFor(storedHours) }
 
     var selectedHours by remember {
-        mutableStateOf(if (initialSelection is LookbackSelection.Standard) initialSelection.hours else -2L)
+        mutableStateOf(if (initialSelection is LookbackSelection.Standard) initialSelection.hours else CUSTOM_HOURS_SENTINEL)
     }
     var customText by remember {
         mutableStateOf(if (initialSelection is LookbackSelection.Custom) initialSelection.hours.toString() else "")
     }
-    val isCustomSelected = selectedHours == -2L
+    val isCustomSelected = selectedHours == CUSTOM_HOURS_SENTINEL
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -402,12 +376,12 @@ private fun LookbackDialog(
                         .fillMaxWidth()
                         .selectable(
                             selected = isCustomSelected,
-                            onClick = { selectedHours = -2L }
+                            onClick = { selectedHours = CUSTOM_HOURS_SENTINEL }
                         )
                         .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    RadioButton(selected = isCustomSelected, onClick = { selectedHours = -2L })
+                    RadioButton(selected = isCustomSelected, onClick = { selectedHours = CUSTOM_HOURS_SENTINEL })
                     Spacer(Modifier.width(8.dp))
                     Text("Custom")
                 }
@@ -428,7 +402,7 @@ private fun LookbackDialog(
             val confirmHours = if (isCustomSelected) customHours else selectedHours
             Button(
                 onClick = { if (confirmHours != null) onConfirm(confirmHours) },
-                enabled = confirmHours != null
+                enabled = confirmHours != null && (!isCustomSelected || confirmHours > 0)
             ) { Text("Update") }
         },
         dismissButton = {
