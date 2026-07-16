@@ -180,6 +180,61 @@ class BackupManagerTest {
     }
 
     @Test
+    fun settingsRestore_plainJsonIntForLongKey_storedAsLongNoClassCast() = runBlocking {
+        // org.json parses `24` as Integer. If applySettings inferred the pref type from
+        // the JSON value, backup_interval_hours (written/read as Long everywhere) would be
+        // stored as Int and a later getLong() would throw ClassCastException.
+        val json = JSONObject().apply {
+            put("backupVersion", 2)
+            put("recordings", JSONArray())
+            put("settings", JSONObject().apply { put("backup_interval_hours", 24) }) // plain int
+        }
+
+        val target = newDb()
+        BackupManager(context, target).importFromJson(json)
+
+        // Must not throw and must round-trip to 24L.
+        assertEquals(24L, prefs().getLong("backup_interval_hours", -1L))
+        target.close()
+    }
+
+    @Test
+    fun todoImport_punctuationOnlyTodos_areNotFoldedIntoOne() = runBlocking {
+        // normalizeTodoText("?!?") and normalizeTodoText(":)") both reduce to "".
+        // Empty normalized forms must bypass dedup so distinct todos still all insert.
+        val json = JSONObject().apply {
+            put("backupVersion", 2)
+            put("recordings", JSONArray())
+            put("todos", JSONArray().apply {
+                put(JSONObject().apply { put("text", "?!?"); put("isDone", false); put("createdAt", 1L) })
+                put(JSONObject().apply { put("text", ":)"); put("isDone", false); put("createdAt", 2L) })
+            })
+        }
+
+        val target = newDb()
+        BackupManager(context, target).importFromJson(json)
+
+        val todos = target.todoDao().getAll()
+        assertEquals(setOf("?!?", ":)"), todos.map { it.text }.toSet())
+
+        // Normal-text dedup still works alongside the empty-norm bypass.
+        val normalJson = JSONObject().apply {
+            put("backupVersion", 2)
+            put("recordings", JSONArray())
+            put("todos", JSONArray().apply {
+                put(JSONObject().apply { put("text", "Buy Milk!"); put("createdAt", 3L) })
+                put(JSONObject().apply { put("text", "buy milk"); put("createdAt", 4L) })
+            })
+        }
+        BackupManager(context, target).importFromJson(normalJson)
+        assertEquals(1, target.todoDao().getAll().count { normalizeMatchesBuyMilk(it.text) })
+        target.close()
+    }
+
+    private fun normalizeMatchesBuyMilk(text: String): Boolean =
+        BackupManager.normalizeTodoText(text) == "buy milk"
+
+    @Test
     fun runAutoBackup_noFolderConfigured_returnsFailureWithoutThrowing() = runBlocking {
         // backup_folder_uri intentionally absent from prefs.
         val db = newDb()

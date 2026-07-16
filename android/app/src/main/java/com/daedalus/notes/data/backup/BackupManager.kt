@@ -23,10 +23,9 @@ import java.util.Locale
  */
 class BackupManager(
     private val context: Context,
-    private val db: AppDatabase = AppDatabase.getInstance(context)
+    private val db: AppDatabase = AppDatabase.getInstance(context),
+    private val repo: RecordingRepository = RecordingRepository(db.recordingDao())
 ) {
-
-    private val repo = RecordingRepository(db.recordingDao())
 
     /** Builds the v2 backup payload: recordings + todos + settings. */
     suspend fun buildBackupJson(): JSONObject {
@@ -111,9 +110,6 @@ class BackupManager(
      * (recordings + todos + settings). Returns the number of recordings imported.
      */
     suspend fun importFromJson(root: JSONObject): Int {
-        @Suppress("UNUSED_VARIABLE")
-        val backupVersion = root.optInt("backupVersion", 1)
-
         val array = root.optJSONArray("recordings") ?: throw Exception("Backup JSON is missing recordings list")
         var importedCount = 0
 
@@ -207,7 +203,10 @@ class BackupManager(
             val text = obj.optString("text", "")
             if (text.isBlank()) continue
             val norm = normalizeTodoText(text)
-            if (!existingNorms.add(norm)) continue // duplicate: already present
+            // A normalized form of "" (punctuation/emoji-only todos) carries no
+            // identity, so skip dedup for it and always insert rather than folding
+            // every such todo into a single "" bucket.
+            if (norm.isNotEmpty() && !existingNorms.add(norm)) continue // duplicate: already present
 
             db.todoDao().insert(
                 TodoItem(
@@ -230,9 +229,9 @@ class BackupManager(
     suspend fun runAutoBackup(): Result<Unit> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         try {
-            val storedUri = prefs.getString(PREF_BACKUP_FOLDER_URI, null)
+            val storedUri = prefs.getString(BackupPrefs.FOLDER_URI, null)
             if (storedUri.isNullOrBlank()) {
-                return failAutoBackup(prefs, "No backup folder configured")
+                return failAutoBackup(prefs, BackupPrefs.ERR_NO_FOLDER)
             }
 
             val hasWriteGrant = context.contentResolver.persistedUriPermissions.any {
@@ -241,27 +240,39 @@ class BackupManager(
             val uri = Uri.parse(storedUri)
             val dir = if (hasWriteGrant) DocumentFile.fromTreeUri(context, uri) else null
             if (dir == null || !dir.exists() || !dir.canWrite()) {
-                return failAutoBackup(prefs, "Backup folder is not accessible")
+                return failAutoBackup(prefs, BackupPrefs.ERR_FOLDER_NOT_ACCESSIBLE)
             }
+
+            // Build the payload BEFORE creating the file so a build failure never
+            // leaves a zero-byte backup whose newest-timestamp name would survive
+            // retention (and fail on import) while deleting a good older backup.
+            val payload = buildBackupJson().toString(2)
 
             val filename = "daedalus_backup_" +
                 SimpleDateFormat("yyyy-MM-dd_HHmm", Locale.US).format(Date()) + ".json"
             val file = dir.createFile("application/json", filename)
                 ?: return failAutoBackup(prefs, "Could not create backup file")
 
-            val json = buildBackupJson()
-            context.contentResolver.openOutputStream(file.uri)?.use { out ->
-                out.write(json.toString(2).toByteArray(Charsets.UTF_8))
-            } ?: return failAutoBackup(prefs, "Could not open backup file for writing")
+            val stream = context.contentResolver.openOutputStream(file.uri)
+            if (stream == null) {
+                file.delete()
+                return failAutoBackup(prefs, "Could not open backup file for writing")
+            }
+            try {
+                stream.use { out -> out.write(payload.toByteArray(Charsets.UTF_8)) }
+            } catch (e: Exception) {
+                file.delete()
+                return failAutoBackup(prefs, e.message ?: "Could not write backup file")
+            }
 
-            val maxCount = prefs.getInt(PREF_BACKUP_MAX_COUNT, DEFAULT_MAX_BACKUP_COUNT)
+            val maxCount = prefs.getInt(BackupPrefs.MAX_COUNT, BackupPrefs.DEFAULT_MAX_COUNT)
             val names = dir.listFiles().mapNotNull { it.name }
             val toDelete = selectBackupsToDelete(names, maxCount)
             dir.listFiles().filter { it.name in toDelete }.forEach { it.delete() }
 
             prefs.edit()
-                .putLong(PREF_LAST_BACKUP_TIME, System.currentTimeMillis())
-                .remove(PREF_LAST_BACKUP_ERROR)
+                .putLong(BackupPrefs.LAST_BACKUP_TIME, System.currentTimeMillis())
+                .remove(BackupPrefs.LAST_BACKUP_ERROR)
                 .apply()
 
             return Result.success(Unit)
@@ -271,35 +282,33 @@ class BackupManager(
     }
 
     private fun failAutoBackup(prefs: android.content.SharedPreferences, message: String): Result<Unit> {
-        prefs.edit().putString(PREF_LAST_BACKUP_ERROR, message).apply()
+        prefs.edit().putString(BackupPrefs.LAST_BACKUP_ERROR, message).apply()
         return Result.failure(Exception(message))
     }
 
+    /**
+     * Applies restored settings with a typed whitelist. Each key is read and written
+     * with its canonical SharedPreferences type — never inferred from the JSON value's
+     * runtime type. org.json parses `24` as Integer, so type-sniffing would store an
+     * interval/lookback key as Int and make a later getLong() throw ClassCastException.
+     */
     private fun applySettings(settings: JSONObject?) {
         if (settings == null) return
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val editor = prefs.edit()
-        SETTINGS_KEYS.forEach { key ->
-            if (!settings.has(key)) return@forEach
-            when (val value = settings.get(key)) {
-                is Boolean -> editor.putBoolean(key, value)
-                is String -> editor.putString(key, value)
-                is Int -> editor.putInt(key, value)
-                is Long -> editor.putLong(key, value)
-                is Double -> editor.putFloat(key, value.toFloat())
-                is Float -> editor.putFloat(key, value)
-            }
-        }
+
+        if (settings.has("use_bluetooth_mic")) editor.putBoolean("use_bluetooth_mic", settings.optBoolean("use_bluetooth_mic"))
+        if (settings.has("auto_process")) editor.putBoolean("auto_process", settings.optBoolean("auto_process"))
+        if (settings.has("custom_prompt")) editor.putString("custom_prompt", settings.optString("custom_prompt"))
+        if (settings.has("todo_lookback_hours")) editor.putLong("todo_lookback_hours", settings.optLong("todo_lookback_hours"))
+        if (settings.has(BackupPrefs.INTERVAL_HOURS)) editor.putLong(BackupPrefs.INTERVAL_HOURS, settings.optLong(BackupPrefs.INTERVAL_HOURS))
+        if (settings.has(BackupPrefs.MAX_COUNT)) editor.putInt(BackupPrefs.MAX_COUNT, settings.optInt(BackupPrefs.MAX_COUNT))
+
         editor.apply()
     }
 
     companion object {
         private const val PREFS_NAME = "daedalus_prefs"
-        private const val PREF_BACKUP_FOLDER_URI = "backup_folder_uri"
-        private const val PREF_BACKUP_MAX_COUNT = "backup_max_count"
-        private const val PREF_LAST_BACKUP_TIME = "last_backup_time"
-        private const val PREF_LAST_BACKUP_ERROR = "last_backup_error"
-        private const val DEFAULT_MAX_BACKUP_COUNT = 7
 
         private val BACKUP_FILENAME_REGEX = Regex("daedalus_backup_.*\\.json")
 
@@ -308,8 +317,8 @@ class BackupManager(
             "auto_process",
             "custom_prompt",
             "todo_lookback_hours",
-            "backup_interval_hours",
-            "backup_max_count"
+            BackupPrefs.INTERVAL_HOURS,
+            BackupPrefs.MAX_COUNT
         )
 
         internal fun normalizeTodoText(s: String): String =

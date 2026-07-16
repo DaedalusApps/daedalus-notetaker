@@ -32,6 +32,7 @@ import com.daedalus.notes.ai.WhisperDownloader
 import com.daedalus.notes.ai.embeddingModelFile
 import com.daedalus.notes.ai.isWhisperReady
 import com.daedalus.notes.data.backup.BackupManager
+import com.daedalus.notes.data.backup.BackupPrefs
 import com.daedalus.notes.data.backup.BackupWorker
 import com.daedalus.notes.ui.components.DeviceStatusRow
 import com.daedalus.notes.viewmodel.DeviceViewModel
@@ -70,11 +71,11 @@ fun SettingsScreen(
 
     var autoProcess by remember { mutableStateOf(prefs.getBoolean("auto_process", false)) }
 
-    var backupFolderUri by remember { mutableStateOf(prefs.getString("backup_folder_uri", null)) }
-    var backupIntervalHours by remember { mutableStateOf(prefs.getLong("backup_interval_hours", 24L)) }
-    var backupMaxCountText by remember { mutableStateOf(prefs.getInt("backup_max_count", 7).toString()) }
-    var lastBackupTime by remember { mutableStateOf(prefs.getLong("last_backup_time", 0L)) }
-    var lastBackupError by remember { mutableStateOf(prefs.getString("last_backup_error", null)) }
+    var backupFolderUri by remember { mutableStateOf(prefs.getString(BackupPrefs.FOLDER_URI, null)) }
+    var backupIntervalHours by remember { mutableStateOf(prefs.getLong(BackupPrefs.INTERVAL_HOURS, BackupPrefs.DEFAULT_INTERVAL_HOURS)) }
+    var backupMaxCountText by remember { mutableStateOf(prefs.getInt(BackupPrefs.MAX_COUNT, BackupPrefs.DEFAULT_MAX_COUNT).toString()) }
+    var lastBackupTime by remember { mutableStateOf(prefs.getLong(BackupPrefs.LAST_BACKUP_TIME, 0L)) }
+    var lastBackupError by remember { mutableStateOf(prefs.getString(BackupPrefs.LAST_BACKUP_ERROR, null)) }
     var backupIntervalMenuExpanded by remember { mutableStateOf(false) }
     var isBackingUp by remember { mutableStateOf(false) }
     val backupFolderName = remember(backupFolderUri) {
@@ -150,7 +151,7 @@ fun SettingsScreen(
                     uri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
-                prefs.edit().putString("backup_folder_uri", uri.toString()).apply()
+                prefs.edit().putString(BackupPrefs.FOLDER_URI, uri.toString()).apply()
                 backupFolderUri = uri.toString()
                 BackupWorker.schedule(context, backupIntervalHours)
             }
@@ -357,7 +358,7 @@ fun SettingsScreen(
                                     text = { Text(label) },
                                     onClick = {
                                         backupIntervalHours = hours
-                                        prefs.edit().putLong("backup_interval_hours", hours).apply()
+                                        prefs.edit().putLong(BackupPrefs.INTERVAL_HOURS, hours).apply()
                                         if (backupFolderUri != null) {
                                             BackupWorker.schedule(context, hours)
                                         }
@@ -374,7 +375,7 @@ fun SettingsScreen(
                             backupMaxCountText = text
                             val n = text.toIntOrNull()
                             if (n != null && n in 1..100) {
-                                prefs.edit().putInt("backup_max_count", n).apply()
+                                prefs.edit().putInt(BackupPrefs.MAX_COUNT, n).apply()
                             }
                         },
                         label = { Text("Max backups to keep") },
@@ -389,8 +390,8 @@ fun SettingsScreen(
                                 val result = withContext(Dispatchers.IO) {
                                     BackupManager(context).runAutoBackup()
                                 }
-                                lastBackupTime = prefs.getLong("last_backup_time", lastBackupTime)
-                                lastBackupError = prefs.getString("last_backup_error", null)
+                                lastBackupTime = prefs.getLong(BackupPrefs.LAST_BACKUP_TIME, lastBackupTime)
+                                lastBackupError = prefs.getString(BackupPrefs.LAST_BACKUP_ERROR, null)
                                 isBackingUp = false
                                 if (result.isSuccess) {
                                     snackbar.showSnackbar("Backup completed successfully")

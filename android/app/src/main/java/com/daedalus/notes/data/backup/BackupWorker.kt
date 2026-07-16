@@ -31,8 +31,8 @@ class BackupWorker(
         // is gone) rather than a transient I/O error. Retrying these would just fail again,
         // so they map to Result.failure(); everything else is treated as transient and retried.
         private val PERMANENT_FAILURE_MESSAGES = listOf(
-            "No backup folder configured",
-            "Backup folder is not accessible"
+            BackupPrefs.ERR_NO_FOLDER,
+            BackupPrefs.ERR_FOLDER_NOT_ACCESSIBLE
         )
 
         internal fun mapBackupResult(result: kotlin.Result<Unit>): ListenableWorker.Result {
