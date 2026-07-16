@@ -21,6 +21,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.Lifecycle
 import com.daedalus.notes.ble.ConnectionState
+import com.daedalus.notes.data.backup.BackupWorker
 import kotlinx.coroutines.launch
 import com.daedalus.notes.ui.NavGraph
 import com.daedalus.notes.ui.theme.DaedalusTheme
@@ -149,6 +150,11 @@ class MainActivity : ComponentActivity() {
                     lastIsRecording = bleState.isRecording
                 }
             }
+        }
+
+        val prefs = getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+        if (!prefs.getString("backup_folder_uri", null).isNullOrBlank()) {
+            BackupWorker.schedule(this, prefs.getLong("backup_interval_hours", 24L))
         }
 
         setContent {
