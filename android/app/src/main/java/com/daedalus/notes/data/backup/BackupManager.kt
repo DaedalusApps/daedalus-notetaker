@@ -250,7 +250,7 @@ class BackupManager(
             val payload = buildBackupJson().toString(2)
 
             val filename = "daedalus_backup_" +
-                SimpleDateFormat("yyyy-MM-dd_HHmm", Locale.US).format(Date()) + ".json"
+                SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date()) + ".json"
             val file = dir.createFile("application/json", filename)
                 ?: return failAutoBackup(prefs, "Could not create backup file")
 
