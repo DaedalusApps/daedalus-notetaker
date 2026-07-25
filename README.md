@@ -1,4 +1,5 @@
 # Daedalus Notes
+[![CI](https://github.com/DaedalusApps/daedalus-notetaker/actions/workflows/ci.yml/badge.svg)](https://github.com/DaedalusApps/daedalus-notetaker/actions/workflows/ci.yml)
 
 An Android companion app for the **ELVANZA FW920** voice recorder. Syncs recordings over BLE, transcribes them on-device with Whisper, generates AI summaries and mind maps with Gemma 3, and lets you ask questions across your entire library — all on-device, no cloud required.
 
