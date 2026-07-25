@@ -13,6 +13,18 @@ An Android companion app for the **ELVANZA FW920** voice recorder. Syncs recordi
 - **Full-Text Search** — Search across all transcripts and summaries
 - **Export** — Share notes and Q&A answers as Markdown, or copy to the clipboard
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/fw920-connected.png" width="24%" alt="FW920 connected" />
+  <img src="docs/screenshots/recordings-library.png" width="24%" alt="Recordings library" />
+  <img src="docs/screenshots/note-transcript.png" width="24%" alt="On-device transcript" />
+  <img src="docs/screenshots/mind-map.png" width="24%" alt="Mind map" />
+</p>
+<p align="center">
+  <sub>ELVANZA FW920 connected over BLE &nbsp;·&nbsp; Recordings library &nbsp;·&nbsp; On-device transcript &nbsp;·&nbsp; AI-generated mind map</sub>
+</p>
+
 ## Requirements
 
 | | |
