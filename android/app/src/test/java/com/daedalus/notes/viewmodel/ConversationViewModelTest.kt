@@ -1162,7 +1162,10 @@ class ConversationViewModelTest {
     // (P8.3-d) Instant send ON but a generation is already in flight (e.g. the user sent typed
     //     text while the voice recording was still going): the send pipeline's guard must reject
     //     the instant path so it never double-sends. The transcript must not be lost — it falls
-    //     back to voiceTranscript instead, same as instant send OFF.
+    //     back to voiceTranscript instead, same as instant send OFF. (P9.3) Because instant send
+    //     ON hides the input field that voiceTranscript feeds, the transcript is ALSO surfaced as
+    //     an error/snackbar — otherwise the user's words vanish into invisible state with no sign
+    //     anything was dropped.
     @Test
     fun voiceInput_instantSendOn_generationInProgress_fallsBackToVoiceTranscriptNoCrash() = runTest {
         markWhisperReady()
@@ -1182,12 +1185,46 @@ class ConversationViewModelTest {
         advanceUntilIdle()
 
         assertEquals("fallback text", vm.voiceTranscript.value)
-        assertNull(vm.error.value)
+        assertTrue(vm.error.value!!.contains("fallback text"))
         assertEquals(1, vm.messages.value.count { it.role == Role.USER })
 
         gate.complete("ok")
         advanceUntilIdle()
         assertFalse(vm.isGenerating.value)
+    }
+
+    // (P9.3) The busy fallback above is genuinely reachable from the voice-only surface, where
+    //     there is no text field to type into: ending the session while a recording is still
+    //     running claims isGenerating, so the transcript that lands afterwards cannot be sent.
+    //     It must still reach the user through the error/snackbar channel.
+    @Test
+    fun voiceInput_instantSendOn_endSessionDuringRecording_surfacesUnsentTranscript() = runTest {
+        markWhisperReady()
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        every { audioRecorder.start(any(), any()) } returns Unit
+        coEvery { transcriptionService.transcribe(any()) } returns "words that must not vanish"
+        val vm = newViewModel()
+        vm.setInstantSend(true)
+        vm.send("something to end")
+        advanceUntilIdle()
+
+        // Analysis stalls, so endSession's generation is still in flight when the transcript lands.
+        val analysisGate = CompletableDeferred<String>()
+        coEvery { llm.generate(any(), any<String>()) } coAnswers { analysisGate.await() }
+
+        vm.startVoiceInput()
+        vm.endSession()
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(vm.isGenerating.value)
+
+        vm.stopVoiceInput()
+        advanceUntilIdle()
+
+        assertTrue(vm.error.value!!.contains("words that must not vanish"))
+        assertEquals("words that must not vanish", vm.voiceTranscript.value)
+
+        analysisGate.complete("{}")
+        advanceUntilIdle()
     }
 
     // (P8.3-e) The toggle persists to SharedPreferences and is restored by a fresh ViewModel.

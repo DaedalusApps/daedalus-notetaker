@@ -119,29 +119,33 @@ fun ConversationScreen(
     // Instant send ON routes through startVoiceInputInterruptingSpeech() instead of plain
     // startVoiceInput() (P9.3): the voice-only surface's big mic button must stop any playing
     // reply before recording — see that function's KDoc. Both permission entry points (already-
-    // granted and just-granted-via-launcher) share this single decision so the behavior is
+    // granted and just-granted-via-launcher) go through this one lambda so the behavior is
     // identical regardless of which path the OS takes.
+    val beginVoiceInput = {
+        if (instantSend) conversationViewModel.startVoiceInputInterruptingSpeech()
+        else conversationViewModel.startVoiceInput()
+    }
+
     val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            if (instantSend) conversationViewModel.startVoiceInputInterruptingSpeech()
-            else conversationViewModel.startVoiceInput()
-        }
-    }
+    ) { granted -> if (granted) beginVoiceInput() }
 
     val startVoiceInput = {
         val hasPermission = ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
-        if (hasPermission) {
-            if (instantSend) conversationViewModel.startVoiceInputInterruptingSpeech()
-            else conversationViewModel.startVoiceInput()
-        } else recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        if (hasPermission) beginVoiceInput()
+        else recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    // A pending transcription (P9.3), shown as a synthetic bubble at the list's end while Whisper
+    // runs, keeps the list non-empty even with zero real messages yet — and is an extra item past
+    // the last real message, so the auto-scroller must count it too or it lands below the fold.
+    val showPendingBubble = instantSend && isTranscribing
+    val listItemCount = messages.size + if (showPendingBubble) 1 else 0
+
+    LaunchedEffect(listItemCount) {
+        if (listItemCount > 0) listState.animateScrollToItem(listItemCount - 1)
     }
 
     LaunchedEffect(error) {
@@ -279,9 +283,6 @@ fun ConversationScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // A pending transcription (P9.3), shown as a synthetic bubble at the list's end while
-            // Whisper runs, keeps the list non-empty even with zero real messages yet.
-            val showPendingBubble = instantSend && isTranscribing
             if (messages.isEmpty() && !showPendingBubble) {
                 Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Text(
@@ -487,6 +488,11 @@ private fun VoiceOnlyInputRow(
  * transcription is running (P9.3): stands in for the not-yet-sent message and is naturally
  * replaced once the real one lands in [ConversationViewModel.messages] (or simply disappears, on
  * an empty transcription — the error snackbar covers that case instead).
+ *
+ * The hand-off does not flicker: `viewModelScope` runs on `Dispatchers.Main.immediate`, so the
+ * `launch { performSend(...) }` that appends the real user message runs inline — the message is
+ * already in [ConversationViewModel.messages] before the transcribing flag that hides this bubble
+ * clears, so both land in the same recomposition.
  */
 @Composable
 private fun PendingTranscriptionBubble() {
