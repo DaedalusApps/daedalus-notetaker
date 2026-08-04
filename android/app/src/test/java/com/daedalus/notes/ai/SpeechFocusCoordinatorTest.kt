@@ -40,8 +40,9 @@ class SpeechFocusCoordinatorTest {
 
     @Test
     fun onSpeakingChanged_falseWithoutPriorTrue_stillAbandonsFocus() {
-        // Simulates AndroidSpeechService.stop(): setSpeaking(false) is forced even though the
-        // flushed utterance's progress-listener callback may never arrive.
+        // Covers both AndroidSpeechService.stop() — setSpeaking(false) is forced even though the
+        // flushed utterance's progress-listener callback may never arrive — and its deprecated
+        // onError path; the coordinator sees the same single not-speaking signal either way.
         val focusManager = mockk<AudioFocusManager>(relaxed = true)
         val coordinator = SpeechFocusCoordinator(focusManager)
 
@@ -66,15 +67,19 @@ class SpeechFocusCoordinatorTest {
     }
 
     @Test
-    fun onSpeakingChanged_falseAfterSpeakFailure_abandonsFocus() {
-        // Simulates AndroidSpeechService's deprecated onError callback path.
+    fun secondSpeakAfterCompletedReply_requestsAndAbandonsFocusAgain() {
+        // Back-to-back replies: focus released by the first must be re-acquired for the second
+        // and released again, rather than the coordinator latching after one cycle.
         val focusManager = mockk<AudioFocusManager>(relaxed = true)
         val coordinator = SpeechFocusCoordinator(focusManager)
 
         coordinator.beforeSpeak()
         coordinator.onSpeakingChanged(false)
+        coordinator.beforeSpeak()
+        coordinator.onSpeakingChanged(false)
 
-        verify(exactly = 1) { focusManager.abandon() }
+        verify(exactly = 2) { focusManager.request() }
+        verify(exactly = 2) { focusManager.abandon() }
     }
 
     @Test
