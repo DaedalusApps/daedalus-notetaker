@@ -1462,6 +1462,96 @@ class ConversationViewModelTest {
         assertNull(vm.speakingMessageId.value)
     }
 
+    // (P9.2-f) The very first replay with spoken replies OFF builds the engine, which reports
+    //     unavailable while its async init runs: the tap must not silently do nothing — it plays
+    //     as soon as the engine reports ready.
+    @Test
+    fun replayMessage_engineStillInitializing_speaksOnceEngineBecomesReady() = runTest {
+        val readySlot = slot<(Boolean) -> Unit>()
+        every { tts.setOnReadyChangedListener(capture(readySlot)) } returns Unit
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Hello"); advanceUntilIdle()
+        val id = vm.messages.value.indexOfLast { it.role == Role.MODEL }.toString()
+
+        every { tts.isAvailable } returns false
+        vm.replayMessage(id)
+
+        verify(exactly = 0) { tts.speak(any()) }
+        assertNull(vm.speakingMessageId.value)
+
+        every { tts.isAvailable } returns true
+        readySlot.captured(true)
+
+        verify(exactly = 1) { tts.speak("Reply") }
+        assertEquals(id, vm.speakingMessageId.value)
+    }
+
+    // (P9.2-g) A pending replay must be dropped, not played, when init fails outright.
+    @Test
+    fun replayMessage_engineInitFails_neverSpeaks() = runTest {
+        val readySlot = slot<(Boolean) -> Unit>()
+        every { tts.setOnReadyChangedListener(capture(readySlot)) } returns Unit
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Hello"); advanceUntilIdle()
+        val id = vm.messages.value.indexOfLast { it.role == Role.MODEL }.toString()
+
+        every { tts.isAvailable } returns false
+        vm.replayMessage(id)
+        readySlot.captured(false)
+
+        verify(exactly = 0) { tts.speak(any()) }
+        assertNull(vm.speakingMessageId.value)
+    }
+
+    // (P9.2-h) Stopping (send, new session, mute, dispose…) between the tap and the engine
+    //     becoming ready cancels the pending replay — it must not start speaking afterwards.
+    @Test
+    fun stopSpeaking_beforeEngineReady_cancelsPendingReplay() = runTest {
+        val readySlot = slot<(Boolean) -> Unit>()
+        every { tts.setOnReadyChangedListener(capture(readySlot)) } returns Unit
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Hello"); advanceUntilIdle()
+        val id = vm.messages.value.indexOfLast { it.role == Role.MODEL }.toString()
+
+        every { tts.isAvailable } returns false
+        vm.replayMessage(id)
+        vm.stopSpeaking()
+
+        every { tts.isAvailable } returns true
+        readySlot.captured(true)
+
+        verify(exactly = 0) { tts.speak(any()) }
+        assertNull(vm.speakingMessageId.value)
+    }
+
+    // (P9.2-i) A replay tapped while a reply is generating is taken over by that reply's
+    //     auto-speak; the replayed bubble must stop claiming to be the one speaking.
+    @Test
+    fun autoSpeak_afterReplayDuringGeneration_clearsSpeakingMessageId() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+        vm.send("Hello"); advanceUntilIdle()
+        val id = vm.messages.value.indexOfLast { it.role == Role.MODEL }.toString()
+
+        val gate = CompletableDeferred<String>()
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } coAnswers { gate.await() }
+        vm.send("Another message")
+        testDispatcher.scheduler.runCurrent()
+
+        vm.replayMessage(id)
+        assertEquals(id, vm.speakingMessageId.value)
+
+        gate.complete("Second reply")
+        advanceUntilIdle()
+
+        verify(exactly = 1) { tts.speak("Second reply") }
+        assertNull(vm.speakingMessageId.value)
+    }
+
     @Test
     fun canStartNewSession_falseWhenNoMessages() {
         assertFalse(canStartNewSession(emptyList(), isGenerating = false))

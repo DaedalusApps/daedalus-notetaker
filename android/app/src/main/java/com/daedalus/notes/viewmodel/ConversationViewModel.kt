@@ -151,7 +151,14 @@ class ConversationViewModel @JvmOverloads constructor(
         // Same thread-safety note as above applies to the ready callback (P9.1): it also fires
         // immediately with the current known state at registration, so a picker opened after
         // init already finished still sees the right value instead of hanging on "not ready".
-        service.setOnReadyChangedListener { ready -> _ttsReady.value = ready }
+        service.setOnReadyChangedListener { ready ->
+            _ttsReady.value = ready
+            // A replay tapped while init was still running (see pendingReplayId) plays now that
+            // the engine can speak; a failed init drops it rather than leaving it armed forever.
+            val pending = pendingReplayId
+            pendingReplayId = null
+            if (ready && pending != null) startReplay(pending)
+        }
         service
     }
     private val tts by ttsDelegate
@@ -222,6 +229,7 @@ class ConversationViewModel @JvmOverloads constructor(
      */
     fun stopSpeaking() {
         if (_ttsEnabled.value || ttsDelegate.isInitialized()) tts.stop()
+        pendingReplayId = null
         _speakingMessageId.value = null
     }
 
@@ -232,18 +240,37 @@ class ConversationViewModel @JvmOverloads constructor(
      * guard: replay must work even with spoken replies OFF, building the engine on demand without
      * ever flipping the [ttsEnabled] preference. Any current speech (auto-speak or another replay)
      * is stopped first, so only one utterance ever plays at a time.
+     *
+     * A freshly built engine is not usable yet — TextToSpeech initializes asynchronously and
+     * reports unavailable until it finishes — so the very first replay with spoken replies OFF
+     * would otherwise do nothing at all. Such a tap is remembered in [pendingReplayId] and played
+     * by the ready listener instead, rather than being silently dropped.
      */
     fun replayMessage(id: String) {
-        val index = id.toIntOrNull() ?: return
-        val message = _messages.value.getOrNull(index) ?: return
+        if (messageForId(id) == null) return
         tts.stop()
-        if (tts.isAvailable) {
-            _speakingMessageId.value = id
-            tts.speak(message.text)
-        } else {
-            _speakingMessageId.value = null
-        }
+        if (tts.isAvailable) startReplay(id) else pendingReplayId = id
     }
+
+    // A replay requested before the lazily built engine finished initializing. Volatile because it
+    // is written from the caller (main) thread and read from the ready callback, which — like the
+    // speaking callback — may arrive on another thread.
+    @Volatile
+    private var pendingReplayId: String? = null
+
+    /**
+     * Speaks the message [id] points at and marks it as the one replaying. May run on the ready
+     * callback's thread; the state it touches is thread-safe. The message is re-resolved here
+     * because a pending replay can outlive the list it referred to (e.g. a session rotation).
+     */
+    private fun startReplay(id: String) {
+        val message = messageForId(id) ?: return
+        _speakingMessageId.value = id
+        tts.speak(message.text)
+    }
+
+    private fun messageForId(id: String): ChatMessage? =
+        id.toIntOrNull()?.let { _messages.value.getOrNull(it) }
 
     fun setTtsEnabled(enabled: Boolean) {
         _ttsEnabled.value = enabled
@@ -546,7 +573,12 @@ class ConversationViewModel @JvmOverloads constructor(
             val modelMessage = ChatMessage(Role.MODEL, reply, clock())
             _messages.value = _messages.value + modelMessage
             appendToFile(modelMessage)
-            if (_ttsEnabled.value && tts.isAvailable) tts.speak(reply)
+            if (_ttsEnabled.value && tts.isAvailable) {
+                // The arriving reply takes the engine over from a replay tapped mid-generation,
+                // whose bubble would otherwise keep showing Stop for speech that is no longer its.
+                _speakingMessageId.value = null
+                tts.speak(reply)
+            }
         } catch (e: TimeoutCancellationException) {
             // generate()'s 3-minute timeout surfaces as a CancellationException subtype, but it is
             // a real failure rather than a stopGenerating() cancellation — must be caught before
