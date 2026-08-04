@@ -49,6 +49,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -91,6 +94,7 @@ fun AskHomeScreen(
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val snackbar = remember { SnackbarHostState() }
 
     val bleState by deviceViewModel.bleManager.bleState.collectAsState()
     val libraryAnswer by recordingViewModel.libraryAnswer.collectAsState()
@@ -106,6 +110,7 @@ fun AskHomeScreen(
     val isPaused by recordingViewModel.isPaused.collectAsState()
     val recordingDurationSeconds by recordingViewModel.recordingDurationSeconds.collectAsState()
     val useBluetoothMic by recordingViewModel.useBluetoothMic.collectAsState()
+    val autoStopNotice by recordingViewModel.autoStopNotice.collectAsState()
 
     val isConnected = bleState.connectionState == ConnectionState.CONNECTED
     // Offer local recording when no device is connected, or keep the panel up while a
@@ -154,8 +159,16 @@ fun AskHomeScreen(
         }
     }
 
+    LaunchedEffect(autoStopNotice) {
+        autoStopNotice?.let {
+            snackbar.showSnackbar(it)
+            recordingViewModel.clearAutoStopNotice()
+        }
+    }
+
     Scaffold(
         modifier = Modifier.navigationBarsPadding(),
+        snackbarHost = { SnackbarHost(snackbar) { Snackbar(it) } },
         topBar = {
             TopAppBar(
                 title = { Text("Daedalus Notes") },
