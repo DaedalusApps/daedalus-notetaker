@@ -705,4 +705,39 @@ class ConversationViewModelTest {
         assertNotNull(vm.error.value)
         verify(exactly = 0) { audioRecorder.start(any(), any()) }
     }
+
+    // (P6.1-e) Abandoning an in-progress recording (screen disposed) releases the recorder and
+    //     drops the temp file without transcribing — an unstopped recorder would hold the mic.
+    @Test
+    fun cancelVoiceInput_whileRecording_releasesRecorderAndDropsTempFile() = runTest {
+        markWhisperReady()
+        val startedFile = slot<File>()
+        every { audioRecorder.start(capture(startedFile), any()) } answers {
+            startedFile.captured.parentFile?.mkdirs()
+            startedFile.captured.writeBytes(byteArrayOf(1, 2, 3))
+        }
+        val vm = newViewModel()
+
+        vm.startVoiceInput()
+        vm.cancelVoiceInput()
+        advanceUntilIdle()
+
+        verify { audioRecorder.stop() }
+        assertFalse(vm.isRecordingVoice.value)
+        assertFalse(vm.isTranscribing.value)
+        assertNull(vm.voiceTranscript.value)
+        assertFalse("abandoned audio file should be deleted", startedFile.captured.exists())
+        coVerify(exactly = 0) { transcriptionService.transcribe(any()) }
+    }
+
+    // (P6.1-f) Cancelling with nothing in flight is a no-op — it must not touch the recorder.
+    @Test
+    fun cancelVoiceInput_whenIdle_isNoOp() = runTest {
+        val vm = newViewModel()
+
+        vm.cancelVoiceInput()
+
+        verify(exactly = 0) { audioRecorder.stop() }
+        assertFalse(vm.isRecordingVoice.value)
+    }
 }

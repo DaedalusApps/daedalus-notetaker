@@ -180,6 +180,20 @@ class ConversationViewModel @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Abandons an in-progress voice recording without transcribing it, releasing the mic and
+     * dropping the temp file. Called when the conversation screen goes away, so a recording the
+     * user walked away from cannot keep the mic held for the life of the process.
+     */
+    fun cancelVoiceInput() {
+        if (!_isRecordingVoice.value) return
+        val file = voiceRecordingFile
+        voiceRecordingFile = null
+        audioRecorder.stop()
+        _isRecordingVoice.value = false
+        file?.delete()
+    }
+
     /** Rotates to a fresh session file (a new "meeting"); the previous transcript stays on disk. */
     fun startNewSession() {
         if (_isGenerating.value) return
@@ -444,6 +458,7 @@ class ConversationViewModel @JvmOverloads constructor(
 
     override fun onCleared() {
         super.onCleared()
+        cancelVoiceInput()
         embedder.close()
     }
 }

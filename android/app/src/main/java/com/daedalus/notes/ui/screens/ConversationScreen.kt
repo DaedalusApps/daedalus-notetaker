@@ -45,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -54,7 +55,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -104,11 +104,19 @@ fun ConversationScreen(
         }
     }
 
+    // Appended rather than assigned: the field stays editable while transcription runs, and
+    // overwriting would silently drop whatever the user typed in the meantime.
     LaunchedEffect(voiceTranscript) {
         voiceTranscript?.let {
-            input = it
+            input = if (input.isBlank()) it else "${input.trimEnd()} $it"
             conversationViewModel.clearVoiceTranscript()
         }
+    }
+
+    // Leaving the screen abandons an in-progress recording; the ViewModel outlives this
+    // composable, so an unstopped recorder would otherwise hold the mic indefinitely.
+    DisposableEffect(Unit) {
+        onDispose { conversationViewModel.cancelVoiceInput() }
     }
 
     Scaffold(
@@ -197,7 +205,9 @@ fun ConversationScreen(
                         onClick = {
                             if (isRecordingVoice) conversationViewModel.stopVoiceInput() else startVoiceInput()
                         },
-                        enabled = !isGenerating && !isTranscribing
+                        // Stays tappable while recording so the user can always stop — otherwise a
+                        // send/end started mid-recording would lock the mic until it finishes.
+                        enabled = isRecordingVoice || (!isGenerating && !isTranscribing)
                     ) {
                         when {
                             isTranscribing -> CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -216,7 +226,7 @@ fun ConversationScreen(
                                 .padding(6.dp)
                                 .size(8.dp)
                                 .clip(CircleShape)
-                                .background(Color.Red)
+                                .background(MaterialTheme.colorScheme.error)
                         )
                     }
                 }
