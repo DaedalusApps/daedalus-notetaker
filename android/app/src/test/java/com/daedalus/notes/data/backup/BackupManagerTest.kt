@@ -63,6 +63,7 @@ class BackupManagerTest {
             .putBoolean("auto_process", true)
             .putString("custom_prompt", "my prompt")
             .putInt("backup_max_count", 7)
+            .putInt("max_recording_minutes", 60)
             .commit()
 
         val json = BackupManager(context, source).buildBackupJson()
@@ -90,6 +91,7 @@ class BackupManagerTest {
         assertTrue(prefs().getBoolean("auto_process", false))
         assertEquals("my prompt", prefs().getString("custom_prompt", null))
         assertEquals(7, prefs().getInt("backup_max_count", 0))
+        assertEquals(60, prefs().getInt("max_recording_minutes", 0))
         target.close()
     }
 
