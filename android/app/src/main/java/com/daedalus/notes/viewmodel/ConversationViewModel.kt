@@ -157,8 +157,11 @@ class ConversationViewModel @JvmOverloads constructor(
 
     // Whether the (lazily built) speech engine has finished initializing (P9.1): drives the
     // voice picker's loading state so it doesn't show an empty list while init is still async.
-    private val _ttsReady = MutableStateFlow(false)
-    val ttsReady: StateFlow<Boolean> = _ttsReady
+    // Three states, because "still starting" and "the engine failed to start" must not look the
+    // same: null = not built yet or init still running, true = ready, false = init failed. A
+    // plain Boolean would leave a failed init spinning under "Starting speech engine…" forever.
+    private val _ttsReady = MutableStateFlow<Boolean?>(null)
+    val ttsReady: StateFlow<Boolean?> = _ttsReady
 
     private val _ttsEnabled = MutableStateFlow(
         application.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)

@@ -397,7 +397,8 @@ private fun SpeedDialog(
  *  selection applies (and previews) immediately. Stays open until dismissed (swipe/scrim) so the
  *  user can compare voices. Shows a loading row while the engine is still initializing (#52) —
  *  [ConversationViewModel.ttsReady] is observed, so the list replaces the loading row as soon as
- *  init finishes without the user needing to reopen the sheet. */
+ *  init finishes without the user needing to reopen the sheet, and a failed init gets its own
+ *  message rather than spinning forever. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun VoiceSheet(
@@ -407,6 +408,9 @@ private fun VoiceSheet(
     val ttsVoiceId by conversationViewModel.ttsVoiceId.collectAsState()
     val ttsEnabled by conversationViewModel.ttsEnabled.collectAsState()
     val ttsReady by conversationViewModel.ttsReady.collectAsState()
+    // Evaluated on every composition, not just in the branch that shows the list: this call is
+    // what lazily builds the engine (and so what starts init and eventually flips ttsReady).
+    // Moving it inside the `else` branch below would leave the loading row spinning forever.
     val voices = remember(ttsReady, ttsEnabled) { conversationViewModel.availableVoices() }
 
     ModalBottomSheet(
@@ -426,7 +430,7 @@ private fun VoiceSheet(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)
                 )
             }
-            !ttsReady -> {
+            ttsReady == null -> {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -439,6 +443,13 @@ private fun VoiceSheet(
                     Text("Starting speech engine…")
                 }
             }
+            ttsReady == false -> {
+                Text(
+                    "This device's speech engine could not be started, so no voices are available.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)
+                )
+            }
             else -> {
                 LazyColumn(modifier = Modifier.selectableGroup()) {
                     item {
@@ -447,6 +458,16 @@ private fun VoiceSheet(
                             selected = ttsVoiceId.isEmpty(),
                             onClick = { conversationViewModel.setTtsVoice("") }
                         )
+                    }
+                    if (voices.isEmpty()) {
+                        item {
+                            Text(
+                                "No other voices available — your speech engine offers only the " +
+                                    "system default.",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
                     }
                     items(voices) { voice: VoiceInfo ->
                         VoiceRow(
