@@ -36,6 +36,10 @@ import java.util.Locale
 /** A single chat turn in a conversation session. */
 data class ChatMessage(val role: Role, val text: String, val timestampMillis: Long)
 
+/** Whether "New conversation" should be enabled: there is something to rotate away from, and no generation in flight. */
+fun canStartNewSession(messages: List<ChatMessage>, isGenerating: Boolean): Boolean =
+    messages.isNotEmpty() && !isGenerating
+
 private const val IDEATION_SYSTEM_PROMPT = "You are a thoughtful ideation partner in a live " +
     "conversation with the user, like a working session with a colleague. Be concise, help " +
     "develop their thinking, and ask good clarifying follow-up questions rather than lecturing." +

@@ -30,10 +30,13 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +67,7 @@ import androidx.core.content.ContextCompat
 import com.daedalus.notes.ai.Role
 import com.daedalus.notes.viewmodel.ChatMessage
 import com.daedalus.notes.viewmodel.ConversationViewModel
+import com.daedalus.notes.viewmodel.canStartNewSession
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -153,11 +157,23 @@ fun ConversationScreen(
                     ) {
                         Icon(Icons.Default.Done, contentDescription = "End session")
                     }
-                    IconButton(
-                        onClick = { conversationViewModel.startNewSession() },
-                        enabled = messages.isNotEmpty() && !isGenerating
+                    var menuExpanded by remember { mutableStateOf(false) }
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "More options")
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false }
                     ) {
-                        Icon(Icons.Default.AddComment, contentDescription = "New conversation")
+                        DropdownMenuItem(
+                            text = { Text("New conversation") },
+                            leadingIcon = { Icon(Icons.Default.AddComment, contentDescription = null) },
+                            enabled = canStartNewSession(messages, isGenerating),
+                            onClick = {
+                                menuExpanded = false
+                                conversationViewModel.startNewSession()
+                            }
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

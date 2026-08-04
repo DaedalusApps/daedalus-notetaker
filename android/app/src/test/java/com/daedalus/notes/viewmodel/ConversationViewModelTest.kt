@@ -912,4 +912,22 @@ class ConversationViewModelTest {
         val reloaded = newViewModel()
         assertTrue(reloaded.ttsEnabled.value)
     }
+
+    // (P8.1) Enabled-state predicate backing the "New conversation" menu item.
+    @Test
+    fun canStartNewSession_falseWhenNoMessages() {
+        assertFalse(canStartNewSession(emptyList(), isGenerating = false))
+    }
+
+    @Test
+    fun canStartNewSession_falseWhileGenerating() {
+        val messages = listOf(ChatMessage(Role.USER, "hi", 0L))
+        assertFalse(canStartNewSession(messages, isGenerating = true))
+    }
+
+    @Test
+    fun canStartNewSession_trueWithMessagesAndNotGenerating() {
+        val messages = listOf(ChatMessage(Role.USER, "hi", 0L))
+        assertTrue(canStartNewSession(messages, isGenerating = false))
+    }
 }
