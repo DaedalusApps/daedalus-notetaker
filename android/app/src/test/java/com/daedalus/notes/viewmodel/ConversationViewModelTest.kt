@@ -639,6 +639,69 @@ class ConversationViewModelTest {
         assertTrue(endedFiles.isEmpty())
     }
 
+    // (#60) stopGenerating() must cancel an in-flight endSession() analysis too, not just send()'s
+    //     generation: endSession never assigned generationJob, so Stop pressed during "Ending..."
+    //     cancelled a stale/null job and the analysis kept running while the UI stayed stuck on
+    //     Stop. A cancellation here mirrors the existing analysis-FAILURE fail-safe (#25): the
+    //     session stays live and resumable — no rename, no message clear — but unlike a failure,
+    //     no error is surfaced (cancellation isn't a failure).
+    @Test
+    fun stopGenerating_duringEndSessionAnalysis_cancelsAnalysisLeavesSessionResumable() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Keep this session alive")
+        advanceUntilIdle()
+        val originalFile = vm.sessionFile
+
+        val analysisGate = CompletableDeferred<String>()
+        coEvery { llm.generate(any(), any<String>()) } coAnswers { analysisGate.await() }
+
+        vm.endSession()
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(vm.isGenerating.value)
+
+        vm.stopGenerating()
+        advanceUntilIdle()
+
+        assertFalse("isGenerating must clear on cancellation", vm.isGenerating.value)
+        assertNull("cancellation must not surface as an error", vm.error.value)
+        assertTrue("session file should still be live, not renamed", originalFile.exists())
+        assertEquals(originalFile.absolutePath, vm.sessionFile.absolutePath)
+        assertTrue(vm.messages.value.isNotEmpty())
+        val endedFiles = conversationsDir().listFiles()?.filter { it.name.contains("ended") } ?: emptyList()
+        assertTrue("session must not be marked ended by a cancelled analysis", endedFiles.isEmpty())
+
+        analysisGate.complete("{}")
+    }
+
+    // (#60) After a cancelled endSession(), retrying End completes normally: saves + rotates,
+    //     exactly like an uninterrupted End would.
+    @Test
+    fun endSession_retryAfterCancellation_completesNormally() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Keep this session alive")
+        advanceUntilIdle()
+
+        val analysisGate = CompletableDeferred<String>()
+        coEvery { llm.generate(any(), any<String>()) } coAnswers { analysisGate.await() }
+        vm.endSession()
+        testDispatcher.scheduler.runCurrent()
+        vm.stopGenerating()
+        advanceUntilIdle()
+
+        coEvery { llm.generate(any(), any<String>()) } returns
+            """{"title":"t","shortSummary":"s","fullSummary":"f","mindMap":"","topics":[]}"""
+        vm.endSession()
+        advanceUntilIdle()
+
+        assertNull(vm.error.value)
+        assertFalse(vm.isGenerating.value)
+        assertTrue(vm.messages.value.isEmpty())
+        val endedFiles = conversationsDir().listFiles()?.filter { it.name.contains("ended") } ?: emptyList()
+        assertEquals(1, endedFiles.size)
+    }
+
     // (P6.1-a) start -> stop: recorder started/stopped, transcription invoked with the recorded
     //     file, voiceTranscript exposes the text, and the temp audio file is deleted afterward.
     @Test
