@@ -279,11 +279,11 @@ fun ConversationScreen(
                     contentPadding = PaddingValues(vertical = 12.dp)
                 ) {
                     itemsIndexed(messages) { index, message ->
+                        val id = index.toString()
                         ChatBubble(
                             message = message,
-                            id = index.toString(),
-                            speakingMessageId = speakingMessageId,
-                            onReplayClick = { conversationViewModel.replayMessage(it) },
+                            isReplaying = speakingMessageId == id,
+                            onReplayClick = { conversationViewModel.replayMessage(id) },
                             onStopReplayClick = { conversationViewModel.stopSpeaking() }
                         )
                     }
@@ -510,15 +510,14 @@ private fun VoiceRow(label: String, selected: Boolean, onClick: () -> Unit) {
 /**
  * A single message bubble. AGENT messages (never USER ones) get a small trailing "Read aloud"
  * icon below the bubble (P9.2): tapping it replays that message's text via [onReplayClick]; while
- * it is the one currently replaying — [speakingMessageId] equals [id] — the icon becomes Stop and
- * tapping it calls [onStopReplayClick] instead.
+ * this is the message currently replaying ([isReplaying]), the icon becomes Stop and tapping it
+ * calls [onStopReplayClick] instead.
  */
 @Composable
 private fun ChatBubble(
     message: ChatMessage,
-    id: String,
-    speakingMessageId: String?,
-    onReplayClick: (String) -> Unit,
+    isReplaying: Boolean,
+    onReplayClick: () -> Unit,
     onStopReplayClick: () -> Unit
 ) {
     val isUser = message.role == Role.USER
@@ -543,9 +542,8 @@ private fun ChatBubble(
             )
         }
         if (!isUser) {
-            val isReplaying = speakingMessageId == id
             IconButton(
-                onClick = { if (isReplaying) onStopReplayClick() else onReplayClick(id) },
+                onClick = { if (isReplaying) onStopReplayClick() else onReplayClick() },
                 modifier = Modifier.size(48.dp)
             ) {
                 Icon(
