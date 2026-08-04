@@ -381,6 +381,19 @@ class ConversationViewModel @JvmOverloads constructor(
     }
 
     /**
+     * Starts voice input the way the voice-only instant-send surface's big mic button does
+     * (P9.3): explicitly stops any in-progress TTS playback first, then starts recording via
+     * [startVoiceInput]. [startVoiceInput] stops speech itself too, but only after its busy guard
+     * passes — so the explicit call here also silences a reply when the recording is refused
+     * (busy), and makes the "stop speech before recording" ordering a named, independently
+     * testable contract for that surface rather than an implementation detail of [startVoiceInput].
+     */
+    fun startVoiceInputInterruptingSpeech() {
+        stopSpeaking()
+        startVoiceInput()
+    }
+
+    /**
      * Stops the in-progress voice recording and transcribes it off the main thread. With instant
      * send OFF, the result is exposed through [voiceTranscript] for the UI to place in the input
      * field. With instant send ON, a non-blank result instead goes straight through the same send
@@ -410,7 +423,12 @@ class ConversationViewModel @JvmOverloads constructor(
                     // If something else is already generating, the transcript must not be
                     // dropped — fall back to voiceTranscript exactly like instant send OFF.
                     if (_isGenerating.value) {
+                        // voiceTranscript lands in the input field — which the instant-send
+                        // surface hides (P9.3), so on its own this would silently swallow the
+                        // user's words. Surfacing them through the error snackbar as well means
+                        // they are never lost without the user seeing what did not send.
                         _voiceTranscript.value = text
+                        _error.value = "Busy — not sent: \"$text\""
                     } else {
                         stopSpeaking()
                         _isGenerating.value = true

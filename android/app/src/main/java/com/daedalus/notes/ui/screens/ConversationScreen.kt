@@ -4,6 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,6 +17,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -45,6 +51,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -72,7 +79,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -107,20 +116,36 @@ fun ConversationScreen(
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showVoiceDialog by remember { mutableStateOf(false) }
 
+    // Instant send ON routes through startVoiceInputInterruptingSpeech() instead of plain
+    // startVoiceInput() (P9.3): the voice-only surface's big mic button must stop any playing
+    // reply before recording — see that function's KDoc. Both permission entry points (already-
+    // granted and just-granted-via-launcher) go through this one lambda so the behavior is
+    // identical regardless of which path the OS takes.
+    val beginVoiceInput = {
+        if (instantSend) conversationViewModel.startVoiceInputInterruptingSpeech()
+        else conversationViewModel.startVoiceInput()
+    }
+
     val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { granted -> if (granted) conversationViewModel.startVoiceInput() }
+    ) { granted -> if (granted) beginVoiceInput() }
 
     val startVoiceInput = {
         val hasPermission = ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
-        if (hasPermission) conversationViewModel.startVoiceInput()
+        if (hasPermission) beginVoiceInput()
         else recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    // A pending transcription (P9.3), shown as a synthetic bubble at the list's end while Whisper
+    // runs, keeps the list non-empty even with zero real messages yet — and is an extra item past
+    // the last real message, so the auto-scroller must count it too or it lands below the fold.
+    val showPendingBubble = instantSend && isTranscribing
+    val listItemCount = messages.size + if (showPendingBubble) 1 else 0
+
+    LaunchedEffect(listItemCount) {
+        if (listItemCount > 0) listState.animateScrollToItem(listItemCount - 1)
     }
 
     LaunchedEffect(error) {
@@ -258,7 +283,7 @@ fun ConversationScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            if (messages.isEmpty()) {
+            if (messages.isEmpty() && !showPendingBubble) {
                 Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Text(
                         text = "Start a conversation — think out loud with your local agent.",
@@ -287,75 +312,203 @@ fun ConversationScreen(
                             onStopReplayClick = { conversationViewModel.stopSpeaking() }
                         )
                     }
+                    if (showPendingBubble) {
+                        item { PendingTranscriptionBubble() }
+                    }
                 }
             }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    placeholder = { Text("Say something…") },
-                    enabled = !isGenerating,
-                    modifier = Modifier.weight(1f),
-                    minLines = 1,
-                    maxLines = 4
-                )
-                Box {
-                    IconButton(
-                        onClick = {
-                            if (isRecordingVoice) conversationViewModel.stopVoiceInput() else startVoiceInput()
-                        },
-                        // Stays tappable while recording so the user can always stop — otherwise a
-                        // send/end started mid-recording would lock the mic until it finishes.
-                        enabled = isRecordingVoice || (!isGenerating && !isTranscribing)
-                    ) {
-                        when {
-                            isTranscribing -> CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                            isRecordingVoice -> Icon(
-                                Icons.Default.Stop,
-                                contentDescription = "Stop recording",
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                            else -> Icon(Icons.Default.Mic, contentDescription = "Voice input")
-                        }
-                    }
-                    if (isRecordingVoice) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(6.dp)
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.error)
-                        )
-                    }
-                }
-                IconButton(
-                    // While generating, the send button becomes an inline Stop button (P8.4):
-                    // tapping it aborts the in-flight generation instead of sending.
-                    onClick = {
-                        if (isGenerating) {
-                            conversationViewModel.stopGenerating()
-                        } else {
-                            conversationViewModel.send(input)
-                            input = ""
-                        }
+            if (instantSend) {
+                // Voice-only instant-send surface (P9.3): the text field and send button are
+                // hidden entirely in favor of one big mic/stop button, since every transcription
+                // sends itself the moment it's ready.
+                VoiceOnlyInputRow(
+                    isRecordingVoice = isRecordingVoice,
+                    isTranscribing = isTranscribing,
+                    isGenerating = isGenerating,
+                    onMicClick = {
+                        if (isRecordingVoice) conversationViewModel.stopVoiceInput() else startVoiceInput()
                     },
-                    enabled = isGenerating || input.isNotBlank()
+                    onStopGeneratingClick = { conversationViewModel.stopGenerating() }
+                )
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (isGenerating) {
-                        Icon(Icons.Default.Stop, contentDescription = "Stop")
-                    } else {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = { input = it },
+                        placeholder = { Text("Say something…") },
+                        enabled = !isGenerating,
+                        modifier = Modifier.weight(1f),
+                        minLines = 1,
+                        maxLines = 4
+                    )
+                    Box {
+                        IconButton(
+                            onClick = {
+                                if (isRecordingVoice) conversationViewModel.stopVoiceInput() else startVoiceInput()
+                            },
+                            // Stays tappable while recording so the user can always stop — otherwise a
+                            // send/end started mid-recording would lock the mic until it finishes.
+                            enabled = isRecordingVoice || (!isGenerating && !isTranscribing)
+                        ) {
+                            when {
+                                isTranscribing -> CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                isRecordingVoice -> Icon(
+                                    Icons.Default.Stop,
+                                    contentDescription = "Stop recording",
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                                else -> Icon(Icons.Default.Mic, contentDescription = "Voice input")
+                            }
+                        }
+                        if (isRecordingVoice) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(6.dp)
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.error)
+                            )
+                        }
+                    }
+                    IconButton(
+                        // While generating, the send button becomes an inline Stop button (P8.4):
+                        // tapping it aborts the in-flight generation instead of sending.
+                        onClick = {
+                            if (isGenerating) {
+                                conversationViewModel.stopGenerating()
+                            } else {
+                                conversationViewModel.send(input)
+                                input = ""
+                            }
+                        },
+                        enabled = isGenerating || input.isNotBlank()
+                    ) {
+                        if (isGenerating) {
+                            Icon(Icons.Default.Stop, contentDescription = "Stop")
+                        } else {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+/** Diameter of the big mic/stop button on the voice-only instant-send surface (P9.3). */
+private val VOICE_ONLY_MIC_SIZE = 72.dp
+
+/**
+ * The voice-only instant-send input surface (P9.3): replaces the text field + send button
+ * entirely with one large centered mic button. Tapping it starts recording via [onMicClick]
+ * (which — per [ConversationViewModel.startVoiceInputInterruptingSpeech] — stops any playing
+ * reply first); while recording, the same-size button becomes Stop with a pulsing ring behind it;
+ * on stop it reverts to mic, disabled only while [isTranscribing] runs (every other guard is
+ * enforced by the ViewModel, not weakened here). Generation has no send button to double as a
+ * Stop affordance in this mode, so a compact Stop pill is shown above the mic while [isGenerating].
+ */
+@Composable
+private fun VoiceOnlyInputRow(
+    isRecordingVoice: Boolean,
+    isTranscribing: Boolean,
+    isGenerating: Boolean,
+    onMicClick: () -> Unit,
+    onStopGeneratingClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        if (isGenerating) {
+            TextButton(onClick = onStopGeneratingClick) {
+                Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Stop")
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+        Box(contentAlignment = Alignment.Center) {
+            if (isRecordingVoice) {
+                val transition = rememberInfiniteTransition(label = "mic-pulse")
+                val ringScale by transition.animateFloat(
+                    initialValue = 1f,
+                    targetValue = 1.6f,
+                    animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
+                    label = "mic-pulse-scale"
+                )
+                val ringAlpha by transition.animateFloat(
+                    initialValue = 0.5f,
+                    targetValue = 0f,
+                    animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
+                    label = "mic-pulse-alpha"
+                )
+                Box(
+                    modifier = Modifier
+                        .size(VOICE_ONLY_MIC_SIZE)
+                        .scale(ringScale)
+                        .alpha(ringAlpha)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.error)
+                )
+            }
+            FilledIconButton(
+                onClick = onMicClick,
+                // Stays tappable while recording so the user can always stop; otherwise disabled
+                // only while transcribing — generation does not block the mic in this mode (P9.3
+                // item 5), the ViewModel's own guards decide whether a press actually does anything.
+                enabled = isRecordingVoice || !isTranscribing,
+                modifier = Modifier.size(VOICE_ONLY_MIC_SIZE)
+            ) {
+                when {
+                    isTranscribing -> CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp)
+                    isRecordingVoice -> Icon(
+                        Icons.Default.Stop,
+                        contentDescription = "Stop recording",
+                        modifier = Modifier.size(32.dp)
+                    )
+                    else -> Icon(Icons.Default.Mic, contentDescription = "Start voice input", modifier = Modifier.size(32.dp))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Synthetic user-side bubble shown at the end of the message list while a voice-only instant-send
+ * transcription is running (P9.3): stands in for the not-yet-sent message and is naturally
+ * replaced once the real one lands in [ConversationViewModel.messages] (or simply disappears, on
+ * an empty transcription — the error snackbar covers that case instead).
+ *
+ * The hand-off does not flicker: `viewModelScope` runs on `Dispatchers.Main.immediate`, so the
+ * `launch { performSend(...) }` that appends the real user message runs inline — the message is
+ * already in [ConversationViewModel.messages] before the transcribing flag that hides this bubble
+ * clears, so both land in the same recomposition.
+ */
+@Composable
+private fun PendingTranscriptionBubble() {
+    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        Card(
+            modifier = Modifier.widthIn(max = 300.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                    .size(16.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
         }
     }
 }
