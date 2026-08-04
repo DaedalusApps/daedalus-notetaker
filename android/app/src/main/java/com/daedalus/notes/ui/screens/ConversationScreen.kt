@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -96,6 +97,7 @@ fun ConversationScreen(
     val voiceTranscript by conversationViewModel.voiceTranscript.collectAsState()
     val ttsEnabled by conversationViewModel.ttsEnabled.collectAsState()
     val isSpeaking by conversationViewModel.isSpeaking.collectAsState()
+    val speakingMessageId by conversationViewModel.speakingMessageId.collectAsState()
     val instantSend by conversationViewModel.instantSend.collectAsState()
 
     val context = LocalContext.current
@@ -276,8 +278,14 @@ fun ConversationScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(vertical = 12.dp)
                 ) {
-                    items(messages) { message ->
-                        ChatBubble(message)
+                    itemsIndexed(messages) { index, message ->
+                        val id = index.toString()
+                        ChatBubble(
+                            message = message,
+                            isReplaying = speakingMessageId == id,
+                            onReplayClick = { conversationViewModel.replayMessage(id) },
+                            onStopReplayClick = { conversationViewModel.stopSpeaking() }
+                        )
                     }
                 }
             }
@@ -499,12 +507,23 @@ private fun VoiceRow(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
+/**
+ * A single message bubble. AGENT messages (never USER ones) get a small trailing "Read aloud"
+ * icon below the bubble (P9.2): tapping it replays that message's text via [onReplayClick]; while
+ * this is the message currently replaying ([isReplaying]), the icon becomes Stop and tapping it
+ * calls [onStopReplayClick] instead.
+ */
 @Composable
-private fun ChatBubble(message: ChatMessage) {
+private fun ChatBubble(
+    message: ChatMessage,
+    isReplaying: Boolean,
+    onReplayClick: () -> Unit,
+    onStopReplayClick: () -> Unit
+) {
     val isUser = message.role == Role.USER
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
     ) {
         Card(
             modifier = Modifier.widthIn(max = 300.dp),
@@ -521,6 +540,19 @@ private fun ChatBubble(message: ChatMessage) {
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             )
+        }
+        if (!isUser) {
+            IconButton(
+                onClick = { if (isReplaying) onStopReplayClick() else onReplayClick() },
+                modifier = Modifier.size(48.dp)
+            ) {
+                Icon(
+                    imageVector = if (isReplaying) Icons.Default.Stop else Icons.AutoMirrored.Filled.VolumeUp,
+                    contentDescription = if (isReplaying) "Stop reading" else "Read aloud",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
