@@ -48,6 +48,15 @@ interface SpeechService {
      * callbacks do not arrive on the main thread) — callers must not assume main-thread delivery.
      */
     fun setOnSpeakingChangedListener(listener: (Boolean) -> Unit)
+
+    /**
+     * Registers a callback invoked with true once the engine has finished initializing
+     * successfully, or false if initialization failed. Also invoked immediately, with the
+     * current known state, at registration time — init is asynchronous and may already have
+     * finished before a caller registers, so registration alone must not miss that result. May
+     * be called from a non-main thread, same as [setOnSpeakingChangedListener].
+     */
+    fun setOnReadyChangedListener(listener: (Boolean) -> Unit)
 }
 
 /** [SpeechService] backed by Android's built-in [TextToSpeech] engine. */
@@ -77,6 +86,7 @@ class AndroidSpeechService(context: Context) : SpeechService {
         tts = TextToSpeech(context.applicationContext) { status ->
             if (status != TextToSpeech.SUCCESS) {
                 Log.w(TAG, "TextToSpeech init failed with status $status")
+                setReady(false)
                 return@TextToSpeech
             }
             val result = tts?.setLanguage(Locale.getDefault()) ?: TextToSpeech.LANG_NOT_SUPPORTED
@@ -84,11 +94,13 @@ class AndroidSpeechService(context: Context) : SpeechService {
                 result != TextToSpeech.LANG_NOT_SUPPORTED
             if (!isAvailable) {
                 Log.w(TAG, "TextToSpeech language unavailable: $result")
+                setReady(false)
                 return@TextToSpeech
             }
             defaultVoice = tts?.voice ?: tts?.defaultVoice
             pendingRate?.let { tts?.setSpeechRate(it) }
             pendingVoiceId?.let { applyVoice(it) }
+            setReady(true)
         }
         // Callbacks below arrive on a non-main thread (TextToSpeech's internal worker), which is
         // why setOnSpeakingChangedListener is documented as not main-thread-bound.
@@ -150,6 +162,24 @@ class AndroidSpeechService(context: Context) : SpeechService {
 
     override fun setOnSpeakingChangedListener(listener: (Boolean) -> Unit) {
         speakingChangedListener = listener
+    }
+
+    // null until init finishes (success or failure); once known, a listener registered late must
+    // still learn the outcome rather than waiting on a callback that already happened.
+    @Volatile
+    private var readyState: Boolean? = null
+
+    @Volatile
+    private var readyChangedListener: ((Boolean) -> Unit)? = null
+
+    private fun setReady(ready: Boolean) {
+        readyState = ready
+        readyChangedListener?.invoke(ready)
+    }
+
+    override fun setOnReadyChangedListener(listener: (Boolean) -> Unit) {
+        readyChangedListener = listener
+        readyState?.let { listener(it) }
     }
 
     override fun stop() {

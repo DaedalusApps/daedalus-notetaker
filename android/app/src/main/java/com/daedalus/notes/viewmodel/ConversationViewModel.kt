@@ -143,6 +143,10 @@ class ConversationViewModel @JvmOverloads constructor(
         // callbacks are not guaranteed to arrive on it); MutableStateFlow.value is thread-safe, so
         // no dispatching back to the main thread is needed here.
         service.setOnSpeakingChangedListener { speaking -> _isSpeaking.value = speaking }
+        // Same thread-safety note as above applies to the ready callback (P9.1): it also fires
+        // immediately with the current known state at registration, so a picker opened after
+        // init already finished still sees the right value instead of hanging on "not ready".
+        service.setOnReadyChangedListener { ready -> _ttsReady.value = ready }
         service
     }
     private val tts by ttsDelegate
@@ -150,6 +154,11 @@ class ConversationViewModel @JvmOverloads constructor(
     // Whether TTS is actively speaking (P8.4): drives the TopAppBar speaker icon's active state.
     private val _isSpeaking = MutableStateFlow(false)
     val isSpeaking: StateFlow<Boolean> = _isSpeaking
+
+    // Whether the (lazily built) speech engine has finished initializing (P9.1): drives the
+    // voice picker's loading state so it doesn't show an empty list while init is still async.
+    private val _ttsReady = MutableStateFlow(false)
+    val ttsReady: StateFlow<Boolean> = _ttsReady
 
     private val _ttsEnabled = MutableStateFlow(
         application.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
