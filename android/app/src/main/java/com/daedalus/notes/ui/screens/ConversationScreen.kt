@@ -608,11 +608,13 @@ private fun NewConversationDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = onSaveAndStartNew) { Text("Save & start new") }
+            TextButton(onClick = onSaveAndStartNew) { Text("Save") }
         },
         dismissButton = {
+            // Kept short deliberately: this Row cannot wrap, so long labels would push "Cancel"
+            // off the edge of a phone-width dialog. The title and body carry the full meaning.
             Row {
-                TextButton(onClick = onStartWithoutSaving) { Text("Start new without saving") }
+                TextButton(onClick = onStartWithoutSaving) { Text("Don't save") }
                 TextButton(onClick = onCancel) { Text("Cancel") }
             }
         }
