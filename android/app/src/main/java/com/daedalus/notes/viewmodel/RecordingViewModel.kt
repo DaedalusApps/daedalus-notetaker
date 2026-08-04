@@ -555,8 +555,9 @@ class RecordingViewModel @JvmOverloads constructor(
 
                 // Step 2: Summarize + mind map with Gemma, embed for library Q&A (shared with
                 // ConversationViewModel.endSession, which already has a transcript in hand).
-                _syncProgress.value = "Analyzing with Gemma…"
-                analyzeTranscript(getApplication(), llm, embedder, repo, filename, transcript)
+                analyzeTranscript(getApplication(), llm, embedder, repo, filename, transcript) {
+                    _syncProgress.value = it
+                }
 
                 _currentNote.value = repo.get(filename)
             } catch (e: Exception) {
