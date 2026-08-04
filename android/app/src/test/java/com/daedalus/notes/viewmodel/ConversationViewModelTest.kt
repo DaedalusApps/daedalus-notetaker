@@ -1183,6 +1183,77 @@ class ConversationViewModelTest {
         assertTrue(reloaded.instantSend.value)
     }
 
+    // (P8.4-a/b) stopGenerating() during an in-flight generate: no model message appended, no
+    //     error surfaced (cancellation is not a failure — distinguishes from
+    //     send_llmThrows_setsErrorNoModelMessageUserTurnPersisted), isGenerating clears, and the
+    //     user's turn stays in both the message list and the session file. A subsequent send()
+    //     must work normally afterward.
+    @Test
+    fun stopGenerating_duringGeneration_noModelMessageNoErrorUserPersistedNextSendWorks() = runTest {
+        val gate = CompletableDeferred<String>()
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } coAnswers { gate.await() }
+        val vm = newViewModel()
+
+        vm.send("Thinking out loud")
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(vm.isGenerating.value)
+
+        vm.stopGenerating()
+        advanceUntilIdle()
+
+        assertFalse("isGenerating must clear on cancellation", vm.isGenerating.value)
+        assertNull("cancellation must not surface as an error", vm.error.value)
+        assertEquals(1, vm.messages.value.size)
+        assertEquals(Role.USER, vm.messages.value[0].role)
+        val content = vm.sessionFile.readText()
+        assertTrue(content.contains("Thinking out loud"))
+        assertFalse("no model turn should have been appended", content.contains("**Agent**"))
+
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply after stop"
+        vm.send("Second try")
+        advanceUntilIdle()
+
+        assertEquals(3, vm.messages.value.size)
+        assertEquals(Role.MODEL, vm.messages.value[2].role)
+        assertEquals("Reply after stop", vm.messages.value[2].text)
+        assertNull(vm.error.value)
+    }
+
+    // (P8.4-c) isSpeaking reflects the SpeechService wrapper's speaking-changed callback, which
+    //     the ViewModel registers when the engine is built.
+    @Test
+    fun isSpeaking_reflectsWrapperCallbacks() = runTest {
+        val listenerSlot = slot<(Boolean) -> Unit>()
+        every { tts.setOnSpeakingChangedListener(capture(listenerSlot)) } returns Unit
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+        vm.send("Hello")
+        advanceUntilIdle()
+
+        assertFalse(vm.isSpeaking.value)
+        listenerSlot.captured(true)
+        assertTrue(vm.isSpeaking.value)
+        listenerSlot.captured(false)
+        assertFalse(vm.isSpeaking.value)
+    }
+
+    // (P8.4-d) Tapping the speaker while speaking must stop the speech without flipping the
+    //     ttsEnabled preference — distinct from the toggle behavior when not speaking.
+    @Test
+    fun stopSpeaking_whileSpeaking_stopsWithoutChangingTtsEnabledPref() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+        vm.send("Hello")
+        advanceUntilIdle()
+
+        vm.stopSpeaking()
+
+        verify(atLeast = 1) { tts.stop() }
+        assertTrue("ttsEnabled pref must be unchanged", vm.ttsEnabled.value)
+    }
+
     @Test
     fun canStartNewSession_falseWhenNoMessages() {
         assertFalse(canStartNewSession(emptyList(), isGenerating = false))

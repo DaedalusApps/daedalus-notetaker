@@ -40,6 +40,16 @@ interface SpeechService {
 
     /** Speaks [text] regardless of any caller-side conversation state — used for previews. */
     fun preview(text: String)
+
+    /** True while an utterance is currently being spoken. */
+    val isSpeaking: Boolean
+
+    /**
+     * Registers a callback invoked whenever [isSpeaking] changes. May be called from a non-main
+     * thread (TextToSpeech's UtteranceProgressListener callbacks do not arrive on the main
+     * thread) — callers must not assume main-thread delivery.
+     */
+    fun setOnSpeakingChangedListener(listener: (Boolean) -> Unit)
 }
 
 /** [SpeechService] backed by Android's built-in [TextToSpeech] engine. */
@@ -124,6 +134,17 @@ class AndroidSpeechService(context: Context) : SpeechService {
     }
 
     override fun preview(text: String) = speak(text)
+
+    @Volatile
+    override var isSpeaking: Boolean = false
+        private set
+
+    @Volatile
+    private var speakingChangedListener: ((Boolean) -> Unit)? = null
+
+    override fun setOnSpeakingChangedListener(listener: (Boolean) -> Unit) {
+        speakingChangedListener = listener
+    }
 
     override fun stop() {
         tts?.stop()

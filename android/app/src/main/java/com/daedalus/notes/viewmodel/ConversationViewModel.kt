@@ -21,8 +21,10 @@ import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.recording.AudioRecorder
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -139,6 +141,11 @@ class ConversationViewModel @JvmOverloads constructor(
         service
     }
     private val tts by ttsDelegate
+
+    // Whether TTS is actively speaking (P8.4): drives the TopAppBar speaker icon's active state.
+    // Not yet wired to the wrapper's callback — see setOnSpeakingChangedListener.
+    private val _isSpeaking = MutableStateFlow(false)
+    val isSpeaking: StateFlow<Boolean> = _isSpeaking
 
     private val _ttsEnabled = MutableStateFlow(
         application.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
@@ -336,7 +343,7 @@ class ConversationViewModel @JvmOverloads constructor(
                         // made, so this coroutine's finally must run now — otherwise the mic
                         // button would keep spinning "transcribing" and the temp audio file
                         // would stay on disk for the whole generation.
-                        viewModelScope.launch { performSend(text.trim()) }
+                        generationJob = viewModelScope.launch { performSend(text.trim()) }
                     }
                 } else {
                     _voiceTranscript.value = text
@@ -440,6 +447,9 @@ class ConversationViewModel @JvmOverloads constructor(
             "$label: ${message.text}"
         }
 
+    // Tracks the coroutine running performSend(), so stopGenerating() has something to cancel.
+    private var generationJob: Job? = null
+
     fun send(text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty() || _isGenerating.value) return
@@ -448,7 +458,25 @@ class ConversationViewModel @JvmOverloads constructor(
         // through before the coroutine body runs.
         _isGenerating.value = true
         _error.value = null
-        viewModelScope.launch { performSend(trimmed) }
+        generationJob = viewModelScope.launch { performSend(trimmed) }
+    }
+
+    /**
+     * Cancels the in-flight generation started by [send] or the instant-send path — the inline
+     * Stop button shown in place of the send button while [isGenerating] is true. The user's
+     * message (already appended to history and the session file before generation started) is
+     * left in place; no model turn is appended; no error is surfaced, since cancellation is not a
+     * failure (see the `CancellationException` handling in [performSend]). [_isGenerating] clears
+     * via that same `finally` block.
+     *
+     * MediaPipe caveat: [LocalLlmService.generate] wraps `generateResponseAsync` with a timeout;
+     * cancelling this job abandons the callback there, but the underlying native inference call
+     * may keep running to completion in the background regardless — that is expected and
+     * harmless (cancel-and-ignore-result). See [LocalLlmService.generate]'s KDoc for how it keeps
+     * an abandoned call from interleaving with the next `generate()` invocation.
+     */
+    fun stopGenerating() {
+        generationJob?.cancel()
     }
 
     /**
