@@ -48,36 +48,49 @@ class ConversationViewModel @JvmOverloads constructor(
     val error: StateFlow<String?> = _error
 
     /** File backing the current session; exposed internally so tests can assert on its content. */
-    internal val sessionFile: File
+    internal lateinit var sessionFile: File
+        private set
 
-    init {
-        val dir = conversationsDir(application)
-        val existing = findTodaysSessionFile(dir)
-        if (existing != null) {
-            sessionFile = existing
-            _messages.value = parseSessionFile(existing)
-        } else {
-            val name = "conv_${SimpleDateFormat("yyyyMMddHHmmss", Locale.US).format(Date(clock()))}.md"
-            sessionFile = File(dir, name)
+    /** Locating and parsing the session file touches disk, so it runs off the main thread. */
+    private val loadJob = viewModelScope.launch {
+        val (file, restored) = withContext(ioDispatcher) {
+            val dir = conversationsDir(application)
+            val existing = findTodaysSessionFile(dir)
+            if (existing != null) existing to parseSessionFile(existing) else newSessionFile(dir) to emptyList()
         }
+        sessionFile = file
+        _messages.value = restored
     }
 
     fun clearError() { _error.value = null }
 
+    /** Rotates to a fresh session file (a new "meeting"); the previous transcript stays on disk. */
+    fun startNewSession() {
+        if (_isGenerating.value) return
+        viewModelScope.launch {
+            loadJob.join()
+            sessionFile = withContext(ioDispatcher) { newSessionFile(conversationsDir(getApplication())) }
+            _messages.value = emptyList()
+            _error.value = null
+        }
+    }
+
     fun send(text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty() || _isGenerating.value) return
+        // Claimed synchronously on the caller (main) thread so a rapid double-send cannot slip
+        // through before the coroutine body runs.
+        _isGenerating.value = true
+        _error.value = null
         viewModelScope.launch {
-            val userMessage = ChatMessage(Role.USER, trimmed, clock())
-            _messages.value = _messages.value + userMessage
-            appendToFile(userMessage)
-
-            _error.value = null
-            _isGenerating.value = true
             try {
+                loadJob.join()
+                val userMessage = ChatMessage(Role.USER, trimmed, clock())
+                _messages.value = _messages.value + userMessage
+                appendToFile(userMessage)
+
                 llm.ensureLoaded()
-                val turns = _messages.value.map { ChatTurn(it.role, it.text) }
-                val reply = llm.generate(IDEATION_SYSTEM_PROMPT, turns)
+                val reply = llm.generate(IDEATION_SYSTEM_PROMPT, toChatTurns(_messages.value))
                 val modelMessage = ChatMessage(Role.MODEL, reply, clock())
                 _messages.value = _messages.value + modelMessage
                 appendToFile(modelMessage)
@@ -88,6 +101,23 @@ class ConversationViewModel @JvmOverloads constructor(
                 _isGenerating.value = false
             }
         }
+    }
+
+    /**
+     * Maps messages to LLM turns, merging consecutive same-role messages: the chat template
+     * requires strictly alternating roles, and a failed generation leaves two user turns in a row.
+     */
+    private fun toChatTurns(messages: List<ChatMessage>): List<ChatTurn> {
+        val turns = mutableListOf<ChatTurn>()
+        for (message in messages) {
+            val last = turns.lastOrNull()
+            if (last != null && last.role == message.role) {
+                turns[turns.lastIndex] = ChatTurn(message.role, last.text + "\n\n" + message.text)
+            } else {
+                turns.add(ChatTurn(message.role, message.text))
+            }
+        }
+        return turns
     }
 
     private suspend fun appendToFile(message: ChatMessage) {
@@ -101,9 +131,21 @@ class ConversationViewModel @JvmOverloads constructor(
     /** Finds the most recent conv_*.md file created today, if any, to resume an unfinished session. */
     private fun findTodaysSessionFile(dir: File): File? {
         val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(clock()))
-        return dir.listFiles { f -> SESSION_FILENAME_REGEX.matches(f.name) }
-            ?.filter { f -> SESSION_FILENAME_REGEX.find(f.name)!!.groupValues[1].take(8) == today }
+        return dir.listFiles()
+            ?.filter { SESSION_FILENAME_REGEX.matchEntire(it.name)?.groupValues?.get(1)?.startsWith(today) == true }
             ?.maxByOrNull { it.name }
+    }
+
+    /** Builds a not-yet-taken session filename, so rotating twice never reuses an existing file. */
+    private fun newSessionFile(dir: File): File {
+        val format = SimpleDateFormat("yyyyMMddHHmmss", Locale.US)
+        var millis = clock()
+        var file = File(dir, "conv_${format.format(Date(millis))}.md")
+        while (file.exists()) {
+            millis += 1000
+            file = File(dir, "conv_${format.format(Date(millis))}.md")
+        }
+        return file
     }
 
     /** Parses this ViewModel's own markdown session format back into messages (see [appendToFile]). */
@@ -115,10 +157,15 @@ class ConversationViewModel @JvmOverloads constructor(
         val text = StringBuilder()
 
         fun flush() {
-            val role = currentRole ?: return
-            val time = currentTime ?: return
-            messages.add(ChatMessage(role, text.toString().trim(), reconstructMillis(time)))
+            val role = currentRole
+            val time = currentTime
+            val body = text.toString().trim()
             text.setLength(0)
+            // Content before the first turn header (corrupted or foreign file) is discarded,
+            // as are empty turns; neither is representable as a message.
+            if (role != null && time != null && body.isNotEmpty()) {
+                messages.add(ChatMessage(role, body, reconstructMillis(time)))
+            }
         }
 
         file.forEachLine { line ->

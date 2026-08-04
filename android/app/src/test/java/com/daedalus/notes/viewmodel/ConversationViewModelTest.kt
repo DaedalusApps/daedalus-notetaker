@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.daedalus.notes.ai.ChatTurn
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.Role
+import com.daedalus.notes.ai.buildGemmaPrompt
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -23,12 +24,16 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -162,6 +167,7 @@ class ConversationViewModelTest {
         assertTrue(originalFile.exists())
 
         val vm2 = newViewModel()
+        advanceUntilIdle()
 
         assertEquals(2, vm2.messages.value.size)
         assertEquals("Original message", vm2.messages.value[0].text)
@@ -180,5 +186,98 @@ class ConversationViewModelTest {
         assertTrue(content.contains("Continuing"))
         assertTrue(content.contains("Second reply"))
         assertEquals(4, vm2.messages.value.size)
+    }
+
+    // (e) After a failed generation the message list holds two USER turns in a row. The Gemma
+    //     chat template rejects consecutive same-role turns, so they must be merged before the
+    //     next generate() call — otherwise the session is permanently broken.
+    @Test
+    fun send_afterFailedGeneration_mergesConsecutiveUserTurns() = runTest {
+        val captured = mutableListOf<List<ChatTurn>>()
+        coEvery { llm.generate(any(), capture(captured)) } throws RuntimeException("boom")
+        val vm = newViewModel()
+        vm.send("First thought")
+        advanceUntilIdle()
+
+        coEvery { llm.generate(any(), capture(captured)) } returns "Recovered"
+        vm.send("Second thought")
+        advanceUntilIdle()
+
+        val turns = captured.last()
+        assertEquals(1, turns.size)
+        assertEquals(Role.USER, turns[0].role)
+        assertTrue(turns[0].text.contains("First thought"))
+        assertTrue(turns[0].text.contains("Second thought"))
+        // The merged turns must satisfy the real prompt builder's contract.
+        buildGemmaPrompt("system", turns)
+        assertEquals("Recovered", vm.messages.value.last().text)
+        assertNull(vm.error.value)
+    }
+
+    // (f) The user can start a fresh session on the same day: rotating clears the transcript and
+    //     writes to a new file, leaving the previous one intact on disk.
+    @Test
+    fun startNewSession_rotatesToNewFileAndClearsMessages() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Morning meeting")
+        advanceUntilIdle()
+        val firstFile = vm.sessionFile
+
+        vm.startNewSession()
+        advanceUntilIdle()
+
+        assertTrue(vm.messages.value.isEmpty())
+        assertTrue(firstFile.absolutePath != vm.sessionFile.absolutePath)
+
+        vm.send("Afternoon meeting")
+        advanceUntilIdle()
+
+        assertTrue(firstFile.readText().contains("Morning meeting"))
+        assertFalse(firstFile.readText().contains("Afternoon meeting"))
+        assertTrue(vm.sessionFile.readText().contains("Afternoon meeting"))
+        assertFalse(vm.sessionFile.readText().contains("Morning meeting"))
+
+        // The rotated-to session is the one resumed on reload (most recent file wins).
+        val reloaded = newViewModel()
+        advanceUntilIdle()
+        assertEquals(vm.sessionFile.absolutePath, reloaded.sessionFile.absolutePath)
+        assertEquals(1, reloaded.messages.value.count { it.role == Role.USER })
+    }
+
+    // (g) A malformed session file must never crash the parser: garbage preamble, multiline
+    //     bodies, a user-typed line that looks like a turn header, empty turns, trailing blanks.
+    @Test
+    fun reload_malformedSessionFile_parsesWithoutCrashing() = runTest {
+        val dir = conversationsDir().apply { mkdirs() }
+        val name = "conv_" + SimpleDateFormat("yyyyMMddHHmmss", Locale.US).format(Date(nowMillis)) + ".md"
+        File(dir, name).writeText(
+            """
+            garbage preamble not written by us
+            **Not a header**
+            **Me** (09:15):
+            line one
+            line two
+
+            **Agent** (09:16):
+            **Me** (99:99):
+            **Me** (09:17):
+            quoting a header: **Me** (12:00):
+            still the same message
+
+            """.trimIndent() + "\n\n\n"
+        )
+
+        val vm = newViewModel()
+        advanceUntilIdle()
+
+        val messages = vm.messages.value
+        // Preamble and the empty Agent turn are dropped; the rest survives.
+        assertEquals(2, messages.size)
+        assertEquals(Role.USER, messages[0].role)
+        assertEquals("line one\nline two", messages[0].text)
+        assertEquals(Role.USER, messages[1].role)
+        assertTrue(messages[1].text.contains("still the same message"))
+        assertFalse(messages.any { it.text.contains("garbage preamble") })
     }
 }

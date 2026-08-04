@@ -233,6 +233,14 @@ fun AskHomeScreen(
                     Text(if (isAsking) "Searching notes…" else "Ask")
                 }
 
+                if (aiError != null && !isAsking) {
+                    Text(
+                        text = aiError!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -263,14 +271,6 @@ fun AskHomeScreen(
                             tint = MaterialTheme.colorScheme.onSecondaryContainer
                         )
                     }
-                }
-
-                if (aiError != null && !isAsking) {
-                    Text(
-                        text = aiError!!,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
                 }
 
                 if (libraryAnswer != null) {

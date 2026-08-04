@@ -3,8 +3,8 @@ package com.daedalus.notes.ui.screens
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -13,12 +13,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -85,10 +86,19 @@ fun ConversationScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
+                actions = {
+                    IconButton(
+                        onClick = { conversationViewModel.startNewSession() },
+                        enabled = messages.isNotEmpty() && !isGenerating
+                    ) {
+                        Icon(Icons.Default.AddComment, contentDescription = "New conversation")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                     titleContentColor = MaterialTheme.colorScheme.onSurface,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface
+                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                    actionIconContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         }
@@ -99,7 +109,7 @@ fun ConversationScreen(
                 .padding(innerPadding)
         ) {
             if (messages.isEmpty()) {
-                Box(Modifier.fillMaxSize().weight(1f), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Text(
                         text = "Start a conversation — think out loud with your local agent.",
                         style = MaterialTheme.typography.bodyMedium,
@@ -116,9 +126,9 @@ fun ConversationScreen(
                         .weight(1f)
                         .padding(horizontal = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp)
+                    contentPadding = PaddingValues(vertical = 12.dp)
                 ) {
-                    itemsIndexed(messages) { _, message ->
+                    items(messages) { message ->
                         ChatBubble(message)
                     }
                 }
@@ -173,14 +183,13 @@ private fun ChatBubble(message: ChatMessage) {
                     else MaterialTheme.colorScheme.surfaceVariant
             )
         ) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (isUser) MaterialTheme.colorScheme.onPrimaryContainer
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            Text(
+                text = message.text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (isUser) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
         }
     }
 }
