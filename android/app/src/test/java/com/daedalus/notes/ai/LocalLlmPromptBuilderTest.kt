@@ -75,4 +75,15 @@ class LocalLlmPromptBuilderTest {
             )
         }
     }
+
+    // (e) issue #33: MODEL-first turn list must throw, not silently drop the system prompt.
+    @Test
+    fun modelFirstTurns_throwsIllegalArgument() {
+        assertThrows(IllegalArgumentException::class.java) {
+            buildGemmaPrompt(
+                "sys",
+                listOf(ChatTurn(Role.MODEL, "hi there"), ChatTurn(Role.USER, "how are you"))
+            )
+        }
+    }
 }
