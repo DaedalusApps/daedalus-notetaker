@@ -13,8 +13,10 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.daedalus.notes.ai.analyzeTranscript
+import com.daedalus.notes.ai.aiTextBudget
 import com.daedalus.notes.ai.buildLibraryQuestionPrompt
 import com.daedalus.notes.ai.buildNoteQuestionPrompt
+import com.daedalus.notes.ai.expandWithTopicSiblings
 import com.daedalus.notes.ai.EmbeddingService
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.MarkdownExporter
@@ -795,8 +797,12 @@ class RecordingViewModel @JvmOverloads constructor(
                     _aiError.value = "No note embeddings found. Re-analyze your notes to enable library search."
                     return@launch
                 }
-                _librarySources.value = sources
-                val context = buildLibraryQuestionPrompt(sources)
+                // Only the note bodies are counted against the budget, but the prompt also carries a
+                // preamble, a title line per note and the guardrail, so keep a fraction back as headroom.
+                val graphBudget = aiTextBudget(getApplication()) * 3 / 4
+                val expandedSources = expandWithTopicSiblings(sources, withEmbeddings, graphBudget)
+                _librarySources.value = expandedSources
+                val context = buildLibraryQuestionPrompt(expandedSources)
                 llm.ensureLoaded()
                 _libraryAnswer.value = llm.generate(context, question)
             } catch (e: Exception) {
