@@ -38,7 +38,7 @@ class AndroidSpeechService(context: Context) : SpeechService {
                 Log.w(TAG, "TextToSpeech init failed with status $status")
                 return@TextToSpeech
             }
-            val result = tts?.setLanguage(Locale.getDefault())
+            val result = tts?.setLanguage(Locale.getDefault()) ?: TextToSpeech.LANG_NOT_SUPPORTED
             isAvailable = result != TextToSpeech.LANG_MISSING_DATA &&
                 result != TextToSpeech.LANG_NOT_SUPPORTED
             if (!isAvailable) {
@@ -56,8 +56,13 @@ class AndroidSpeechService(context: Context) : SpeechService {
         tts?.stop()
     }
 
+    // stop() first: shutdown() releases the engine binding but does not reliably cut off an
+    // utterance already handed to it. Dropping the reference makes a second shutdown — or a
+    // stop()/speak() arriving after it — a no-op instead of a call into a dead engine.
     override fun shutdown() {
+        tts?.stop()
         tts?.shutdown()
+        tts = null
         isAvailable = false
     }
 }

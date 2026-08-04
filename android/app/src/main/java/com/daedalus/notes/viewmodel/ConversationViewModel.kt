@@ -108,9 +108,10 @@ class ConversationViewModel @JvmOverloads constructor(
 
     fun clearVoiceTranscript() { _voiceTranscript.value = null }
 
-    // Spoken replies via Android TTS (P6.2). Lazy so construction doesn't touch the TextToSpeech
-    // engine until the user actually enables the toggle or a reply needs speaking.
-    private val tts by lazy { ttsProvider() }
+    // Spoken replies via Android TTS (P6.2). Lazy so construction doesn't bind the TextToSpeech
+    // engine for users who never turn spoken replies on — see stopSpeaking().
+    private val ttsDelegate = lazy { ttsProvider() }
+    private val tts by ttsDelegate
 
     private val _ttsEnabled = MutableStateFlow(
         application.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
@@ -118,11 +119,23 @@ class ConversationViewModel @JvmOverloads constructor(
     )
     val ttsEnabled: StateFlow<Boolean> = _ttsEnabled
 
-    /** Stops any in-progress speech, e.g. when the conversation screen is dismissed. */
-    fun stopSpeaking() { tts.stop() }
+    /**
+     * Stops any in-progress speech, e.g. when a new turn starts or the screen is dismissed.
+     *
+     * Also the single place the engine gets built: it is touched only when spoken replies are on
+     * (or were on earlier this session), so the toggle staying off means the engine is never
+     * bound. Building it here rather than at speak() time matters — TextToSpeech initializes
+     * asynchronously and reports unavailable until it finishes, so an engine first touched when a
+     * reply is ready would silently drop that reply.
+     */
+    fun stopSpeaking() {
+        if (_ttsEnabled.value || ttsDelegate.isInitialized()) tts.stop()
+    }
 
     fun setTtsEnabled(enabled: Boolean) {
         _ttsEnabled.value = enabled
+        // Muting mid-reply must silence the reply already being spoken.
+        if (!enabled) stopSpeaking()
         getApplication<Application>()
             .getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
             .edit()
@@ -156,7 +169,7 @@ class ConversationViewModel @JvmOverloads constructor(
     /** Starts recording a voice turn to a temp file in cacheDir. No-op while busy. */
     fun startVoiceInput() {
         if (_isRecordingVoice.value || _isTranscribing.value || _isGenerating.value) return
-        tts.stop()
+        stopSpeaking()
         val application = getApplication<Application>()
         if (!isWhisperReady(application)) {
             _error.value = "Voice input needs the transcription model — download it in Settings."
@@ -227,7 +240,7 @@ class ConversationViewModel @JvmOverloads constructor(
     /** Rotates to a fresh session file (a new "meeting"); the previous transcript stays on disk. */
     fun startNewSession() {
         if (_isGenerating.value) return
-        tts.stop()
+        stopSpeaking()
         viewModelScope.launch {
             loadJob.join()
             sessionFile = withContext(ioDispatcher) { newSessionFile(conversationsDir(getApplication())) }
@@ -249,7 +262,7 @@ class ConversationViewModel @JvmOverloads constructor(
      */
     fun endSession() {
         if (_isGenerating.value) return
-        tts.stop()
+        stopSpeaking()
         // Claimed synchronously on the caller (main) thread so a double-tap — or a send() landing
         // in the same frame — cannot slip past the guard before the coroutine body runs.
         _isGenerating.value = true
@@ -302,7 +315,7 @@ class ConversationViewModel @JvmOverloads constructor(
     fun send(text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty() || _isGenerating.value) return
-        tts.stop()
+        stopSpeaking()
         // Claimed synchronously on the caller (main) thread so a rapid double-send cannot slip
         // through before the coroutine body runs.
         _isGenerating.value = true
@@ -494,6 +507,6 @@ class ConversationViewModel @JvmOverloads constructor(
         super.onCleared()
         cancelVoiceInput()
         embedder.close()
-        tts.shutdown()
+        if (ttsDelegate.isInitialized()) tts.shutdown()
     }
 }

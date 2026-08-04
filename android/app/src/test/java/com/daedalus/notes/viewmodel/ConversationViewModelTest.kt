@@ -59,6 +59,9 @@ class ConversationViewModelTest {
     private val audioRecorder = mockk<AudioRecorder>(relaxed = true)
     private val transcriptionService = mockk<TranscriptionService>(relaxed = true)
     private val tts = mockk<SpeechService>(relaxed = true)
+    // Counts how often the ViewModel asked for a speech engine, so tests can assert that a user
+    // who never turns spoken replies on never pays for building one.
+    private var ttsConstructions = 0
     private val testDispatcher = StandardTestDispatcher()
 
     private fun prefs() =
@@ -90,6 +93,7 @@ class ConversationViewModelTest {
         every { Log.e(any(), any(), any()) } returns 0
         coEvery { llm.ensureLoaded() } returns Unit
         every { tts.isAvailable } returns true
+        ttsConstructions = 0
 
         conversationsDir().deleteRecursively()
         prefs().edit().clear().commit()
@@ -112,7 +116,7 @@ class ConversationViewModelTest {
         contextBudgetChars = contextBudgetChars ?: (aiTextBudget(application) * 0.75).toInt(),
         audioRecorderProvider = { audioRecorder },
         transcriptionServiceProvider = { transcriptionService },
-        ttsProvider = { tts }
+        ttsProvider = { ttsConstructions++; tts }
     )
 
     // (a) send() twice produces user+model messages in order, and the session file contains
@@ -799,6 +803,7 @@ class ConversationViewModelTest {
     fun send_stopsActiveSpeechFirst() = runTest {
         coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
         val vm = newViewModel()
+        vm.setTtsEnabled(true)
 
         vm.send("Hello")
 
@@ -810,6 +815,7 @@ class ConversationViewModelTest {
     fun startVoiceInput_stopsActiveSpeechFirst() = runTest {
         markWhisperReady()
         val vm = newViewModel()
+        vm.setTtsEnabled(true)
 
         vm.startVoiceInput()
 
@@ -820,6 +826,7 @@ class ConversationViewModelTest {
     fun endSession_stopsActiveSpeechFirst() = runTest {
         coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
         val vm = newViewModel()
+        vm.setTtsEnabled(true)
         vm.send("Hello")
         advanceUntilIdle()
 
@@ -833,6 +840,7 @@ class ConversationViewModelTest {
     fun startNewSession_stopsActiveSpeechFirst() = runTest {
         coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
         val vm = newViewModel()
+        vm.setTtsEnabled(true)
         vm.send("Hello")
         advanceUntilIdle()
 
@@ -842,17 +850,53 @@ class ConversationViewModelTest {
         advanceUntilIdle()
     }
 
-    // (P6.2-e) onCleared() shuts down the TTS engine.
+    // (P6.2-e) onCleared() shuts down the TTS engine it built.
     @Test
     fun onCleared_shutsDownTts() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
         val vm = newViewModel()
-        vm.setTtsEnabled(true) // force the lazy tts instance to be touched
+        vm.setTtsEnabled(true)
+        vm.send("Hello") // builds the engine
+        advanceUntilIdle()
 
         val method = ConversationViewModel::class.java.getDeclaredMethod("onCleared")
         method.isAccessible = true
         method.invoke(vm)
 
         verify(exactly = 1) { tts.shutdown() }
+    }
+
+    // (P6.2-g) A user who never turns spoken replies on must never pay to build the speech
+    //     engine: on a real device that binds the system TextToSpeech service. Regression guard —
+    //     the per-turn stop() calls previously forced construction for everyone.
+    @Test
+    fun ttsNeverEnabled_neverBuildsSpeechEngine() = runTest {
+        markWhisperReady()
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
+        val vm = newViewModel()
+
+        vm.send("Hello")
+        advanceUntilIdle()
+        vm.startVoiceInput()
+        vm.startNewSession()
+        advanceUntilIdle()
+        vm.stopSpeaking()
+
+        assertEquals(0, ttsConstructions)
+    }
+
+    // (P6.2-h) Muting mid-reply silences what is already being spoken.
+    @Test
+    fun setTtsEnabledFalse_stopsSpeechInProgress() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+        vm.send("Hello")
+        advanceUntilIdle()
+
+        vm.setTtsEnabled(false)
+
+        verify(exactly = 2) { tts.stop() } // once from send(), once from muting
     }
 
     // (P6.2-f) The toggle persists to SharedPreferences and is restored by a fresh ViewModel.
