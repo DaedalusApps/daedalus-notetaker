@@ -1,6 +1,6 @@
 package com.daedalus.notes.ai
 
-const val TODO_EXTRACTION_PROMPT = """From the notes below, extract concrete action items and tasks the speaker needs to do.
+const val TODO_EXTRACTION_PROMPT = OFFLINE_GUARDRAIL + "\n\n" + """From the notes below, extract concrete action items and tasks the speaker needs to do.
 
 Return ONLY a bullet list, one task per line starting with "- ". Each task must be short (under 15 words), specific, and actionable. Do not repeat tasks from the "Already tracked" list. If there are no new tasks, return "- none".
 
