@@ -138,12 +138,15 @@ class ConversationViewModel @JvmOverloads constructor(
         // A no-longer-existing persisted voice id returns false here; that is a silent fallback
         // to the system default, not an error — the pref is intentionally left untouched.
         if (voiceId.isNotEmpty()) service.setVoice(voiceId)
+        // The listener may be invoked off the main thread (TextToSpeech's UtteranceProgressListener
+        // callbacks are not guaranteed to arrive on it); MutableStateFlow.value is thread-safe, so
+        // no dispatching back to the main thread is needed here.
+        service.setOnSpeakingChangedListener { speaking -> _isSpeaking.value = speaking }
         service
     }
     private val tts by ttsDelegate
 
     // Whether TTS is actively speaking (P8.4): drives the TopAppBar speaker icon's active state.
-    // Not yet wired to the wrapper's callback — see setOnSpeakingChangedListener.
     private val _isSpeaking = MutableStateFlow(false)
     val isSpeaking: StateFlow<Boolean> = _isSpeaking
 
@@ -498,6 +501,10 @@ class ConversationViewModel @JvmOverloads constructor(
             _messages.value = _messages.value + modelMessage
             appendToFile(modelMessage)
             if (_ttsEnabled.value && tts.isAvailable) tts.speak(reply)
+        } catch (e: CancellationException) {
+            // stopGenerating() cancellation, not a failure: no error, no model turn. Rethrown so
+            // the coroutine actually completes as cancelled.
+            throw e
         } catch (e: Exception) {
             Log.e("ConversationViewModel", "Generation failed", e)
             _error.value = e.message ?: "Failed to generate a response"

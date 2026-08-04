@@ -3,6 +3,7 @@ package com.daedalus.notes.ai
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeech.QUEUE_FLUSH
+import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.util.Log
 import java.util.Locale
@@ -92,6 +93,19 @@ class AndroidSpeechService(context: Context) : SpeechService {
             pendingRate?.let { tts?.setSpeechRate(it) }
             pendingVoiceId?.let { applyVoice(it) }
         }
+        // Callbacks below arrive on a non-main thread (TextToSpeech's internal worker), which is
+        // why isSpeaking/setOnSpeakingChangedListener are documented as not main-thread-bound.
+        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) = setSpeaking(true)
+            override fun onDone(utteranceId: String?) = setSpeaking(false)
+            @Deprecated("Deprecated in Java", ReplaceWith(""))
+            override fun onError(utteranceId: String?) = setSpeaking(false)
+        })
+    }
+
+    private fun setSpeaking(speaking: Boolean) {
+        isSpeaking = speaking
+        speakingChangedListener?.invoke(speaking)
     }
 
     override fun speak(text: String) {
@@ -148,6 +162,9 @@ class AndroidSpeechService(context: Context) : SpeechService {
 
     override fun stop() {
         tts?.stop()
+        // stop() flushes the utterance; onDone/onError delivery after a flush isn't guaranteed,
+        // so isSpeaking is cleared here rather than waiting on the progress listener.
+        setSpeaking(false)
     }
 
     // stop() first: shutdown() releases the engine binding but does not reliably cut off an
@@ -158,5 +175,6 @@ class AndroidSpeechService(context: Context) : SpeechService {
         tts?.shutdown()
         tts = null
         isAvailable = false
+        setSpeaking(false)
     }
 }
