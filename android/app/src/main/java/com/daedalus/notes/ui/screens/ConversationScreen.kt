@@ -52,6 +52,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -90,6 +91,7 @@ fun ConversationScreen(
     val isTranscribing by conversationViewModel.isTranscribing.collectAsState()
     val voiceTranscript by conversationViewModel.voiceTranscript.collectAsState()
     val ttsEnabled by conversationViewModel.ttsEnabled.collectAsState()
+    val instantSend by conversationViewModel.instantSend.collectAsState()
 
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
@@ -210,6 +212,19 @@ fun ConversationScreen(
                             onClick = {
                                 menuExpanded = false
                                 showVoiceDialog = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Instant send") },
+                            trailingIcon = {
+                                Switch(
+                                    checked = instantSend,
+                                    onCheckedChange = { conversationViewModel.setInstantSend(it) }
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                conversationViewModel.setInstantSend(!instantSend)
                             }
                         )
                     }

@@ -77,6 +77,9 @@ const val CONVERSATION_TTS_RATE_KEY = "conversation_tts_rate"
 /** SharedPreferences key for the selected voice id (String, default "" = system default). */
 const val CONVERSATION_TTS_VOICE_KEY = "conversation_tts_voice"
 
+/** SharedPreferences key for whether a voice transcription is sent immediately (Boolean, default false). */
+const val CONVERSATION_INSTANT_SEND_KEY = "conversation_instant_send"
+
 private const val TTS_RATE_DEFAULT = 1.0f
 private const val TTS_VOICE_DEFAULT = ""
 
@@ -154,6 +157,24 @@ class ConversationViewModel @JvmOverloads constructor(
             .getString(CONVERSATION_TTS_VOICE_KEY, TTS_VOICE_DEFAULT) ?: TTS_VOICE_DEFAULT
     )
     val ttsVoiceId: StateFlow<String> = _ttsVoiceId
+
+    // Instant send after voice transcription (P8.3): when on, a successful non-blank
+    // transcription is sent immediately through the same pipeline as send(), instead of being
+    // posted into voiceTranscript for the user to review/edit in the input field first.
+    private val _instantSend = MutableStateFlow(
+        application.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+            .getBoolean(CONVERSATION_INSTANT_SEND_KEY, false)
+    )
+    val instantSend: StateFlow<Boolean> = _instantSend
+
+    fun setInstantSend(enabled: Boolean) {
+        _instantSend.value = enabled
+        getApplication<Application>()
+            .getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(CONVERSATION_INSTANT_SEND_KEY, enabled)
+            .apply()
+    }
 
     /**
      * Stops any in-progress speech, e.g. when a new turn starts or the screen is dismissed.
@@ -277,9 +298,12 @@ class ConversationViewModel @JvmOverloads constructor(
     }
 
     /**
-     * Stops the in-progress voice recording and transcribes it off the main thread. The result
-     * is exposed through [voiceTranscript] for the UI to place in the input field; the temp
-     * audio file is always deleted once transcription finishes, succeeds or not.
+     * Stops the in-progress voice recording and transcribes it off the main thread. With instant
+     * send OFF, the result is exposed through [voiceTranscript] for the UI to place in the input
+     * field. With instant send ON, a non-blank result instead goes straight through the same send
+     * pipeline as [send] — the input field is deliberately left untouched (whatever the user had
+     * typed stays as-is; the two drafts are never merged on this path). The temp audio file is
+     * always deleted once transcription finishes, succeeds or not.
      */
     fun stopVoiceInput() {
         if (!_isRecordingVoice.value) return
@@ -296,6 +320,20 @@ class ConversationViewModel @JvmOverloads constructor(
                 val text = withContext(ioDispatcher) { transcriptionService.transcribe(file) }
                 if (text.isBlank()) {
                     _error.value = "Didn't catch that"
+                } else if (_instantSend.value) {
+                    // The _isGenerating claim below must happen synchronously, with no suspend
+                    // point between the check and the set, so it is atomic with send()'s own
+                    // synchronous claim on the main thread: whichever runs first wins the race.
+                    // If something else is already generating, the transcript must not be
+                    // dropped — fall back to voiceTranscript exactly like instant send OFF.
+                    if (_isGenerating.value) {
+                        _voiceTranscript.value = text
+                    } else {
+                        stopSpeaking()
+                        _isGenerating.value = true
+                        _error.value = null
+                        performSend(text.trim())
+                    }
                 } else {
                     _voiceTranscript.value = text
                 }
@@ -406,26 +444,33 @@ class ConversationViewModel @JvmOverloads constructor(
         // through before the coroutine body runs.
         _isGenerating.value = true
         _error.value = null
-        viewModelScope.launch {
-            try {
-                loadJob.join()
-                val userMessage = ChatMessage(Role.USER, trimmed, clock())
-                _messages.value = _messages.value + userMessage
-                appendToFile(userMessage)
+        viewModelScope.launch { performSend(trimmed) }
+    }
 
-                llm.ensureLoaded()
-                val (systemPrompt, turns) = buildLiveContext(_messages.value)
-                val reply = llm.generate(systemPrompt, turns)
-                val modelMessage = ChatMessage(Role.MODEL, reply, clock())
-                _messages.value = _messages.value + modelMessage
-                appendToFile(modelMessage)
-                if (_ttsEnabled.value && tts.isAvailable) tts.speak(reply)
-            } catch (e: Exception) {
-                Log.e("ConversationViewModel", "Generation failed", e)
-                _error.value = e.message ?: "Failed to generate a response"
-            } finally {
-                _isGenerating.value = false
-            }
+    /**
+     * The actual send pipeline, shared by [send] and the instant-send path in [stopVoiceInput].
+     * Callers MUST have already claimed [_isGenerating] (synchronously, on the main thread)
+     * before launching this — it only releases the claim, in the `finally` block.
+     */
+    private suspend fun performSend(trimmed: String) {
+        try {
+            loadJob.join()
+            val userMessage = ChatMessage(Role.USER, trimmed, clock())
+            _messages.value = _messages.value + userMessage
+            appendToFile(userMessage)
+
+            llm.ensureLoaded()
+            val (systemPrompt, turns) = buildLiveContext(_messages.value)
+            val reply = llm.generate(systemPrompt, turns)
+            val modelMessage = ChatMessage(Role.MODEL, reply, clock())
+            _messages.value = _messages.value + modelMessage
+            appendToFile(modelMessage)
+            if (_ttsEnabled.value && tts.isAvailable) tts.speak(reply)
+        } catch (e: Exception) {
+            Log.e("ConversationViewModel", "Generation failed", e)
+            _error.value = e.message ?: "Failed to generate a response"
+        } finally {
+            _isGenerating.value = false
         }
     }
 

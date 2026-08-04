@@ -301,6 +301,7 @@ class BackupManager(
         if (settings.has("use_bluetooth_mic")) editor.putBoolean("use_bluetooth_mic", settings.optBoolean("use_bluetooth_mic"))
         if (settings.has("auto_process")) editor.putBoolean("auto_process", settings.optBoolean("auto_process"))
         if (settings.has("conversation_tts_enabled")) editor.putBoolean("conversation_tts_enabled", settings.optBoolean("conversation_tts_enabled"))
+        if (settings.has("conversation_instant_send")) editor.putBoolean("conversation_instant_send", settings.optBoolean("conversation_instant_send"))
         // A hand-edited or corrupt backup can carry a non-number (optDouble -> NaN) or an absurd
         // rate; both are ignored by TextToSpeech.setSpeechRate, which would leave a restored
         // install seemingly mute. Clamp to the range the speed picker offers (0.75x..2x).
@@ -335,7 +336,8 @@ class BackupManager(
             "ai_text_budget_chars",
             "conversation_tts_enabled",
             "conversation_tts_rate",
-            "conversation_tts_voice"
+            "conversation_tts_voice",
+            "conversation_instant_send"
         )
 
         /**
