@@ -23,6 +23,7 @@ import kotlinx.coroutines.test.*
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -109,6 +110,30 @@ class RecordingViewModelTest {
         assertEquals(answer, viewModel.libraryAnswer.value)
         assertEquals(recordings, viewModel.librarySources.value)
         assertEquals(question, viewModel.libraryQuestion.value)
+    }
+
+    @Test
+    fun askLibraryQuestion_includesGraphSiblingsInSourcesAndPrompt() = runTest {
+        val question = "What about AI?"
+        val answer = "Some answer"
+        val seed = Recording("seed.mp3", title = "Seed Note", summary = "Summary", shortSummary = "Seed short summary", topics = listOf("AI"))
+        val sibling = Recording("sibling.mp3", title = "Sibling Note", summary = "Summary", shortSummary = "Sibling short summary", topics = listOf("ai"))
+        val unrelated = Recording("unrelated.mp3", title = "Unrelated Note", summary = "Summary", shortSummary = "Unrelated short summary", topics = listOf("Cooking"))
+        val all = listOf(seed, sibling, unrelated)
+
+        every { embedder.isReady } returns true
+        coEvery { embedder.embed(any()) } returns floatArrayOf(0.1f, 0.2f)
+        every { repo.allRecordings } returns flowOf(all)
+        coEvery { repo.semanticSearch(any(), any(), any()) } returns listOf(seed)
+        coEvery { llm.generate(any(), any<String>()) } returns answer
+
+        viewModel.askLibraryQuestion(question)
+        advanceUntilIdle()
+
+        assertEquals(listOf(seed, sibling), viewModel.librarySources.value)
+        val promptSlot = slot<String>()
+        coVerify { llm.generate(capture(promptSlot), question) }
+        assertTrue(promptSlot.captured.contains("Sibling Note"))
     }
 
     @Test
