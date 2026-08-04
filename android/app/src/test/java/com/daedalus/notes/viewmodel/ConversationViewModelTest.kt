@@ -8,10 +8,14 @@ import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.Role
 import com.daedalus.notes.ai.aiTextBudget
 import com.daedalus.notes.ai.buildGemmaPrompt
+import com.daedalus.notes.data.RecordingRepository
+import com.daedalus.notes.data.model.Recording
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
+import io.mockk.slot
 import io.mockk.unmockkStatic
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +46,7 @@ class ConversationViewModelTest {
 
     private lateinit var application: Application
     private val llm = mockk<LocalLlmService>(relaxed = true)
+    private val repo = mockk<RecordingRepository>(relaxed = true)
     private val testDispatcher = StandardTestDispatcher()
 
     // Fixed instant so filenames/day comparisons are deterministic across the test run.
@@ -74,6 +79,7 @@ class ConversationViewModelTest {
     private fun newViewModel(contextBudgetChars: Int? = null): ConversationViewModel = ConversationViewModel(
         application = application,
         llm = llm,
+        repo = repo,
         ioDispatcher = testDispatcher,
         clock = { nowMillis },
         contextBudgetChars = contextBudgetChars ?: (aiTextBudget(application) * 0.75).toInt()
@@ -442,5 +448,116 @@ class ConversationViewModelTest {
             "the earlier rolling summary must survive a later summarize failure",
             replySystemPrompts.last().contains("Rolling summary one.")
         )
+    }
+
+    // (P5.4-a) endSession() inserts exactly one Recording whose transcript contains every turn,
+    //     in order, with speaker labels, mirroring local-recording save conventions.
+    @Test
+    fun endSession_insertsOneRecordingWithSpeakerLabeledTranscriptInOrder() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returnsMany listOf(
+            "Sounds interesting, tell me more.",
+            "Great, here's a follow-up idea."
+        )
+        val vm = newViewModel()
+        vm.send("I want to build a note app")
+        advanceUntilIdle()
+        vm.send("It should support voice")
+        advanceUntilIdle()
+
+        val saved = slot<Recording>()
+        coEvery { repo.save(capture(saved)) } returns Unit
+
+        vm.endSession()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repo.save(any()) }
+        val recording = saved.captured
+        assertTrue(recording.isLocal)
+        val transcript = recording.transcript
+        val order = listOf("Me: I want to build a note app", "Agent: Sounds interesting, tell me more.",
+            "Me: It should support voice", "Agent: Great, here's a follow-up idea.")
+        var lastIndex = -1
+        order.forEach { marker ->
+            val idx = transcript.indexOf(marker, lastIndex + 1)
+            assertTrue("expected \"$marker\" after index $lastIndex in:\n$transcript", idx > lastIndex)
+            lastIndex = idx
+        }
+    }
+
+    // (P5.4-b) endSession() triggers the same post-save analysis pipeline a transcribed local
+    //     recording gets: the LLM is invoked (mocked seam) and the resulting analysis is saved.
+    @Test
+    fun endSession_triggersAnalysisPipeline() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Let's plan the launch")
+        advanceUntilIdle()
+
+        coEvery { llm.generate(any(), any<String>()) } returns
+            """{"title":"Launch plan","shortSummary":"short","fullSummary":"full","mindMap":"","topics":["launch"]}"""
+
+        vm.endSession()
+        advanceUntilIdle()
+
+        coVerify(atLeast = 1) { llm.generate(any(), any<String>()) }
+        coVerify(exactly = 1) { repo.updateSummary(any(), any(), any(), any(), any(), any()) }
+    }
+
+    // (P5.4-c) The session file is renamed to its ended form, stays on disk, and its content is
+    //     unaffected (verbatim transcript guarantee).
+    @Test
+    fun endSession_rendersSessionFileEndedAndKeepsContent() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Original content to preserve")
+        advanceUntilIdle()
+        val originalFile = vm.sessionFile
+        val originalContent = originalFile.readText()
+
+        vm.endSession()
+        advanceUntilIdle()
+
+        assertFalse("original session file should be renamed away", originalFile.exists())
+        val dir = conversationsDir()
+        val endedFiles = dir.listFiles()?.filter { it.name.contains("ended") } ?: emptyList()
+        assertEquals(1, endedFiles.size)
+        assertEquals(originalContent, endedFiles[0].readText())
+    }
+
+    // (P5.4-d) After endSession, a new ViewModel does NOT resume the ended session — it starts a
+    //     fresh one.
+    @Test
+    fun endSession_endedSessionIsNeverResumedByNewViewModel() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("This session should end")
+        advanceUntilIdle()
+
+        vm.endSession()
+        advanceUntilIdle()
+
+        val reloaded = newViewModel()
+        advanceUntilIdle()
+
+        assertTrue(reloaded.messages.value.isEmpty())
+        assertTrue(reloaded.sessionFile.absolutePath != vm.sessionFile.absolutePath)
+    }
+
+    // (P5.4-e) An empty session (no messages) makes endSession() a no-op: no Recording inserted,
+    //     no file changes.
+    @Test
+    fun endSession_emptySession_isNoOp() = runTest {
+        val vm = newViewModel()
+        advanceUntilIdle()
+        val fileBefore = vm.sessionFile
+        val existedBefore = fileBefore.exists()
+
+        vm.endSession()
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { repo.save(any()) }
+        assertEquals(existedBefore, fileBefore.exists())
+        assertEquals(fileBefore.absolutePath, vm.sessionFile.absolutePath)
+        assertTrue(vm.messages.value.isEmpty())
     }
 }
