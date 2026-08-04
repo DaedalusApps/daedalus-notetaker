@@ -9,26 +9,28 @@ import org.junit.Test
  * [AndroidSpeechService] needs a real [android.speech.tts.TextToSpeech] to unit-test speak()/
  * stop() end-to-end, which isn't reliably driveable under Robolectric — so the audio-focus
  * coordination (#57) is extracted into [SpeechFocusCoordinator] and tested at that seam instead.
+ *
+ * Focus is requested on speaking=true (engine onStart), not before speak() is called — see
+ * [SpeechFocusCoordinator] kdoc for why (#67).
  */
 class SpeechFocusCoordinatorTest {
 
     @Test
-    fun beforeSpeak_requestsFocus() {
+    fun onSpeakingChanged_true_requestsFocus() {
         val focusManager = mockk<AudioFocusManager>(relaxed = true)
         val coordinator = SpeechFocusCoordinator(focusManager)
 
-        coordinator.beforeSpeak()
+        coordinator.onSpeakingChanged(true)
 
         verify(exactly = 1) { focusManager.request() }
     }
 
     @Test
-    fun onSpeakingChanged_falseAfterNaturalCompletion_abandonsFocus() {
+    fun onSpeakingChanged_falseAfterTrue_abandonsFocus() {
         // Simulates AndroidSpeechService's onStart -> onDone utterance-progress path.
         val focusManager = mockk<AudioFocusManager>(relaxed = true)
         val coordinator = SpeechFocusCoordinator(focusManager)
 
-        coordinator.beforeSpeak()
         coordinator.onSpeakingChanged(true)
         coordinator.onSpeakingChanged(false)
 
@@ -39,17 +41,15 @@ class SpeechFocusCoordinatorTest {
     }
 
     @Test
-    fun onSpeakingChanged_falseWithoutPriorTrue_stillAbandonsFocus() {
-        // Covers both AndroidSpeechService.stop() — setSpeaking(false) is forced even though the
-        // flushed utterance's progress-listener callback may never arrive — and its deprecated
-        // onError path; the coordinator sees the same single not-speaking signal either way.
+    fun onSpeakingChanged_falseWithoutPriorTrue_doesNotAbandonFocus() {
+        // No focus was ever requested (e.g. speak() never reached onStart) — abandon must not be
+        // called for focus never held.
         val focusManager = mockk<AudioFocusManager>(relaxed = true)
         val coordinator = SpeechFocusCoordinator(focusManager)
 
-        coordinator.beforeSpeak()
         coordinator.onSpeakingChanged(false)
 
-        verify(exactly = 1) { focusManager.abandon() }
+        verify(exactly = 0) { focusManager.abandon() }
     }
 
     @Test
@@ -59,7 +59,7 @@ class SpeechFocusCoordinatorTest {
         val focusManager = mockk<AudioFocusManager>(relaxed = true)
         val coordinator = SpeechFocusCoordinator(focusManager)
 
-        coordinator.beforeSpeak()
+        coordinator.onSpeakingChanged(true)
         coordinator.onSpeakingChanged(false)
         coordinator.onSpeakingChanged(false)
 
@@ -67,30 +67,18 @@ class SpeechFocusCoordinatorTest {
     }
 
     @Test
-    fun secondSpeakAfterCompletedReply_requestsAndAbandonsFocusAgain() {
-        // Back-to-back replies: focus released by the first must be re-acquired for the second
-        // and released again, rather than the coordinator latching after one cycle.
+    fun secondSpeakingCycle_requestsAndAbandonsFocusAgain() {
+        // Back-to-back replies: focus released by the first cycle must be re-acquired for the
+        // second and released again, rather than the coordinator latching after one cycle.
         val focusManager = mockk<AudioFocusManager>(relaxed = true)
         val coordinator = SpeechFocusCoordinator(focusManager)
 
-        coordinator.beforeSpeak()
+        coordinator.onSpeakingChanged(true)
         coordinator.onSpeakingChanged(false)
-        coordinator.beforeSpeak()
+        coordinator.onSpeakingChanged(true)
         coordinator.onSpeakingChanged(false)
 
         verify(exactly = 2) { focusManager.request() }
         verify(exactly = 2) { focusManager.abandon() }
-    }
-
-    @Test
-    fun onSpeakingChanged_falseWithoutBeforeSpeak_doesNotAbandonFocus() {
-        // No focus was ever requested (e.g. isAvailable was false so speak() returned early) —
-        // abandon must not be called for focus never held.
-        val focusManager = mockk<AudioFocusManager>(relaxed = true)
-        val coordinator = SpeechFocusCoordinator(focusManager)
-
-        coordinator.onSpeakingChanged(false)
-
-        verify(exactly = 0) { focusManager.abandon() }
     }
 }
