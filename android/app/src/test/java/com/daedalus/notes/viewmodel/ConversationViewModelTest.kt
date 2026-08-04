@@ -540,7 +540,7 @@ class ConversationViewModelTest {
         advanceUntilIdle()
 
         assertTrue(reloaded.messages.value.isEmpty())
-        assertTrue(reloaded.sessionFile.absolutePath != vm.sessionFile.absolutePath)
+        assertFalse(reloaded.sessionFile.name.contains("ended"))
     }
 
     // (P5.4-e) An empty session (no messages) makes endSession() a no-op: no Recording inserted,

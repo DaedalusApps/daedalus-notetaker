@@ -12,18 +12,12 @@ import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.daedalus.notes.ai.activePrompt
-import com.daedalus.notes.ai.aiTextBudget
+import com.daedalus.notes.ai.analyzeTranscript
 import com.daedalus.notes.ai.buildLibraryQuestionPrompt
 import com.daedalus.notes.ai.buildNoteQuestionPrompt
-import com.daedalus.notes.ai.CHUNK_SUMMARY_PROMPT
-import com.daedalus.notes.ai.chunkTranscript
 import com.daedalus.notes.ai.EmbeddingService
-import com.daedalus.notes.ai.extractActionItems
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.MarkdownExporter
-import com.daedalus.notes.ai.SmartAnalysisParser
-import com.daedalus.notes.ai.stripCodeFences
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.isWhisperReady
 import com.daedalus.notes.ai.isTranscriptReadable
@@ -559,50 +553,10 @@ class RecordingViewModel @JvmOverloads constructor(
                     return
                 }
 
-                // Step 2: Summarize + mind map with Gemma (chunked for long transcripts)
-                llm.ensureLoaded()
-                val chunks = chunkTranscript(transcript, aiTextBudget(getApplication()))
-                val rawResponse = if (chunks.size == 1) {
-                    _syncProgress.value = "Analyzing with Gemma…"
-                    llm.generate(activePrompt(getApplication()), chunks[0])
-                } else {
-                    val chunkSummaries = chunks.mapIndexed { i, chunk ->
-                        _syncProgress.value = "Analyzing part ${i + 1} of ${chunks.size}…"
-                        llm.generate(CHUNK_SUMMARY_PROMPT, chunk)
-                    }
-                    _syncProgress.value = "Synthesizing results…"
-                    llm.generate(activePrompt(getApplication()), chunkSummaries.joinToString("\n\n"))
-                }
-                val cleanJson = stripCodeFences(rawResponse)
-                val analysis = SmartAnalysisParser.parse(cleanJson)
-
-                val fullSummaryFinal = if ("## Action Items" !in analysis.fullSummary) {
-                    val items = extractActionItems(transcript)
-                    if (items.isNotEmpty()) {
-                        analysis.fullSummary.trimEnd() + "\n\n## Action Items\n" +
-                            items.joinToString("\n") { "- [ ] $it" }
-                    } else {
-                        analysis.fullSummary
-                    }
-                } else {
-                    analysis.fullSummary
-                }
-
-                repo.updateSummary(
-                    filename = filename,
-                    summary = fullSummaryFinal,
-                    mindMap = analysis.mindMap,
-                    title = analysis.title,
-                    shortSummary = analysis.shortSummary,
-                    topics = analysis.topics
-                )
-
-                // Generate semantic embedding for library-wide Q&A (silent if model not ready)
-                if (embedder.isReady) {
-                    embedder.ensureLoaded()
-                    val embText = "${analysis.shortSummary} ${analysis.topics.joinToString(" ")}"
-                    embedder.embed(embText)?.let { repo.updateEmbedding(filename, it) }
-                }
+                // Step 2: Summarize + mind map with Gemma, embed for library Q&A (shared with
+                // ConversationViewModel.endSession, which already has a transcript in hand).
+                _syncProgress.value = "Analyzing with Gemma…"
+                analyzeTranscript(getApplication(), llm, embedder, repo, filename, transcript)
 
                 _currentNote.value = repo.get(filename)
             } catch (e: Exception) {
