@@ -9,6 +9,7 @@ import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.Role
 import com.daedalus.notes.ai.SpeechService
 import com.daedalus.notes.ai.TranscriptionService
+import com.daedalus.notes.ai.VoiceInfo
 import com.daedalus.notes.ai.WHISPER_DECODER_FILE
 import com.daedalus.notes.ai.WHISPER_ENCODER_FILE
 import com.daedalus.notes.ai.WHISPER_TOKENS_FILE
@@ -914,6 +915,111 @@ class ConversationViewModelTest {
     }
 
     // (P8.1) Enabled-state predicate backing the "New conversation" menu item.
+    // (P8.2-a) setTtsRate persists, applies to the engine, and previews when TTS is enabled.
+    @Test
+    fun setTtsRate_ttsEnabled_persistsAppliesToEngineAndPreviews() = runTest {
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+
+        vm.setTtsRate(1.5f)
+
+        assertEquals(1.5f, vm.ttsRate.value)
+        assertEquals(1.5f, prefs().getFloat(CONVERSATION_TTS_RATE_KEY, -1f))
+        verify(exactly = 1) { tts.setSpeechRate(1.5f) }
+        verify(exactly = 1) { tts.preview(any()) }
+    }
+
+    // (P8.2-a) setTtsVoice persists, applies to the engine, and previews when TTS is enabled.
+    @Test
+    fun setTtsVoice_ttsEnabled_persistsAppliesToEngineAndPreviews() = runTest {
+        every { tts.setVoice("Voice-1") } returns true
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+
+        vm.setTtsVoice("Voice-1")
+
+        assertEquals("Voice-1", vm.ttsVoiceId.value)
+        assertEquals("Voice-1", prefs().getString(CONVERSATION_TTS_VOICE_KEY, null))
+        verify(exactly = 1) { tts.setVoice("Voice-1") }
+        verify(exactly = 1) { tts.preview(any()) }
+    }
+
+    // (P8.2-b) With TTS disabled and the engine never built, setTtsRate/setTtsVoice must persist
+    //     only — never constructing the speech engine (mirrors ttsNeverEnabled_neverBuildsSpeechEngine).
+    @Test
+    fun setTtsRateAndVoice_ttsDisabledEngineNeverBuilt_persistOnlyDoNotConstructEngine() = runTest {
+        val vm = newViewModel()
+
+        vm.setTtsRate(1.25f)
+        vm.setTtsVoice("some-voice")
+
+        assertEquals(1.25f, vm.ttsRate.value)
+        assertEquals("some-voice", vm.ttsVoiceId.value)
+        assertEquals(1.25f, prefs().getFloat(CONVERSATION_TTS_RATE_KEY, -1f))
+        assertEquals("some-voice", prefs().getString(CONVERSATION_TTS_VOICE_KEY, null))
+        assertEquals(0, ttsConstructions)
+    }
+
+    // (P8.2-c) Persisted rate+voice are applied to the engine when it is first constructed
+    //     (the lazy warm path).
+    @Test
+    fun ttsEngineWarm_appliesPersistedRateAndVoiceOnFirstBuild() = runTest {
+        prefs().edit()
+            .putFloat(CONVERSATION_TTS_RATE_KEY, 1.75f)
+            .putString(CONVERSATION_TTS_VOICE_KEY, "Voice-X")
+            .commit()
+        every { tts.setVoice("Voice-X") } returns true
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+
+        vm.send("Hello")
+        advanceUntilIdle()
+
+        verify(exactly = 1) { tts.setSpeechRate(1.75f) }
+        verify(exactly = 1) { tts.setVoice("Voice-X") }
+        assertEquals(1, ttsConstructions)
+    }
+
+    // (P8.2-d) An unknown persisted voice id: setVoice() returns false, and the ViewModel must not
+    //     crash and must NOT clear the pref — it silently falls back to the system default.
+    @Test
+    fun ttsEngineWarm_unknownPersistedVoiceId_setVoiceFalse_noCrashPrefRetained() = runTest {
+        prefs().edit().putString(CONVERSATION_TTS_VOICE_KEY, "Ghost-Voice").commit()
+        every { tts.setVoice("Ghost-Voice") } returns false
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "reply"
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+
+        vm.send("Hello")
+        advanceUntilIdle()
+
+        verify(exactly = 1) { tts.setVoice("Ghost-Voice") }
+        assertEquals("Ghost-Voice", prefs().getString(CONVERSATION_TTS_VOICE_KEY, null))
+        assertNull(vm.error.value)
+    }
+
+    // (P8.2) availableVoices() passes through to the engine.
+    @Test
+    fun availableVoices_returnsEngineVoices() = runTest {
+        every { tts.availableVoices() } returns listOf(VoiceInfo("a", "Voice 1"), VoiceInfo("b", "Voice 2"))
+        val vm = newViewModel()
+
+        val voices = vm.availableVoices()
+
+        assertEquals(2, voices.size)
+        assertEquals("Voice 1", voices[0].label)
+    }
+
+    // (P8.2) Defaults: rate 1.0f, voice "" (system default), before any preference is set.
+    @Test
+    fun ttsRateAndVoice_defaults() = runTest {
+        val vm = newViewModel()
+
+        assertEquals(1.0f, vm.ttsRate.value)
+        assertEquals("", vm.ttsVoiceId.value)
+    }
+
     @Test
     fun canStartNewSession_falseWhenNoMessages() {
         assertFalse(canStartNewSession(emptyList(), isGenerating = false))
