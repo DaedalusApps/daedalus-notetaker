@@ -332,7 +332,11 @@ class ConversationViewModel @JvmOverloads constructor(
                         stopSpeaking()
                         _isGenerating.value = true
                         _error.value = null
-                        performSend(text.trim())
+                        // Launched, not awaited: transcription is over the moment the claim is
+                        // made, so this coroutine's finally must run now — otherwise the mic
+                        // button would keep spinning "transcribing" and the temp audio file
+                        // would stay on disk for the whole generation.
+                        viewModelScope.launch { performSend(text.trim()) }
                     }
                 } else {
                     _voiceTranscript.value = text

@@ -1093,6 +1093,31 @@ class ConversationViewModelTest {
         assertTrue(content.contains("Great idea!"))
     }
 
+    // (P8.3-b) Instant send ON: transcription is finished once the send starts, so isTranscribing
+    //     must be released while the reply is still generating — otherwise the mic button spins
+    //     "transcribing" for the whole generation and the temp audio file lingers on disk.
+    @Test
+    fun voiceInput_instantSendOn_clearsTranscribingWhileGenerating() = runTest {
+        markWhisperReady()
+        val gate = CompletableDeferred<String>()
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } coAnswers { gate.await() }
+        every { audioRecorder.start(any(), any()) } returns Unit
+        coEvery { transcriptionService.transcribe(any()) } returns "still thinking"
+        val vm = newViewModel()
+        vm.setInstantSend(true)
+
+        vm.startVoiceInput()
+        vm.stopVoiceInput()
+        advanceUntilIdle()
+
+        assertTrue(vm.isGenerating.value)
+        assertFalse(vm.isTranscribing.value)
+
+        gate.complete("done")
+        advanceUntilIdle()
+        assertFalse(vm.isGenerating.value)
+    }
+
     // (P8.3-c) Instant send ON but the transcription is blank: unchanged "Didn't catch that"
     //     error, nothing sent, regardless of the toggle.
     @Test

@@ -217,10 +217,9 @@ fun ConversationScreen(
                         DropdownMenuItem(
                             text = { Text("Instant send") },
                             trailingIcon = {
-                                Switch(
-                                    checked = instantSend,
-                                    onCheckedChange = { conversationViewModel.setInstantSend(it) }
-                                )
+                                // Null so the whole row is the single tap target: tapping the
+                                // switch itself otherwise toggles without closing the menu.
+                                Switch(checked = instantSend, onCheckedChange = null)
                             },
                             onClick = {
                                 menuExpanded = false
