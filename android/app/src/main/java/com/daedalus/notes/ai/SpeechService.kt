@@ -151,6 +151,9 @@ class AndroidSpeechService(
     override var isAvailable: Boolean = false
         private set
 
+    // Volatile: written on the caller's thread (init/shutdown) but read from the engine's
+    // utterance-progress callback thread by onError's voice-revert path.
+    @Volatile
     private var tts: TextToSpeech? = null
 
     private val focusCoordinator = SpeechFocusCoordinator(focusManager)
@@ -257,7 +260,9 @@ class AndroidSpeechService(
         }
         val resolved = engine.voices?.firstOrNull { it.name == id }
         if (resolved == null || !resolved.isUsable()) {
-            engine.voice = defaultVoice
+            // ?.let, not a bare assignment: TextToSpeech.setVoice(null) dereferences its argument
+            // and throws, and defaultVoice is null when the engine reported no voice at init.
+            defaultVoice?.let { engine.voice = it }
             return false
         }
         engine.voice = resolved
