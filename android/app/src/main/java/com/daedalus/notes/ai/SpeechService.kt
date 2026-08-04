@@ -42,13 +42,10 @@ interface SpeechService {
     /** Speaks [text] regardless of any caller-side conversation state — used for previews. */
     fun preview(text: String)
 
-    /** True while an utterance is currently being spoken. */
-    val isSpeaking: Boolean
-
     /**
-     * Registers a callback invoked whenever [isSpeaking] changes. May be called from a non-main
-     * thread (TextToSpeech's UtteranceProgressListener callbacks do not arrive on the main
-     * thread) — callers must not assume main-thread delivery.
+     * Registers a callback invoked with true when an utterance starts being spoken and false when
+     * it stops. May be called from a non-main thread (TextToSpeech's UtteranceProgressListener
+     * callbacks do not arrive on the main thread) — callers must not assume main-thread delivery.
      */
     fun setOnSpeakingChangedListener(listener: (Boolean) -> Unit)
 }
@@ -94,7 +91,7 @@ class AndroidSpeechService(context: Context) : SpeechService {
             pendingVoiceId?.let { applyVoice(it) }
         }
         // Callbacks below arrive on a non-main thread (TextToSpeech's internal worker), which is
-        // why isSpeaking/setOnSpeakingChangedListener are documented as not main-thread-bound.
+        // why setOnSpeakingChangedListener is documented as not main-thread-bound.
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = setSpeaking(true)
             override fun onDone(utteranceId: String?) = setSpeaking(false)
@@ -104,7 +101,6 @@ class AndroidSpeechService(context: Context) : SpeechService {
     }
 
     private fun setSpeaking(speaking: Boolean) {
-        isSpeaking = speaking
         speakingChangedListener?.invoke(speaking)
     }
 
@@ -150,10 +146,6 @@ class AndroidSpeechService(context: Context) : SpeechService {
     override fun preview(text: String) = speak(text)
 
     @Volatile
-    override var isSpeaking: Boolean = false
-        private set
-
-    @Volatile
     private var speakingChangedListener: ((Boolean) -> Unit)? = null
 
     override fun setOnSpeakingChangedListener(listener: (Boolean) -> Unit) {
@@ -163,7 +155,7 @@ class AndroidSpeechService(context: Context) : SpeechService {
     override fun stop() {
         tts?.stop()
         // stop() flushes the utterance; onDone/onError delivery after a flush isn't guaranteed,
-        // so isSpeaking is cleared here rather than waiting on the progress listener.
+        // so the not-speaking signal is emitted here rather than waiting on the progress listener.
         setSpeaking(false)
     }
 
