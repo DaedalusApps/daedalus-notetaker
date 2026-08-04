@@ -25,6 +25,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -622,7 +623,9 @@ class ConversationViewModel @JvmOverloads constructor(
      * cancel it (#60). A cancellation here is treated exactly like the existing analysis-FAILURE
      * path (#25's fail-safe): the session stays live and resumable — no rename, no message clear,
      * no rotation — and the Recording row saved before cancellation may remain (a harmless upsert;
-     * retrying End overwrites it). Unlike a failure, no error is surfaced: cancellation isn't a
+     * retrying End overwrites it). The one exception is a Stop that arrives once the rotation has
+     * begun: that tail is [NonCancellable], so the End simply completes. Unlike a failure, no
+     * error is surfaced: cancellation isn't a
      * failure (mirrors [performSend]'s `CancellationException` handling), while a real
      * [TimeoutCancellationException] from the analysis LLM call still surfaces as an error (#45).
      */
@@ -654,14 +657,20 @@ class ConversationViewModel @JvmOverloads constructor(
                 // Renamed only once the work above succeeded, so a failure leaves the session
                 // intact and resumable; retrying End re-saves under the same filename (the
                 // primary key), which updates that row rather than adding a second one.
-                val ended = withContext(ioDispatcher) {
-                    val endedFile = File(sessionFile.parentFile, "${sessionFile.nameWithoutExtension}.ended.md")
-                    sessionFile.renameTo(endedFile)
-                }
-                if (!ended) throw IOException("Could not mark ${sessionFile.name} as ended")
+                // NonCancellable because the rotation spans suspension points: a Stop landing
+                // between them would leave the session half-ended — renamed on disk, yet still
+                // live in memory pointing at a path that no longer exists, so the next End could
+                // never rename it again (#60). Either the whole rotation happens or none of it.
+                withContext(NonCancellable) {
+                    val ended = withContext(ioDispatcher) {
+                        val endedFile = File(sessionFile.parentFile, "${sessionFile.nameWithoutExtension}.ended.md")
+                        sessionFile.renameTo(endedFile)
+                    }
+                    if (!ended) throw IOException("Could not mark ${sessionFile.name} as ended")
 
-                sessionFile = withContext(ioDispatcher) { newSessionFile(conversationsDir(getApplication())) }
-                _messages.value = emptyList()
+                    sessionFile = withContext(ioDispatcher) { newSessionFile(conversationsDir(getApplication())) }
+                    _messages.value = emptyList()
+                }
             } catch (e: TimeoutCancellationException) {
                 // A real failure from the analysis LLM call's own timeout, not a stopGenerating()
                 // cancellation — must be caught before the CancellationException branch below so
