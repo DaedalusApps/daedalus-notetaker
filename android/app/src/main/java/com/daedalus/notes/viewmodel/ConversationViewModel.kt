@@ -1,14 +1,17 @@
 package com.daedalus.notes.viewmodel
 
 import android.app.Application
+import android.content.Context
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.daedalus.notes.ai.AndroidSpeechService
 import com.daedalus.notes.ai.ChatTurn
 import com.daedalus.notes.ai.EmbeddingService
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.OFFLINE_GUARDRAIL
 import com.daedalus.notes.ai.Role
+import com.daedalus.notes.ai.SpeechService
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.aiTextBudget
 import com.daedalus.notes.ai.analyzeTranscript
@@ -60,6 +63,9 @@ private const val TAIL_MESSAGE_COUNT = 4
 // context past the budget the trip-check assumes.
 private const val SUMMARY_BUDGET_FRACTION = 0.25
 
+/** SharedPreferences key for whether spoken replies (Android TTS) are on in conversation mode. */
+const val CONVERSATION_TTS_ENABLED_KEY = "conversation_tts_enabled"
+
 private val SESSION_FILENAME_REGEX = Regex("""conv_(\d{14})\.md""")
 private val TURN_HEADER_REGEX = Regex("""^\*\*(Me|Agent)\*\* \((\d{2}):(\d{2})\):$""")
 
@@ -72,7 +78,8 @@ class ConversationViewModel @JvmOverloads constructor(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val contextBudgetChars: Int = (aiTextBudget(application) * CONVERSATION_CONTEXT_FRACTION).toInt(),
     private val audioRecorderProvider: () -> AudioRecorder = { AudioRecorder(application) },
-    private val transcriptionServiceProvider: () -> TranscriptionService = { TranscriptionService(application) }
+    private val transcriptionServiceProvider: () -> TranscriptionService = { TranscriptionService(application) },
+    private val ttsProvider: () -> SpeechService = { AndroidSpeechService(application) }
 ) : AndroidViewModel(application) {
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
@@ -101,6 +108,41 @@ class ConversationViewModel @JvmOverloads constructor(
 
     fun clearVoiceTranscript() { _voiceTranscript.value = null }
 
+    // Spoken replies via Android TTS (P6.2). Lazy so construction doesn't bind the TextToSpeech
+    // engine for users who never turn spoken replies on — see stopSpeaking().
+    private val ttsDelegate = lazy { ttsProvider() }
+    private val tts by ttsDelegate
+
+    private val _ttsEnabled = MutableStateFlow(
+        application.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+            .getBoolean(CONVERSATION_TTS_ENABLED_KEY, false)
+    )
+    val ttsEnabled: StateFlow<Boolean> = _ttsEnabled
+
+    /**
+     * Stops any in-progress speech, e.g. when a new turn starts or the screen is dismissed.
+     *
+     * Also the single place the engine gets built: it is touched only when spoken replies are on
+     * (or were on earlier this session), so the toggle staying off means the engine is never
+     * bound. Building it here rather than at speak() time matters — TextToSpeech initializes
+     * asynchronously and reports unavailable until it finishes, so an engine first touched when a
+     * reply is ready would silently drop that reply.
+     */
+    fun stopSpeaking() {
+        if (_ttsEnabled.value || ttsDelegate.isInitialized()) tts.stop()
+    }
+
+    fun setTtsEnabled(enabled: Boolean) {
+        _ttsEnabled.value = enabled
+        // Muting mid-reply must silence the reply already being spoken.
+        if (!enabled) stopSpeaking()
+        getApplication<Application>()
+            .getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(CONVERSATION_TTS_ENABLED_KEY, enabled)
+            .apply()
+    }
+
     // Rolling summary of messages already folded out of the live context, and the index into
     // _messages up to which that summary applies. The session FILE always has every turn
     // verbatim (see appendToFile) — only what gets sent to the LLM is capped.
@@ -127,6 +169,7 @@ class ConversationViewModel @JvmOverloads constructor(
     /** Starts recording a voice turn to a temp file in cacheDir. No-op while busy. */
     fun startVoiceInput() {
         if (_isRecordingVoice.value || _isTranscribing.value || _isGenerating.value) return
+        stopSpeaking()
         val application = getApplication<Application>()
         if (!isWhisperReady(application)) {
             _error.value = "Voice input needs the transcription model — download it in Settings."
@@ -197,6 +240,7 @@ class ConversationViewModel @JvmOverloads constructor(
     /** Rotates to a fresh session file (a new "meeting"); the previous transcript stays on disk. */
     fun startNewSession() {
         if (_isGenerating.value) return
+        stopSpeaking()
         viewModelScope.launch {
             loadJob.join()
             sessionFile = withContext(ioDispatcher) { newSessionFile(conversationsDir(getApplication())) }
@@ -218,6 +262,7 @@ class ConversationViewModel @JvmOverloads constructor(
      */
     fun endSession() {
         if (_isGenerating.value) return
+        stopSpeaking()
         // Claimed synchronously on the caller (main) thread so a double-tap — or a send() landing
         // in the same frame — cannot slip past the guard before the coroutine body runs.
         _isGenerating.value = true
@@ -270,6 +315,7 @@ class ConversationViewModel @JvmOverloads constructor(
     fun send(text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty() || _isGenerating.value) return
+        stopSpeaking()
         // Claimed synchronously on the caller (main) thread so a rapid double-send cannot slip
         // through before the coroutine body runs.
         _isGenerating.value = true
@@ -287,6 +333,7 @@ class ConversationViewModel @JvmOverloads constructor(
                 val modelMessage = ChatMessage(Role.MODEL, reply, clock())
                 _messages.value = _messages.value + modelMessage
                 appendToFile(modelMessage)
+                if (_ttsEnabled.value && tts.isAvailable) tts.speak(reply)
             } catch (e: Exception) {
                 Log.e("ConversationViewModel", "Generation failed", e)
                 _error.value = e.message ?: "Failed to generate a response"
@@ -460,5 +507,6 @@ class ConversationViewModel @JvmOverloads constructor(
         super.onCleared()
         cancelVoiceInput()
         embedder.close()
+        if (ttsDelegate.isInitialized()) tts.shutdown()
     }
 }
