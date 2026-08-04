@@ -116,9 +116,10 @@ class RecordingViewModelTest {
     fun askLibraryQuestion_includesGraphSiblingsInSourcesAndPrompt() = runTest {
         val question = "What about AI?"
         val answer = "Some answer"
-        val seed = Recording("seed.mp3", title = "Seed Note", summary = "Summary", shortSummary = "Seed short summary", topics = listOf("AI"))
-        val sibling = Recording("sibling.mp3", title = "Sibling Note", summary = "Summary", shortSummary = "Sibling short summary", topics = listOf("ai"))
-        val unrelated = Recording("unrelated.mp3", title = "Unrelated Note", summary = "Summary", shortSummary = "Unrelated short summary", topics = listOf("Cooking"))
+        val embedding = floatArrayOf(0.1f, 0.2f)
+        val seed = Recording("seed.mp3", title = "Seed Note", summary = "Summary", shortSummary = "Seed short summary", topics = listOf("AI"), embedding = embedding)
+        val sibling = Recording("sibling.mp3", title = "Sibling Note", summary = "Summary", shortSummary = "Sibling short summary", topics = listOf("ai"), embedding = embedding)
+        val unrelated = Recording("unrelated.mp3", title = "Unrelated Note", summary = "Summary", shortSummary = "Unrelated short summary", topics = listOf("Cooking"), embedding = embedding)
         val all = listOf(seed, sibling, unrelated)
 
         every { embedder.isReady } returns true
