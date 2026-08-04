@@ -5,10 +5,15 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.daedalus.notes.ai.ChatTurn
+import com.daedalus.notes.ai.EmbeddingService
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.OFFLINE_GUARDRAIL
 import com.daedalus.notes.ai.Role
 import com.daedalus.notes.ai.aiTextBudget
+import com.daedalus.notes.ai.analyzeTranscript
+import com.daedalus.notes.data.RecordingRepository
+import com.daedalus.notes.data.db.AppDatabase
+import com.daedalus.notes.data.model.Recording
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -57,6 +63,8 @@ private val TURN_HEADER_REGEX = Regex("""^\*\*(Me|Agent)\*\* \((\d{2}):(\d{2})\)
 class ConversationViewModel @JvmOverloads constructor(
     application: Application,
     private val llm: LocalLlmService = LocalLlmService.getInstance(application),
+    private val repo: RecordingRepository = RecordingRepository(AppDatabase.getInstance(application).recordingDao()),
+    private val embedder: EmbeddingService = EmbeddingService(application),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val contextBudgetChars: Int = (aiTextBudget(application) * CONVERSATION_CONTEXT_FRACTION).toInt()
@@ -104,6 +112,68 @@ class ConversationViewModel @JvmOverloads constructor(
             _error.value = null
         }
     }
+
+    /**
+     * Ends the current "meeting with the agent": converts the transcript into a [Recording]
+     * through the normal save path, runs it through the same analysis pipeline a transcribed
+     * local recording gets, marks the session file as ended so it is never auto-resumed, then
+     * rotates to a fresh session. A no-op if the session has no messages yet.
+     *
+     * Analysis runs unconditionally, unlike a local audio recording, which only auto-analyzes when
+     * the `auto_process` pref is on: that pref gates work kicked off automatically by capture
+     * finishing, whereas tapping End is itself the explicit request for the summarized note (the
+     * equivalent of the library's Analyze button).
+     */
+    fun endSession() {
+        if (_isGenerating.value) return
+        // Claimed synchronously on the caller (main) thread so a double-tap — or a send() landing
+        // in the same frame — cannot slip past the guard before the coroutine body runs.
+        _isGenerating.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                loadJob.join()
+                val currentMessages = _messages.value
+                if (currentMessages.isEmpty()) return@launch
+
+                val filename = sessionFile.name
+                val transcript = buildTranscript(currentMessages)
+                repo.save(
+                    Recording(
+                        filename = filename,
+                        transcript = transcript,
+                        createdAt = clock(),
+                        isLocal = true
+                    )
+                )
+                analyzeTranscript(getApplication(), llm, embedder, repo, filename, transcript)
+
+                // Renamed only once the work above succeeded, so a failure leaves the session
+                // intact and resumable; retrying End re-saves under the same filename (the
+                // primary key), which updates that row rather than adding a second one.
+                val ended = withContext(ioDispatcher) {
+                    val endedFile = File(sessionFile.parentFile, "${sessionFile.nameWithoutExtension}.ended.md")
+                    sessionFile.renameTo(endedFile)
+                }
+                if (!ended) throw IOException("Could not mark ${sessionFile.name} as ended")
+
+                sessionFile = withContext(ioDispatcher) { newSessionFile(conversationsDir(getApplication())) }
+                _messages.value = emptyList()
+            } catch (e: Exception) {
+                Log.e("ConversationViewModel", "endSession failed", e)
+                _error.value = e.message ?: "Failed to end session"
+            } finally {
+                _isGenerating.value = false
+            }
+        }
+    }
+
+    /** Renders messages as a speaker-labeled meeting transcript, e.g. "Me: ..." / "Agent: ...". */
+    private fun buildTranscript(messages: List<ChatMessage>): String =
+        messages.joinToString("\n\n") { message ->
+            val label = if (message.role == Role.USER) "Me" else "Agent"
+            "$label: ${message.text}"
+        }
 
     fun send(text: String) {
         val trimmed = text.trim()
@@ -293,4 +363,9 @@ class ConversationViewModel @JvmOverloads constructor(
 
     private fun conversationsDir(application: Application): File =
         File(application.filesDir, "conversations").also { it.mkdirs() }
+
+    override fun onCleared() {
+        super.onCleared()
+        embedder.close()
+    }
 }

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AddComment
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -87,6 +88,12 @@ fun ConversationScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { conversationViewModel.endSession() },
+                        enabled = messages.isNotEmpty() && !isGenerating
+                    ) {
+                        Icon(Icons.Default.Done, contentDescription = "End session")
+                    }
                     IconButton(
                         onClick = { conversationViewModel.startNewSession() },
                         enabled = messages.isNotEmpty() && !isGenerating
