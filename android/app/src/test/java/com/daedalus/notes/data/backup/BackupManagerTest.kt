@@ -103,6 +103,31 @@ class BackupManagerTest {
         target.close()
     }
 
+    // A corrupt/hand-edited backup must not restore a speech rate the TTS engine silently ignores
+    // (non-numbers parse as NaN; 0 and absurd values are rejected by setSpeechRate).
+    @Test
+    fun v2Import_outOfRangeOrNonNumericTtsRate_isClampedToTheOfferedRange() = runBlocking {
+        val db = newDb()
+        val manager = BackupManager(context, db)
+
+        manager.importFromJson(backupWithTtsRate("fast"))
+        assertEquals(1.0f, prefs().getFloat("conversation_tts_rate", -1f))
+
+        manager.importFromJson(backupWithTtsRate(0.0))
+        assertEquals(0.75f, prefs().getFloat("conversation_tts_rate", -1f))
+
+        manager.importFromJson(backupWithTtsRate(99.0))
+        assertEquals(2.0f, prefs().getFloat("conversation_tts_rate", -1f))
+
+        db.close()
+    }
+
+    private fun backupWithTtsRate(rate: Any): JSONObject = JSONObject().apply {
+        put("backupVersion", 2)
+        put("recordings", JSONArray())
+        put("settings", JSONObject().apply { put("conversation_tts_rate", rate) })
+    }
+
     @Test
     fun v1Import_recordingsOnly_importsWithoutError() = runBlocking {
         val v1 = JSONObject().apply {

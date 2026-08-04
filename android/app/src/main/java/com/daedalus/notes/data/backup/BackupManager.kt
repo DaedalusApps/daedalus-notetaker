@@ -301,7 +301,13 @@ class BackupManager(
         if (settings.has("use_bluetooth_mic")) editor.putBoolean("use_bluetooth_mic", settings.optBoolean("use_bluetooth_mic"))
         if (settings.has("auto_process")) editor.putBoolean("auto_process", settings.optBoolean("auto_process"))
         if (settings.has("conversation_tts_enabled")) editor.putBoolean("conversation_tts_enabled", settings.optBoolean("conversation_tts_enabled"))
-        if (settings.has("conversation_tts_rate")) editor.putFloat("conversation_tts_rate", settings.optDouble("conversation_tts_rate").toFloat())
+        // A hand-edited or corrupt backup can carry a non-number (optDouble -> NaN) or an absurd
+        // rate; both are ignored by TextToSpeech.setSpeechRate, which would leave a restored
+        // install seemingly mute. Clamp to the range the speed picker offers (0.75x..2x).
+        if (settings.has("conversation_tts_rate")) {
+            val rate = settings.optDouble("conversation_tts_rate", 1.0).toFloat()
+            editor.putFloat("conversation_tts_rate", if (rate.isNaN()) 1.0f else rate.coerceIn(0.75f, 2.0f))
+        }
         if (settings.has("conversation_tts_voice")) editor.putString("conversation_tts_voice", settings.optString("conversation_tts_voice"))
         if (settings.has("custom_prompt")) editor.putString("custom_prompt", settings.optString("custom_prompt"))
         if (settings.has("todo_lookback_hours")) editor.putLong("todo_lookback_hours", settings.optLong("todo_lookback_hours"))
