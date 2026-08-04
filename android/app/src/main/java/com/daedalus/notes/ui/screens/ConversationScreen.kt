@@ -83,6 +83,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -176,6 +177,16 @@ fun ConversationScreen(
             conversationViewModel.cancelVoiceInput()
             conversationViewModel.stopSpeaking()
         }
+    }
+
+    // Keep the screen awake while a voice session is active (P9.5), so recording/transcribing/
+    // speaking/generating doesn't get cut short by the screen locking. Released on idle and on
+    // leaving the screen.
+    val voiceActive = isRecordingVoice || isTranscribing || isSpeaking || isGenerating
+    val view = LocalView.current
+    DisposableEffect(voiceActive) {
+        view.keepScreenOn = voiceActive
+        onDispose { view.keepScreenOn = false }
     }
 
     // Auto-listen (P9.4) only fires while this screen is actually on-screen: ON_RESUME/ON_PAUSE

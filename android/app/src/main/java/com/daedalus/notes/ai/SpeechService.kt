@@ -1,6 +1,9 @@
 package com.daedalus.notes.ai
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeech.QUEUE_FLUSH
 import android.speech.tts.UtteranceProgressListener
@@ -13,6 +16,65 @@ private const val UTTERANCE_ID = "daedalus_reply"
 
 /** A selectable voice for the engine's current language, labeled in stable order. */
 data class VoiceInfo(val id: String, val label: String)
+
+/** Thin seam over Android's audio focus APIs so TTS focus requests are unit-testable (#57). */
+interface AudioFocusManager {
+    fun request()
+    fun abandon()
+}
+
+/**
+ * Requests transient "may duck" audio focus while a reply is spoken, so other apps' audio (e.g.
+ * music) lowers in volume instead of being interrupted, and restores it once speech ends.
+ */
+class AndroidAudioFocusManager(context: Context) : AudioFocusManager {
+    private val audioManager =
+        context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    private val focusRequest = AudioFocusRequest
+        .Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+        .setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+        )
+        .build()
+
+    override fun request() {
+        audioManager.requestAudioFocus(focusRequest)
+    }
+
+    override fun abandon() {
+        audioManager.abandonAudioFocusRequest(focusRequest)
+    }
+}
+
+/**
+ * Coordinates audio-focus request/abandon around a speaking session, extracted from
+ * [AndroidSpeechService] so it's unit-testable without a real [TextToSpeech] (#57). Focus is
+ * requested once per [beforeSpeak] and abandoned at most once per request, regardless of how many
+ * times [onSpeakingChanged] reports not-speaking (natural completion, stop(), error, shutdown()
+ * can all fire it).
+ */
+class SpeechFocusCoordinator(private val focusManager: AudioFocusManager) {
+
+    @Volatile
+    private var focusHeld = false
+
+    fun beforeSpeak() {
+        focusManager.request()
+        focusHeld = true
+    }
+
+    fun onSpeakingChanged(speaking: Boolean) {
+        if (speaking) return
+        if (focusHeld) {
+            focusManager.abandon()
+            focusHeld = false
+        }
+    }
+}
 
 /**
  * Thin seam over [TextToSpeech] so callers (e.g. ConversationViewModel) are unit-testable with a
@@ -60,13 +122,18 @@ interface SpeechService {
 }
 
 /** [SpeechService] backed by Android's built-in [TextToSpeech] engine. */
-class AndroidSpeechService(context: Context) : SpeechService {
+class AndroidSpeechService(
+    context: Context,
+    focusManager: AudioFocusManager = AndroidAudioFocusManager(context)
+) : SpeechService {
 
     @Volatile
     override var isAvailable: Boolean = false
         private set
 
     private var tts: TextToSpeech? = null
+
+    private val focusCoordinator = SpeechFocusCoordinator(focusManager)
 
     // The engine's voice as it was at init, so picking "system default" (an empty id) can put it
     // back — without it, deselecting a custom voice would leave the custom voice speaking until
@@ -113,11 +180,13 @@ class AndroidSpeechService(context: Context) : SpeechService {
     }
 
     private fun setSpeaking(speaking: Boolean) {
+        focusCoordinator.onSpeakingChanged(speaking)
         speakingChangedListener?.invoke(speaking)
     }
 
     override fun speak(text: String) {
         if (!isAvailable) return
+        focusCoordinator.beforeSpeak()
         tts?.speak(text, QUEUE_FLUSH, null, UTTERANCE_ID)
     }
 
