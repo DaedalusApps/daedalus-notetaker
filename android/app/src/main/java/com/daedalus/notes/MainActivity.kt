@@ -26,6 +26,7 @@ import com.daedalus.notes.data.backup.BackupWorker
 import kotlinx.coroutines.launch
 import com.daedalus.notes.ui.NavGraph
 import com.daedalus.notes.ui.theme.DaedalusTheme
+import com.daedalus.notes.viewmodel.ConversationViewModel
 import com.daedalus.notes.viewmodel.DeviceViewModel
 import com.daedalus.notes.viewmodel.RecordingViewModel
 import com.daedalus.notes.viewmodel.TodoViewModel
@@ -35,6 +36,7 @@ class MainActivity : ComponentActivity() {
     private val deviceViewModel: DeviceViewModel by viewModels()
     private val recordingViewModel: RecordingViewModel by viewModels()
     private val todoViewModel: TodoViewModel by viewModels()
+    private val conversationViewModel: ConversationViewModel by viewModels()
 
     private val adbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -168,7 +170,8 @@ class MainActivity : ComponentActivity() {
                         navController = navController,
                         deviceViewModel = deviceViewModel,
                         recordingViewModel = recordingViewModel,
-                        todoViewModel = todoViewModel
+                        todoViewModel = todoViewModel,
+                        conversationViewModel = conversationViewModel
                     )
                 }
             }
