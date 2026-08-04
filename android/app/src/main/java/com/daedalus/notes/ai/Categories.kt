@@ -2,6 +2,10 @@ package com.daedalus.notes.ai
 
 import android.content.Context
 
+const val OFFLINE_GUARDRAIL = "Note: you are an offline assistant. You have no internet access " +
+    "and cannot search the web or fetch current information. Your built-in knowledge may be " +
+    "outdated. Base your answers on the provided notes and conversation."
+
 const val DEFAULT_PROMPT = """Read the voice recording transcript below and extract its contents.
 
 Return ONLY a JSON object with exactly these 5 keys. No markdown, no code fences.
