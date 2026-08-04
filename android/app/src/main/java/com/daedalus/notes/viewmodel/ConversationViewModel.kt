@@ -381,6 +381,19 @@ class ConversationViewModel @JvmOverloads constructor(
     }
 
     /**
+     * Starts voice input the way the voice-only instant-send surface's big mic button does
+     * (P9.3): explicitly stops any in-progress TTS playback first, then starts recording via
+     * [startVoiceInput]. [startVoiceInput] already stops speech itself as its first step, so this
+     * is behaviorally equivalent to it — the explicit call here just makes the "stop speech before
+     * recording" ordering a named, independently testable contract for that surface, rather than
+     * relying on an implementation detail of [startVoiceInput].
+     */
+    fun startVoiceInputInterruptingSpeech() {
+        stopSpeaking()
+        startVoiceInput()
+    }
+
+    /**
      * Stops the in-progress voice recording and transcribes it off the main thread. With instant
      * send OFF, the result is exposed through [voiceTranscript] for the UI to place in the input
      * field. With instant send ON, a non-blank result instead goes straight through the same send
