@@ -142,7 +142,12 @@ class ConversationViewModel @JvmOverloads constructor(
         // The listener may be invoked off the main thread (TextToSpeech's UtteranceProgressListener
         // callbacks are not guaranteed to arrive on it); MutableStateFlow.value is thread-safe, so
         // no dispatching back to the main thread is needed here.
-        service.setOnSpeakingChangedListener { speaking -> _isSpeaking.value = speaking }
+        service.setOnSpeakingChangedListener { speaking ->
+            _isSpeaking.value = speaking
+            // Speech ending for any reason (natural completion, another stop, an error) resets
+            // whichever bubble's replay icon was showing Stop — a replay is not exempt from this.
+            if (!speaking) _speakingMessageId.value = null
+        }
         // Same thread-safety note as above applies to the ready callback (P9.1): it also fires
         // immediately with the current known state at registration, so a picker opened after
         // init already finished still sees the right value instead of hanging on "not ready".
@@ -154,6 +159,13 @@ class ConversationViewModel @JvmOverloads constructor(
     // Whether TTS is actively speaking (P8.4): drives the TopAppBar speaker icon's active state.
     private val _isSpeaking = MutableStateFlow(false)
     val isSpeaking: StateFlow<Boolean> = _isSpeaking
+
+    // Id (stringified index into _messages) of the AGENT message currently being replayed via
+    // replayMessage(), or null when no per-message replay is active (P9.2). This is distinct from
+    // isSpeaking/auto-speak: the automatic reply-speak in performSend never sets this, since it is
+    // not a replay — the top-bar speaker icon already reflects that via isSpeaking.
+    private val _speakingMessageId = MutableStateFlow<String?>(null)
+    val speakingMessageId: StateFlow<String?> = _speakingMessageId
 
     // Whether the (lazily built) speech engine has finished initializing (P9.1): drives the
     // voice picker's loading state so it doesn't show an empty list while init is still async.
@@ -210,6 +222,27 @@ class ConversationViewModel @JvmOverloads constructor(
      */
     fun stopSpeaking() {
         if (_ttsEnabled.value || ttsDelegate.isInitialized()) tts.stop()
+        _speakingMessageId.value = null
+    }
+
+    /**
+     * Replays a single AGENT message's text via the speech engine (P9.2) — an explicit per-bubble
+     * request, distinct from the automatic reply-speak in [performSend]. Unlike every other TTS
+     * entry point, this touches [tts] unconditionally, bypassing the `_ttsEnabled || initialized`
+     * guard: replay must work even with spoken replies OFF, building the engine on demand without
+     * ever flipping the [ttsEnabled] preference. Any current speech (auto-speak or another replay)
+     * is stopped first, so only one utterance ever plays at a time.
+     */
+    fun replayMessage(id: String) {
+        val index = id.toIntOrNull() ?: return
+        val message = _messages.value.getOrNull(index) ?: return
+        tts.stop()
+        if (tts.isAvailable) {
+            _speakingMessageId.value = id
+            tts.speak(message.text)
+        } else {
+            _speakingMessageId.value = null
+        }
     }
 
     fun setTtsEnabled(enabled: Boolean) {
