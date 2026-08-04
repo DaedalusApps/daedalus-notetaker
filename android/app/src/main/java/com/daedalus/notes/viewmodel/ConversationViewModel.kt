@@ -616,6 +616,15 @@ class ConversationViewModel @JvmOverloads constructor(
      * the `auto_process` pref is on: that pref gates work kicked off automatically by capture
      * finishing, whereas tapping End is itself the explicit request for the summarized note (the
      * equivalent of the library's Analyze button).
+     *
+     * Tracked in [generationJob] — the same field [send] uses — so [stopGenerating] (wired to the
+     * Stop button, including the voice-only morphing button's GENERATING state) can actually
+     * cancel it (#60). A cancellation here is treated exactly like the existing analysis-FAILURE
+     * path (#25's fail-safe): the session stays live and resumable — no rename, no message clear,
+     * no rotation — and the Recording row saved before cancellation may remain (a harmless upsert;
+     * retrying End overwrites it). Unlike a failure, no error is surfaced: cancellation isn't a
+     * failure (mirrors [performSend]'s `CancellationException` handling), while a real
+     * [TimeoutCancellationException] from the analysis LLM call still surfaces as an error (#45).
      */
     fun endSession() {
         if (_isGenerating.value) return
@@ -624,7 +633,7 @@ class ConversationViewModel @JvmOverloads constructor(
         // in the same frame — cannot slip past the guard before the coroutine body runs.
         _isGenerating.value = true
         _error.value = null
-        viewModelScope.launch {
+        generationJob = viewModelScope.launch {
             try {
                 loadJob.join()
                 val currentMessages = _messages.value
@@ -653,6 +662,17 @@ class ConversationViewModel @JvmOverloads constructor(
 
                 sessionFile = withContext(ioDispatcher) { newSessionFile(conversationsDir(getApplication())) }
                 _messages.value = emptyList()
+            } catch (e: TimeoutCancellationException) {
+                // A real failure from the analysis LLM call's own timeout, not a stopGenerating()
+                // cancellation — must be caught before the CancellationException branch below so
+                // it still reaches the user as an error (#45).
+                Log.e("ConversationViewModel", "endSession failed", e)
+                _error.value = e.message ?: "Failed to end session"
+            } catch (e: CancellationException) {
+                // stopGenerating() cancellation, not a failure: no error, session left exactly as
+                // it was before this attempt. Rethrown so the coroutine actually completes as
+                // cancelled.
+                throw e
             } catch (e: Exception) {
                 Log.e("ConversationViewModel", "endSession failed", e)
                 _error.value = e.message ?: "Failed to end session"
