@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -117,23 +118,26 @@ class ConversationViewModel @JvmOverloads constructor(
      * through the normal save path, runs it through the same analysis pipeline a transcribed
      * local recording gets, marks the session file as ended so it is never auto-resumed, then
      * rotates to a fresh session. A no-op if the session has no messages yet.
+     *
+     * Analysis runs unconditionally, unlike a local audio recording, which only auto-analyzes when
+     * the `auto_process` pref is on: that pref gates work kicked off automatically by capture
+     * finishing, whereas tapping End is itself the explicit request for the summarized note (the
+     * equivalent of the library's Analyze button).
      */
     fun endSession() {
         if (_isGenerating.value) return
+        // Claimed synchronously on the caller (main) thread so a double-tap — or a send() landing
+        // in the same frame — cannot slip past the guard before the coroutine body runs.
+        _isGenerating.value = true
+        _error.value = null
         viewModelScope.launch {
-            loadJob.join()
-            val currentMessages = _messages.value
-            if (currentMessages.isEmpty()) return@launch
-
-            _isGenerating.value = true
-            _error.value = null
             try {
+                loadJob.join()
+                val currentMessages = _messages.value
+                if (currentMessages.isEmpty()) return@launch
+
                 val filename = sessionFile.name
                 val transcript = buildTranscript(currentMessages)
-                withContext(ioDispatcher) {
-                    val endedFile = File(sessionFile.parentFile, "${sessionFile.nameWithoutExtension}.ended.md")
-                    sessionFile.renameTo(endedFile)
-                }
                 repo.save(
                     Recording(
                         filename = filename,
@@ -143,6 +147,15 @@ class ConversationViewModel @JvmOverloads constructor(
                     )
                 )
                 analyzeTranscript(getApplication(), llm, embedder, repo, filename, transcript)
+
+                // Renamed only once the work above succeeded, so a failure leaves the session
+                // intact and resumable; retrying End re-saves under the same filename (the
+                // primary key), which updates that row rather than adding a second one.
+                val ended = withContext(ioDispatcher) {
+                    val endedFile = File(sessionFile.parentFile, "${sessionFile.nameWithoutExtension}.ended.md")
+                    sessionFile.renameTo(endedFile)
+                }
+                if (!ended) throw IOException("Could not mark ${sessionFile.name} as ended")
 
                 sessionFile = withContext(ioDispatcher) { newSessionFile(conversationsDir(getApplication())) }
                 _messages.value = emptyList()
@@ -350,4 +363,9 @@ class ConversationViewModel @JvmOverloads constructor(
 
     private fun conversationsDir(application: Application): File =
         File(application.filesDir, "conversations").also { it.mkdirs() }
+
+    override fun onCleared() {
+        super.onCleared()
+        embedder.close()
+    }
 }

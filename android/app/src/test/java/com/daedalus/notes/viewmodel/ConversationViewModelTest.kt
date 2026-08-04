@@ -560,4 +560,44 @@ class ConversationViewModelTest {
         assertEquals(fileBefore.absolutePath, vm.sessionFile.absolutePath)
         assertTrue(vm.messages.value.isEmpty())
     }
+
+    // (P5.4-f) Double-tapping End must not save or end the session twice.
+    @Test
+    fun endSession_calledTwiceBeforeCompleting_savesOnlyOnce() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Only one recording please")
+        advanceUntilIdle()
+
+        vm.endSession()
+        vm.endSession()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repo.save(any()) }
+        val endedFiles = conversationsDir().listFiles()?.filter { it.name.contains("ended") } ?: emptyList()
+        assertEquals(1, endedFiles.size)
+    }
+
+    // (P5.4-g) A failure during analysis leaves the session live and resumable (not marked ended),
+    //     so the user can retry End rather than losing the meeting.
+    @Test
+    fun endSession_analysisFailure_leavesSessionResumable() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.send("Keep this session alive")
+        advanceUntilIdle()
+        val originalFile = vm.sessionFile
+
+        coEvery { llm.generate(any(), any<String>()) } throws RuntimeException("model exploded")
+
+        vm.endSession()
+        advanceUntilIdle()
+
+        assertNotNull(vm.error.value)
+        assertTrue("session file should still be live", originalFile.exists())
+        assertEquals(originalFile.absolutePath, vm.sessionFile.absolutePath)
+        assertTrue(vm.messages.value.isNotEmpty())
+        val endedFiles = conversationsDir().listFiles()?.filter { it.name.contains("ended") } ?: emptyList()
+        assertTrue(endedFiles.isEmpty())
+    }
 }
