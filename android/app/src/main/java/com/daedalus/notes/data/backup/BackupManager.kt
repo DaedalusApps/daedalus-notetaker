@@ -301,6 +301,8 @@ class BackupManager(
         if (settings.has("use_bluetooth_mic")) editor.putBoolean("use_bluetooth_mic", settings.optBoolean("use_bluetooth_mic"))
         if (settings.has("auto_process")) editor.putBoolean("auto_process", settings.optBoolean("auto_process"))
         if (settings.has("conversation_tts_enabled")) editor.putBoolean("conversation_tts_enabled", settings.optBoolean("conversation_tts_enabled"))
+        if (settings.has("conversation_tts_rate")) editor.putFloat("conversation_tts_rate", settings.optDouble("conversation_tts_rate").toFloat())
+        if (settings.has("conversation_tts_voice")) editor.putString("conversation_tts_voice", settings.optString("conversation_tts_voice"))
         if (settings.has("custom_prompt")) editor.putString("custom_prompt", settings.optString("custom_prompt"))
         if (settings.has("todo_lookback_hours")) editor.putLong("todo_lookback_hours", settings.optLong("todo_lookback_hours"))
         if (settings.has(BackupPrefs.INTERVAL_HOURS)) editor.putLong(BackupPrefs.INTERVAL_HOURS, settings.optLong(BackupPrefs.INTERVAL_HOURS))
@@ -325,7 +327,9 @@ class BackupManager(
             BackupPrefs.MAX_COUNT,
             "max_recording_minutes",
             "ai_text_budget_chars",
-            "conversation_tts_enabled"
+            "conversation_tts_enabled",
+            "conversation_tts_rate",
+            "conversation_tts_voice"
         )
 
         /**

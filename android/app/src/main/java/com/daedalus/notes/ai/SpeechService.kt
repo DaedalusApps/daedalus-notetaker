@@ -9,6 +9,9 @@ import java.util.Locale
 private const val TAG = "SpeechService"
 private const val UTTERANCE_ID = "daedalus_reply"
 
+/** A selectable voice for the engine's current language, labeled in stable order. */
+data class VoiceInfo(val id: String, val label: String)
+
 /**
  * Thin seam over [TextToSpeech] so callers (e.g. ConversationViewModel) are unit-testable with a
  * mock, and so TTS init/availability failures are exposed rather than thrown — callers fall back
@@ -21,6 +24,18 @@ interface SpeechService {
     fun speak(text: String)
     fun stop()
     fun shutdown()
+
+    /** Sets the speaking rate (1.0 = normal). */
+    fun setSpeechRate(rate: Float)
+
+    /** Voices available for the engine's current/default language only, "Voice 1"/"Voice 2"…. */
+    fun availableVoices(): List<VoiceInfo>
+
+    /** Selects the voice with the given [VoiceInfo.id]. Returns false if the id is unknown. */
+    fun setVoice(id: String): Boolean
+
+    /** Speaks [text] regardless of any caller-side conversation state — used for previews. */
+    fun preview(text: String)
 }
 
 /** [SpeechService] backed by Android's built-in [TextToSpeech] engine. */
@@ -31,6 +46,10 @@ class AndroidSpeechService(context: Context) : SpeechService {
         private set
 
     private var tts: TextToSpeech? = null
+
+    // Rate/voice requested before the engine finished initializing; applied once it has.
+    private var pendingRate: Float? = null
+    private var pendingVoiceId: String? = null
 
     init {
         tts = TextToSpeech(context.applicationContext) { status ->
@@ -43,7 +62,10 @@ class AndroidSpeechService(context: Context) : SpeechService {
                 result != TextToSpeech.LANG_NOT_SUPPORTED
             if (!isAvailable) {
                 Log.w(TAG, "TextToSpeech language unavailable: $result")
+                return@TextToSpeech
             }
+            pendingRate?.let { tts?.setSpeechRate(it) }
+            pendingVoiceId?.let { id -> tts?.voices?.firstOrNull { it.name == id }?.let { tts?.voice = it } }
         }
     }
 
@@ -51,6 +73,35 @@ class AndroidSpeechService(context: Context) : SpeechService {
         if (!isAvailable) return
         tts?.speak(text, QUEUE_FLUSH, null, UTTERANCE_ID)
     }
+
+    override fun setSpeechRate(rate: Float) {
+        if (isAvailable) tts?.setSpeechRate(rate) else pendingRate = rate
+    }
+
+    override fun availableVoices(): List<VoiceInfo> {
+        val engine = tts
+        if (engine == null || !isAvailable) return emptyList()
+        val voices = engine.voices ?: return emptyList()
+        val language = engine.voice?.locale ?: engine.defaultVoice?.locale ?: Locale.getDefault()
+        return voices
+            .filter { it.locale == language && !it.isNetworkConnectionRequired }
+            .map { it.name }
+            .sorted()
+            .mapIndexed { index, name -> VoiceInfo(id = name, label = "Voice ${index + 1}") }
+    }
+
+    override fun setVoice(id: String): Boolean {
+        val engine = tts
+        if (engine == null || !isAvailable) {
+            pendingVoiceId = id
+            return true
+        }
+        val voice = engine.voices?.firstOrNull { it.name == id } ?: return false
+        engine.voice = voice
+        return true
+    }
+
+    override fun preview(text: String) = speak(text)
 
     override fun stop() {
         tts?.stop()
