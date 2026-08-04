@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -722,10 +723,10 @@ private fun VoiceRow(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 /**
- * A single message bubble. AGENT messages (never USER ones) get a small trailing "Read aloud"
- * icon below the bubble (P9.2): tapping it replays that message's text via [onReplayClick]; while
- * this is the message currently replaying ([isReplaying]), the icon becomes Stop and tapping it
- * calls [onStopReplayClick] instead.
+ * A single message bubble. AGENT messages (never USER ones) get a small "Read aloud" play icon
+ * embedded in the bottom-right corner of the bubble (P10.2): tapping it replays that message's
+ * text via [onReplayClick]; while this is the message currently replaying ([isReplaying]), the
+ * icon becomes Stop and tapping it calls [onStopReplayClick] instead.
  */
 @Composable
 private fun ChatBubble(
@@ -754,18 +755,23 @@ private fun ChatBubble(
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             )
-        }
-        if (!isUser) {
-            IconButton(
-                onClick = { if (isReplaying) onStopReplayClick() else onReplayClick() },
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    imageVector = if (isReplaying) Icons.Default.Stop else Icons.AutoMirrored.Filled.VolumeUp,
-                    contentDescription = if (isReplaying) "Stop reading" else "Read aloud",
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            if (!isUser) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    IconButton(
+                        onClick = { if (isReplaying) onStopReplayClick() else onReplayClick() },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isReplaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            contentDescription = if (isReplaying) "Stop reading" else "Read aloud",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
     }
