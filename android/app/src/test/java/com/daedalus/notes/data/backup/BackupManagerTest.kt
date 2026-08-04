@@ -68,6 +68,7 @@ class BackupManagerTest {
             .putBoolean("conversation_tts_enabled", true)
             .putFloat("conversation_tts_rate", 1.5f)
             .putString("conversation_tts_voice", "Voice 2")
+            .putBoolean("conversation_instant_send", true)
             .commit()
 
         val json = BackupManager(context, source).buildBackupJson()
@@ -100,6 +101,7 @@ class BackupManagerTest {
         assertTrue(prefs().getBoolean("conversation_tts_enabled", false))
         assertEquals(1.5f, prefs().getFloat("conversation_tts_rate", -1f))
         assertEquals("Voice 2", prefs().getString("conversation_tts_voice", null))
+        assertTrue(prefs().getBoolean("conversation_instant_send", false))
         target.close()
     }
 
