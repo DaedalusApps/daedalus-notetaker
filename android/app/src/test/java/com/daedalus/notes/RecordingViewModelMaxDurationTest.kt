@@ -13,6 +13,7 @@ import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_DEFAULT
 import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_KEY
 import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_UNLIMITED
 import com.daedalus.notes.viewmodel.RecordingViewModel
+import com.daedalus.notes.data.model.Recording
 import io.mockk.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -183,5 +184,42 @@ class RecordingViewModelMaxDurationTest {
 
         viewModel.clearAutoStopNotice()
         assertNull(viewModel.autoStopNotice.value)
+    }
+
+    // --- #30: saved durationMillis must exclude paused time ---
+
+    @Test
+    fun stop_afterPauseAndResume_savesDurationExcludingPausedTime() = runTest {
+        val savedSlot = slot<Recording>()
+        coEvery { repo.save(capture(savedSlot)) } returns Unit
+
+        viewModel.startLocalRecording()
+        advanceTimeBy(60_000L) // 60s recorded
+        viewModel.pauseLocalRecording()
+
+        advanceTimeBy(5 * 60_000L) // 5 minutes paused — must not count
+
+        viewModel.resumeLocalRecording()
+        advanceTimeBy(30_000L) // 30s more recorded
+
+        viewModel.stopLocalRecording()
+        advanceUntilIdle()
+
+        // Expect ~90s (60 + 30), not ~390s (60 + 300 + 30) from wall-clock.
+        assertEquals(90_000L, savedSlot.captured.durationMillis)
+    }
+
+    @Test
+    fun stop_withoutPause_savesDurationMatchingElapsed() = runTest {
+        val savedSlot = slot<Recording>()
+        coEvery { repo.save(capture(savedSlot)) } returns Unit
+
+        viewModel.startLocalRecording()
+        advanceTimeBy(45_000L)
+
+        viewModel.stopLocalRecording()
+        advanceUntilIdle()
+
+        assertEquals(45_000L, savedSlot.captured.durationMillis)
     }
 }
