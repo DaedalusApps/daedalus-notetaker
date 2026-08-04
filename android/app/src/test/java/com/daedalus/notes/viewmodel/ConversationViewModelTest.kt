@@ -27,6 +27,7 @@ import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkStatic
 import io.mockk.verify
+import io.mockk.verifyOrder
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -823,6 +824,24 @@ class ConversationViewModelTest {
         vm.startVoiceInput()
 
         verify(exactly = 1) { tts.stop() }
+    }
+
+    // (P9.3) The voice-only big-mic button (instant send ON) must stop any in-progress TTS
+    //     playback BEFORE starting the recorder — never the reverse, or the recording would start
+    //     while the reply is still audibly being spoken over it.
+    @Test
+    fun startVoiceInputInterruptingSpeech_stopsSpeechBeforeStartingRecording() = runTest {
+        markWhisperReady()
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+
+        vm.startVoiceInputInterruptingSpeech()
+
+        verifyOrder {
+            tts.stop()
+            audioRecorder.start(any(), any())
+        }
+        assertTrue(vm.isRecordingVoice.value)
     }
 
     @Test
