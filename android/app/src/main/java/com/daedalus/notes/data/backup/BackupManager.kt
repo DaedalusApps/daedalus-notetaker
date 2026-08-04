@@ -304,6 +304,7 @@ class BackupManager(
         if (settings.has("todo_lookback_hours")) editor.putLong("todo_lookback_hours", settings.optLong("todo_lookback_hours"))
         if (settings.has(BackupPrefs.INTERVAL_HOURS)) editor.putLong(BackupPrefs.INTERVAL_HOURS, settings.optLong(BackupPrefs.INTERVAL_HOURS))
         if (settings.has(BackupPrefs.MAX_COUNT)) editor.putInt(BackupPrefs.MAX_COUNT, settings.optInt(BackupPrefs.MAX_COUNT))
+        if (settings.has("max_recording_minutes")) editor.putInt("max_recording_minutes", settings.optInt("max_recording_minutes"))
 
         editor.apply()
     }
@@ -319,7 +320,8 @@ class BackupManager(
             "custom_prompt",
             "todo_lookback_hours",
             BackupPrefs.INTERVAL_HOURS,
-            BackupPrefs.MAX_COUNT
+            BackupPrefs.MAX_COUNT,
+            "max_recording_minutes"
         )
 
         /**
