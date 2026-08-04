@@ -30,11 +30,13 @@ import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -1217,6 +1219,27 @@ class ConversationViewModelTest {
         assertEquals(Role.MODEL, vm.messages.value[2].role)
         assertEquals("Reply after stop", vm.messages.value[2].text)
         assertNull(vm.error.value)
+    }
+
+    // (P8.4-a) generate()'s 3-minute timeout arrives as a CancellationException subtype, so it
+    //     must NOT be mistaken for a stopGenerating() cancellation: it is a real failure and has
+    //     to reach the user as an error, exactly as any other generation failure does.
+    @Test
+    fun send_llmTimesOut_setsErrorNoModelMessage() = runTest {
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } coAnswers {
+            withTimeout(1) { delay(10_000) }
+            "unreachable"
+        }
+        val vm = newViewModel()
+
+        vm.send("Will this time out?")
+        advanceUntilIdle()
+
+        assertEquals(1, vm.messages.value.size)
+        assertEquals(Role.USER, vm.messages.value[0].role)
+        assertNotNull("a timeout must surface as an error", vm.error.value)
+        assertFalse(vm.isGenerating.value)
+        assertFalse(vm.sessionFile.readText().contains("**Agent**"))
     }
 
     // (P8.4-c) isSpeaking reflects the SpeechService wrapper's speaking-changed callback, which

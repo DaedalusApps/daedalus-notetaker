@@ -25,6 +25,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -501,6 +502,12 @@ class ConversationViewModel @JvmOverloads constructor(
             _messages.value = _messages.value + modelMessage
             appendToFile(modelMessage)
             if (_ttsEnabled.value && tts.isAvailable) tts.speak(reply)
+        } catch (e: TimeoutCancellationException) {
+            // generate()'s 3-minute timeout surfaces as a CancellationException subtype, but it is
+            // a real failure rather than a stopGenerating() cancellation — must be caught before
+            // the CancellationException branch below so it still reaches the user as an error.
+            Log.e("ConversationViewModel", "Generation failed", e)
+            _error.value = e.message ?: "Failed to generate a response"
         } catch (e: CancellationException) {
             // stopGenerating() cancellation, not a failure: no error, no model turn. Rethrown so
             // the coroutine actually completes as cancelled.
