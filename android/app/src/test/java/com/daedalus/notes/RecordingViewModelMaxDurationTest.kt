@@ -118,6 +118,48 @@ class RecordingViewModelMaxDurationTest {
     }
 
     @Test
+    fun timer_firesOnTheTickThatReachesTheCap_notBefore() = runTest {
+        every { fakePrefs.getInt(MAX_RECORDING_MINUTES_KEY, MAX_RECORDING_MINUTES_DEFAULT) } returns 1 // 1 minute cap
+
+        viewModel.startLocalRecording()
+        advanceTimeBy(59_000L + 500)
+
+        assertTrue("must still be recording one second before the cap", viewModel.isRecording.value)
+        assertEquals(59L, viewModel.recordingDurationSeconds.value)
+        assertNull("no notice before the cap is reached", viewModel.autoStopNotice.value)
+
+        advanceTimeBy(1_000L)
+
+        assertFalse("must auto-stop on the tick that reaches the cap", viewModel.isRecording.value)
+        assertEquals(60L, viewModel.recordingDurationSeconds.value)
+        assertNotNull(viewModel.autoStopNotice.value)
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun timer_pausedTimeDoesNotCountTowardTheCap() = runTest {
+        every { fakePrefs.getInt(MAX_RECORDING_MINUTES_KEY, MAX_RECORDING_MINUTES_DEFAULT) } returns 1 // 1 minute cap
+
+        viewModel.startLocalRecording()
+        advanceTimeBy(30_000L + 500)
+        viewModel.pauseLocalRecording()
+        assertEquals(30L, viewModel.recordingDurationSeconds.value)
+
+        advanceTimeBy(5 * 60_000L)
+        assertTrue("paused time must not trip the cap", viewModel.isRecording.value)
+        assertEquals(30L, viewModel.recordingDurationSeconds.value)
+        assertNull(viewModel.autoStopNotice.value)
+
+        viewModel.resumeLocalRecording()
+        advanceTimeBy(30_000L + 500)
+
+        assertFalse("cap must still fire after resuming", viewModel.isRecording.value)
+        assertEquals(60L, viewModel.recordingDurationSeconds.value)
+        assertNotNull(viewModel.autoStopNotice.value)
+        advanceUntilIdle()
+    }
+
+    @Test
     fun timer_unlimitedSentinel_neverAutoStops() = runTest {
         every { fakePrefs.getInt(MAX_RECORDING_MINUTES_KEY, MAX_RECORDING_MINUTES_DEFAULT) } returns MAX_RECORDING_MINUTES_UNLIMITED
 

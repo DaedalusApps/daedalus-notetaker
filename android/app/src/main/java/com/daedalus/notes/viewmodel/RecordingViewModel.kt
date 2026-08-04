@@ -253,8 +253,12 @@ class RecordingViewModel @JvmOverloads constructor(
             _recordingDurationSeconds.value = elapsed
             val cap = maxDurationCapSeconds
             if (cap != null && elapsed >= cap) {
-                _autoStopNotice.value = "Recording auto-stopped after reaching the ${cap / 60}-minute limit"
-                stopLocalRecording()
+                // Only claim an auto-stop if the recording is still running — a manual stop
+                // landing on the same tick would otherwise surface a bogus notice.
+                if (_isRecording.value) {
+                    _autoStopNotice.value = "Recording auto-stopped after reaching the ${cap / 60}-minute limit"
+                    stopLocalRecording()
+                }
                 break
             }
         }
