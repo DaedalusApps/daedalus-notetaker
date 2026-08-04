@@ -1,5 +1,10 @@
 package com.daedalus.notes.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,12 +20,15 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -45,8 +53,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.daedalus.notes.ai.Role
 import com.daedalus.notes.viewmodel.ChatMessage
 import com.daedalus.notes.viewmodel.ConversationViewModel
@@ -60,10 +72,26 @@ fun ConversationScreen(
     val messages by conversationViewModel.messages.collectAsState()
     val isGenerating by conversationViewModel.isGenerating.collectAsState()
     val error by conversationViewModel.error.collectAsState()
+    val isRecordingVoice by conversationViewModel.isRecordingVoice.collectAsState()
+    val isTranscribing by conversationViewModel.isTranscribing.collectAsState()
+    val voiceTranscript by conversationViewModel.voiceTranscript.collectAsState()
 
+    val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
+
+    val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted -> if (granted) conversationViewModel.startVoiceInput() }
+
+    val startVoiceInput = {
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasPermission) conversationViewModel.startVoiceInput()
+        else recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
@@ -73,6 +101,13 @@ fun ConversationScreen(
         error?.let {
             snackbar.showSnackbar(it)
             conversationViewModel.clearError()
+        }
+    }
+
+    LaunchedEffect(voiceTranscript) {
+        voiceTranscript?.let {
+            input = it
+            conversationViewModel.clearVoiceTranscript()
         }
     }
 
@@ -157,6 +192,34 @@ fun ConversationScreen(
                     minLines = 1,
                     maxLines = 4
                 )
+                Box {
+                    IconButton(
+                        onClick = {
+                            if (isRecordingVoice) conversationViewModel.stopVoiceInput() else startVoiceInput()
+                        },
+                        enabled = !isGenerating && !isTranscribing
+                    ) {
+                        when {
+                            isTranscribing -> CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            isRecordingVoice -> Icon(
+                                Icons.Default.Stop,
+                                contentDescription = "Stop recording",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            else -> Icon(Icons.Default.Mic, contentDescription = "Voice input")
+                        }
+                    }
+                    if (isRecordingVoice) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(6.dp)
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(Color.Red)
+                        )
+                    }
+                }
                 IconButton(
                     onClick = {
                         conversationViewModel.send(input)
