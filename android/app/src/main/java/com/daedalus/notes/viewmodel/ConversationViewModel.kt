@@ -235,13 +235,16 @@ class ConversationViewModel @JvmOverloads constructor(
     )
     val instantSend: StateFlow<Boolean> = _instantSend
 
+    /**
+     * Sets instant send. Turning it OFF also turns auto-listen off (#72): auto-listen only
+     * functions when instant send is on (see [maybeAutoListen]), so leaving it on with instant
+     * send off would silently strand a toggle the user can see but that no longer does anything.
+     * Turning it ON, alone, leaves auto-listen untouched — the dependency runs one direction only.
+     */
     fun setInstantSend(enabled: Boolean) {
         _instantSend.value = enabled
-        getApplication<Application>()
-            .getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(CONVERSATION_INSTANT_SEND_KEY, enabled)
-            .apply()
+        if (!enabled && _autoListen.value) _autoListen.value = false
+        persistInstantSendAndAutoListen()
     }
 
     // Hands-free auto-listen loop (P9.4): when on, AND instant send is also on, a reply
@@ -253,12 +256,40 @@ class ConversationViewModel @JvmOverloads constructor(
     )
     val autoListen: StateFlow<Boolean> = _autoListen
 
+    init {
+        // Normalizes an inconsistent persisted state (#72): autoListen=true with instantSend=false
+        // is not producible by the setters below, but two paths still deliver it — an install
+        // upgrading from the pre-#72 build, where setAutoListen(true) alone was legal (the common
+        // case), and a restored backup carrying such a pair (see BackupManager.applySettings,
+        // which writes both keys straight to prefs without going through this class).
+        // Auto-listen depends on instant send to function at all (see maybeAutoListen), so the
+        // conservative choice is to turn auto-listen OFF rather than silently turning instant send
+        // ON — the user never explicitly opted into instant send in that scenario, and enabling it
+        // for them would start sending their voice input automatically without consent.
+        if (_autoListen.value && !_instantSend.value) {
+            _autoListen.value = false
+            persistInstantSendAndAutoListen()
+        }
+    }
+
+    /**
+     * Sets auto-listen. Turning it ON also turns instant send on (#72), since auto-listen only
+     * functions when instant send is also on (see [maybeAutoListen]) — flipping this on alone
+     * would silently do nothing. Turning it OFF, alone, leaves instant send untouched.
+     */
     fun setAutoListen(enabled: Boolean) {
         _autoListen.value = enabled
+        if (enabled && !_instantSend.value) _instantSend.value = true
+        persistInstantSendAndAutoListen()
+    }
+
+    /** Persists both flows' current values in one editor apply, per the setters above. */
+    private fun persistInstantSendAndAutoListen() {
         getApplication<Application>()
             .getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
             .edit()
-            .putBoolean(CONVERSATION_AUTO_LISTEN_KEY, enabled)
+            .putBoolean(CONVERSATION_INSTANT_SEND_KEY, _instantSend.value)
+            .putBoolean(CONVERSATION_AUTO_LISTEN_KEY, _autoListen.value)
             .apply()
     }
 

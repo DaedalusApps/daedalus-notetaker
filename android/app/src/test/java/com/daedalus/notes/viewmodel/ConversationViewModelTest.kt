@@ -1777,9 +1777,13 @@ class ConversationViewModelTest {
         verify(exactly = 0) { audioRecorder.start(any(), any()) }
     }
 
-    // (P9.4-c2) instantSend off (autoListen on) must never trigger.
+    // (P9.4-c2, superseded by #72) This used to assert that setAutoListen(true) alone — which left
+    // instantSend off — never triggered. Under the #72 coupling that combination is no longer
+    // reachable through the public setters, so the case now proves the end-to-end payoff instead:
+    // flipping auto-listen on by itself actually starts the hands-free loop. maybeAutoListen's
+    // !instantSend guard is retained as defence in depth but is consequently no longer covered.
     @Test
-    fun autoListen_instantSendOff_noTrigger() = runTest {
+    fun autoListen_setAutoListenAlone_triggers_sinceInstantSendIsCoupledOn() = runTest {
         markWhisperReady()
         coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
         val vm = newViewModel()
@@ -1789,8 +1793,8 @@ class ConversationViewModelTest {
         vm.send("Hello")
         advanceUntilIdle()
 
-        assertFalse(vm.isRecordingVoice.value)
-        verify(exactly = 0) { audioRecorder.start(any(), any()) }
+        assertTrue(vm.isRecordingVoice.value)
+        verify(exactly = 1) { audioRecorder.start(any(), any()) }
     }
 
     // (P9.4-d) A blank transcription suppresses exactly the next auto-listen trigger; the one
@@ -1917,6 +1921,87 @@ class ConversationViewModelTest {
 
         val reloaded = newViewModel()
         assertTrue(reloaded.autoListen.value)
+    }
+
+    // (#72-a) setAutoListen(true) also enables instant send: both flows and both prefs.
+    @Test
+    fun setAutoListen_true_alsoEnablesInstantSend() = runTest {
+        val vm = newViewModel()
+        assertFalse(vm.instantSend.value)
+        assertFalse(vm.autoListen.value)
+
+        vm.setAutoListen(true)
+
+        assertTrue(vm.autoListen.value)
+        assertTrue(vm.instantSend.value)
+        assertTrue(prefs().getBoolean("conversation_auto_listen", false))
+        assertTrue(prefs().getBoolean("conversation_instant_send", false))
+    }
+
+    // (#72-b) setInstantSend(false) also disables auto-listen, when both were on: both flows and
+    // both prefs.
+    @Test
+    fun setInstantSend_false_alsoDisablesAutoListen_whenBothOn() = runTest {
+        val vm = newViewModel()
+        vm.setInstantSend(true)
+        vm.setAutoListen(true)
+        assertTrue(vm.instantSend.value)
+        assertTrue(vm.autoListen.value)
+
+        vm.setInstantSend(false)
+
+        assertFalse(vm.instantSend.value)
+        assertFalse(vm.autoListen.value)
+        assertFalse(prefs().getBoolean("conversation_instant_send", false))
+        assertFalse(prefs().getBoolean("conversation_auto_listen", false))
+    }
+
+    // (#72-c) setInstantSend(true) alone must not touch auto-listen.
+    @Test
+    fun setInstantSend_true_alone_doesNotTouchAutoListen() = runTest {
+        val vm = newViewModel()
+
+        vm.setInstantSend(true)
+
+        assertTrue(vm.instantSend.value)
+        assertFalse(vm.autoListen.value)
+        assertFalse(prefs().getBoolean("conversation_auto_listen", false))
+    }
+
+    // (#72-c2) setAutoListen(false) alone must not touch instant send.
+    @Test
+    fun setAutoListen_false_alone_doesNotTouchInstantSend() = runTest {
+        val vm = newViewModel()
+        vm.setInstantSend(true)
+        vm.setAutoListen(true)
+        assertTrue(vm.instantSend.value)
+
+        vm.setAutoListen(false)
+
+        assertFalse(vm.autoListen.value)
+        assertTrue(vm.instantSend.value)
+        assertTrue(prefs().getBoolean("conversation_instant_send", false))
+    }
+
+    // (#72-d) Init normalization: prefs holding autoListen=true and instantSend=false (an install
+    // upgrading from the pre-#72 build, or a restored backup carrying that pair — BackupManager
+    // writes both keys straight to prefs) must be normalized at VM construction to
+    // autoListen=false — the
+    // more conservative setting — rather than silently turning instant send on. The normalization
+    // is persisted so it isn't re-applied (and re-logged) on every subsequent load.
+    @Test
+    fun init_inconsistentPrefs_autoListenTrueInstantSendFalse_normalizesAutoListenToFalse() = runTest {
+        prefs().edit()
+            .putBoolean("conversation_auto_listen", true)
+            .putBoolean("conversation_instant_send", false)
+            .commit()
+
+        val vm = newViewModel()
+
+        assertFalse(vm.autoListen.value)
+        assertFalse(vm.instantSend.value)
+        assertFalse(prefs().getBoolean("conversation_auto_listen", false))
+        assertFalse(prefs().getBoolean("conversation_instant_send", false))
     }
 
     /**
