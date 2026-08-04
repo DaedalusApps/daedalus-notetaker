@@ -659,7 +659,10 @@ private fun VoiceSheet(
                     item {
                         VoiceRow(
                             label = "System default",
-                            selected = ttsVoiceId.isEmpty(),
+                            // A persisted id that isn't in the list (unusable/uninstalled voice
+                            // data, #67) is one the engine has already fallen back to the default
+                            // for, so show that here rather than leaving nothing selected.
+                            selected = ttsVoiceId.isEmpty() || voices.none { it.id == ttsVoiceId },
                             onClick = { conversationViewModel.setTtsVoice("") }
                         )
                     }
