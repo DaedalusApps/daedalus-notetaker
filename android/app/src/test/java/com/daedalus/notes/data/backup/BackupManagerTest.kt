@@ -66,6 +66,8 @@ class BackupManagerTest {
             .putInt("max_recording_minutes", 60)
             .putInt("ai_text_budget_chars", 9_000)
             .putBoolean("conversation_tts_enabled", true)
+            .putFloat("conversation_tts_rate", 1.5f)
+            .putString("conversation_tts_voice", "Voice 2")
             .commit()
 
         val json = BackupManager(context, source).buildBackupJson()
@@ -96,7 +98,34 @@ class BackupManagerTest {
         assertEquals(60, prefs().getInt("max_recording_minutes", 0))
         assertEquals(9_000, prefs().getInt("ai_text_budget_chars", 0))
         assertTrue(prefs().getBoolean("conversation_tts_enabled", false))
+        assertEquals(1.5f, prefs().getFloat("conversation_tts_rate", -1f))
+        assertEquals("Voice 2", prefs().getString("conversation_tts_voice", null))
         target.close()
+    }
+
+    // A corrupt/hand-edited backup must not restore a speech rate the TTS engine silently ignores
+    // (non-numbers parse as NaN; 0 and absurd values are rejected by setSpeechRate).
+    @Test
+    fun v2Import_outOfRangeOrNonNumericTtsRate_isClampedToTheOfferedRange() = runBlocking {
+        val db = newDb()
+        val manager = BackupManager(context, db)
+
+        manager.importFromJson(backupWithTtsRate("fast"))
+        assertEquals(1.0f, prefs().getFloat("conversation_tts_rate", -1f))
+
+        manager.importFromJson(backupWithTtsRate(0.0))
+        assertEquals(0.75f, prefs().getFloat("conversation_tts_rate", -1f))
+
+        manager.importFromJson(backupWithTtsRate(99.0))
+        assertEquals(2.0f, prefs().getFloat("conversation_tts_rate", -1f))
+
+        db.close()
+    }
+
+    private fun backupWithTtsRate(rate: Any): JSONObject = JSONObject().apply {
+        put("backupVersion", 2)
+        put("recordings", JSONArray())
+        put("settings", JSONObject().apply { put("conversation_tts_rate", rate) })
     }
 
     @Test

@@ -16,10 +16,14 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -32,6 +36,7 @@ import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,11 +47,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -65,6 +72,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.daedalus.notes.ai.Role
+import com.daedalus.notes.ai.VoiceInfo
 import com.daedalus.notes.viewmodel.ChatMessage
 import com.daedalus.notes.viewmodel.ConversationViewModel
 import com.daedalus.notes.viewmodel.canStartNewSession
@@ -87,6 +95,8 @@ fun ConversationScreen(
     val snackbar = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
+    var showSpeedDialog by remember { mutableStateOf(false) }
+    var showVoiceDialog by remember { mutableStateOf(false) }
 
     val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -128,6 +138,20 @@ fun ConversationScreen(
             conversationViewModel.cancelVoiceInput()
             conversationViewModel.stopSpeaking()
         }
+    }
+
+    if (showSpeedDialog) {
+        SpeedDialog(
+            conversationViewModel = conversationViewModel,
+            onDismiss = { showSpeedDialog = false }
+        )
+    }
+
+    if (showVoiceDialog) {
+        VoiceDialog(
+            conversationViewModel = conversationViewModel,
+            onDismiss = { showVoiceDialog = false }
+        )
     }
 
     Scaffold(
@@ -172,6 +196,20 @@ fun ConversationScreen(
                             onClick = {
                                 menuExpanded = false
                                 conversationViewModel.startNewSession()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Speed…") },
+                            onClick = {
+                                menuExpanded = false
+                                showSpeedDialog = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Voice…") },
+                            onClick = {
+                                menuExpanded = false
+                                showVoiceDialog = true
                             }
                         )
                     }
@@ -278,6 +316,109 @@ fun ConversationScreen(
             }
         }
     }
+}
+
+private val SPEED_OPTIONS = listOf(0.75f to "0.75×", 1.0f to "1×", 1.25f to "1.25×", 1.5f to "1.5×", 2.0f to "2×")
+
+/** Radio list of speed presets; each selection applies (and previews) immediately. Stays open
+ *  until dismissed so the user can compare presets. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SpeedDialog(
+    conversationViewModel: ConversationViewModel,
+    onDismiss: () -> Unit
+) {
+    val ttsRate by conversationViewModel.ttsRate.collectAsState()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Speech speed") },
+        text = {
+            Column(Modifier.selectableGroup()) {
+                SPEED_OPTIONS.forEach { (rate, label) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = ttsRate == rate,
+                                onClick = { conversationViewModel.setTtsRate(rate) }
+                            )
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(selected = ttsRate == rate, onClick = { conversationViewModel.setTtsRate(rate) })
+                        Spacer(Modifier.width(8.dp))
+                        Text(label)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
+/** Radio list of "System default" + the engine's available voices; each selection applies (and
+ *  previews) immediately. Stays open until dismissed so the user can compare voices. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VoiceDialog(
+    conversationViewModel: ConversationViewModel,
+    onDismiss: () -> Unit
+) {
+    val ttsVoiceId by conversationViewModel.ttsVoiceId.collectAsState()
+    val voices = remember { conversationViewModel.availableVoices() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Voice") },
+        text = {
+            Column(Modifier.selectableGroup()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = ttsVoiceId.isEmpty(),
+                            onClick = { conversationViewModel.setTtsVoice("") }
+                        )
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(selected = ttsVoiceId.isEmpty(), onClick = { conversationViewModel.setTtsVoice("") })
+                    Spacer(Modifier.width(8.dp))
+                    Text("System default")
+                }
+                if (voices.isEmpty()) {
+                    Text(
+                        "No other voices available. Turn spoken replies on to see the voices your " +
+                            "device's speech engine offers.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+                voices.forEach { voice: VoiceInfo ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = ttsVoiceId == voice.id,
+                                onClick = { conversationViewModel.setTtsVoice(voice.id) }
+                            )
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(selected = ttsVoiceId == voice.id, onClick = { conversationViewModel.setTtsVoice(voice.id) })
+                        Spacer(Modifier.width(8.dp))
+                        Text(voice.label)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
 }
 
 @Composable
