@@ -52,23 +52,30 @@ class AndroidAudioFocusManager(context: Context) : AudioFocusManager {
 
 /**
  * Coordinates audio-focus request/abandon around a speaking session, extracted from
- * [AndroidSpeechService] so it's unit-testable without a real [TextToSpeech] (#57). Focus is
- * requested once per [beforeSpeak] and abandoned at most once per request, regardless of how many
- * times [onSpeakingChanged] reports not-speaking (natural completion, stop(), error, shutdown()
- * can all fire it).
+ * [AndroidSpeechService] so it's unit-testable without a real [TextToSpeech] (#57).
+ *
+ * Focus is requested on [onSpeakingChanged] going true (the engine's onStart), not before
+ * `speak()` is called. On-device diagnosis of #67 found that requesting
+ * `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK` immediately before `tts.speak()` made the system TTS
+ * engine's own audio setup fail instantly on at least one device (synthesis dispatched then
+ * onError/onDone within ~2ms, no exception thrown) — every spoken reply was silent. Requesting
+ * focus only once the engine reports speech has actually started avoids racing the engine's own
+ * AudioTrack setup. Do not move this back to a pre-speak request.
+ *
+ * Focus is abandoned at most once per request, regardless of how many times [onSpeakingChanged]
+ * reports not-speaking (natural completion, stop(), error, shutdown() can all fire it).
  */
 class SpeechFocusCoordinator(private val focusManager: AudioFocusManager) {
 
     @Volatile
     private var focusHeld = false
 
-    fun beforeSpeak() {
-        focusManager.request()
-        focusHeld = true
-    }
-
     fun onSpeakingChanged(speaking: Boolean) {
-        if (speaking) return
+        if (speaking) {
+            focusManager.request()
+            focusHeld = true
+            return
+        }
         if (focusHeld) {
             focusManager.abandon()
             focusHeld = false
@@ -186,7 +193,6 @@ class AndroidSpeechService(
 
     override fun speak(text: String) {
         if (!isAvailable) return
-        focusCoordinator.beforeSpeak()
         tts?.speak(text, QUEUE_FLUSH, null, UTTERANCE_ID)
     }
 
