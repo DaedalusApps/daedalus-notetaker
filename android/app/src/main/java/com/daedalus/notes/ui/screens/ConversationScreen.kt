@@ -45,6 +45,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -91,6 +92,7 @@ fun ConversationScreen(
     val isTranscribing by conversationViewModel.isTranscribing.collectAsState()
     val voiceTranscript by conversationViewModel.voiceTranscript.collectAsState()
     val ttsEnabled by conversationViewModel.ttsEnabled.collectAsState()
+    val isSpeaking by conversationViewModel.isSpeaking.collectAsState()
     val instantSend by conversationViewModel.instantSend.collectAsState()
 
     val context = LocalContext.current
@@ -169,10 +171,19 @@ fun ConversationScreen(
                 },
                 actions = {
                     IconButton(
-                        onClick = { conversationViewModel.setTtsEnabled(!ttsEnabled) }
+                        // Tapping while speaking cancels the reply's speech (Cancel reply, P8.4)
+                        // without flipping the enabled toggle; otherwise it behaves as today.
+                        onClick = {
+                            if (isSpeaking) conversationViewModel.stopSpeaking()
+                            else conversationViewModel.setTtsEnabled(!ttsEnabled)
+                        }
                     ) {
                         if (ttsEnabled) {
-                            Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Spoken replies on")
+                            Icon(
+                                Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = if (isSpeaking) "Speaking — tap to stop" else "Spoken replies on",
+                                tint = if (isSpeaking) MaterialTheme.colorScheme.primary else LocalContentColor.current
+                            )
                         } else {
                             Icon(Icons.AutoMirrored.Filled.VolumeOff, contentDescription = "Spoken replies off")
                         }
@@ -315,14 +326,20 @@ fun ConversationScreen(
                     }
                 }
                 IconButton(
+                    // While generating, the send button becomes an inline Stop button (P8.4):
+                    // tapping it aborts the in-flight generation instead of sending.
                     onClick = {
-                        conversationViewModel.send(input)
-                        input = ""
+                        if (isGenerating) {
+                            conversationViewModel.stopGenerating()
+                        } else {
+                            conversationViewModel.send(input)
+                            input = ""
+                        }
                     },
-                    enabled = input.isNotBlank() && !isGenerating
+                    enabled = isGenerating || input.isNotBlank()
                 ) {
                     if (isGenerating) {
-                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Icon(Icons.Default.Stop, contentDescription = "Stop")
                     } else {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }

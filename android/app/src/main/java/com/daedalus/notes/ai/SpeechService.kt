@@ -3,6 +3,7 @@ package com.daedalus.notes.ai
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeech.QUEUE_FLUSH
+import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.util.Log
 import java.util.Locale
@@ -40,6 +41,13 @@ interface SpeechService {
 
     /** Speaks [text] regardless of any caller-side conversation state — used for previews. */
     fun preview(text: String)
+
+    /**
+     * Registers a callback invoked with true when an utterance starts being spoken and false when
+     * it stops. May be called from a non-main thread (TextToSpeech's UtteranceProgressListener
+     * callbacks do not arrive on the main thread) — callers must not assume main-thread delivery.
+     */
+    fun setOnSpeakingChangedListener(listener: (Boolean) -> Unit)
 }
 
 /** [SpeechService] backed by Android's built-in [TextToSpeech] engine. */
@@ -82,6 +90,18 @@ class AndroidSpeechService(context: Context) : SpeechService {
             pendingRate?.let { tts?.setSpeechRate(it) }
             pendingVoiceId?.let { applyVoice(it) }
         }
+        // Callbacks below arrive on a non-main thread (TextToSpeech's internal worker), which is
+        // why setOnSpeakingChangedListener is documented as not main-thread-bound.
+        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) = setSpeaking(true)
+            override fun onDone(utteranceId: String?) = setSpeaking(false)
+            @Deprecated("Deprecated in Java", ReplaceWith(""))
+            override fun onError(utteranceId: String?) = setSpeaking(false)
+        })
+    }
+
+    private fun setSpeaking(speaking: Boolean) {
+        speakingChangedListener?.invoke(speaking)
     }
 
     override fun speak(text: String) {
@@ -125,8 +145,18 @@ class AndroidSpeechService(context: Context) : SpeechService {
 
     override fun preview(text: String) = speak(text)
 
+    @Volatile
+    private var speakingChangedListener: ((Boolean) -> Unit)? = null
+
+    override fun setOnSpeakingChangedListener(listener: (Boolean) -> Unit) {
+        speakingChangedListener = listener
+    }
+
     override fun stop() {
         tts?.stop()
+        // stop() flushes the utterance; onDone/onError delivery after a flush isn't guaranteed,
+        // so the not-speaking signal is emitted here rather than waiting on the progress listener.
+        setSpeaking(false)
     }
 
     // stop() first: shutdown() releases the engine binding but does not reliably cut off an
@@ -137,5 +167,6 @@ class AndroidSpeechService(context: Context) : SpeechService {
         tts?.shutdown()
         tts = null
         isAvailable = false
+        setSpeaking(false)
     }
 }
