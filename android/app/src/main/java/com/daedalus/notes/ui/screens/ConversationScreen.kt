@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -476,69 +475,67 @@ private fun VoiceOnlyInputRow(
     onStopGenerating: () -> Unit
 ) {
     val state = voiceButtonState(isRecordingVoice, isTranscribing, isGenerating)
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+        contentAlignment = Alignment.Center
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            if (state == VoiceButtonState.RECORDING) {
-                val transition = rememberInfiniteTransition(label = "mic-pulse")
-                val ringScale by transition.animateFloat(
-                    initialValue = 1f,
-                    targetValue = 1.6f,
-                    animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
-                    label = "mic-pulse-scale"
-                )
-                val ringAlpha by transition.animateFloat(
-                    initialValue = 0.5f,
-                    targetValue = 0f,
-                    animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
-                    label = "mic-pulse-alpha"
-                )
-                Box(
+        if (state == VoiceButtonState.RECORDING) {
+            val transition = rememberInfiniteTransition(label = "mic-pulse")
+            val ringScale by transition.animateFloat(
+                initialValue = 1f,
+                targetValue = 1.6f,
+                animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
+                label = "mic-pulse-scale"
+            )
+            val ringAlpha by transition.animateFloat(
+                initialValue = 0.5f,
+                targetValue = 0f,
+                animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
+                label = "mic-pulse-alpha"
+            )
+            Box(
+                modifier = Modifier
+                    .size(VOICE_ONLY_MIC_SIZE)
+                    .scale(ringScale)
+                    .alpha(ringAlpha)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.error)
+            )
+        }
+        FilledIconButton(
+            onClick = when (state) {
+                VoiceButtonState.IDLE -> onStartVoiceInput
+                VoiceButtonState.RECORDING -> onStopRecording
+                VoiceButtonState.GENERATING -> onStopGenerating
+                VoiceButtonState.TRANSCRIBING -> ({})
+            },
+            enabled = state != VoiceButtonState.TRANSCRIBING,
+            modifier = Modifier.size(VOICE_ONLY_MIC_SIZE)
+        ) {
+            when (state) {
+                VoiceButtonState.TRANSCRIBING -> CircularProgressIndicator(
                     modifier = Modifier
-                        .size(VOICE_ONLY_MIC_SIZE)
-                        .scale(ringScale)
-                        .alpha(ringAlpha)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.error)
+                        .size(20.dp)
+                        .semantics { contentDescription = "Transcribing" },
+                    strokeWidth = 2.dp
                 )
-            }
-            FilledIconButton(
-                onClick = when (state) {
-                    VoiceButtonState.IDLE -> onStartVoiceInput
-                    VoiceButtonState.RECORDING -> onStopRecording
-                    VoiceButtonState.GENERATING -> onStopGenerating
-                    VoiceButtonState.TRANSCRIBING -> ({})
-                },
-                enabled = state != VoiceButtonState.TRANSCRIBING,
-                modifier = Modifier.size(VOICE_ONLY_MIC_SIZE)
-            ) {
-                when (state) {
-                    VoiceButtonState.TRANSCRIBING -> CircularProgressIndicator(
-                        modifier = Modifier
-                            .size(20.dp)
-                            .semantics { contentDescription = "Transcribing" },
-                        strokeWidth = 2.dp
-                    )
-                    VoiceButtonState.RECORDING -> Icon(
-                        Icons.Default.Stop,
-                        contentDescription = "Stop recording",
-                        modifier = Modifier.size(32.dp)
-                    )
-                    VoiceButtonState.GENERATING -> Icon(
-                        Icons.Default.Stop,
-                        contentDescription = "Stop thinking",
-                        modifier = Modifier.size(32.dp)
-                    )
-                    VoiceButtonState.IDLE -> Icon(
-                        Icons.Default.Mic,
-                        contentDescription = "Start voice input",
-                        modifier = Modifier.size(32.dp)
-                    )
-                }
+                VoiceButtonState.RECORDING -> Icon(
+                    Icons.Default.Stop,
+                    contentDescription = "Stop recording",
+                    modifier = Modifier.size(32.dp)
+                )
+                VoiceButtonState.GENERATING -> Icon(
+                    Icons.Default.Stop,
+                    contentDescription = "Stop thinking",
+                    modifier = Modifier.size(32.dp)
+                )
+                VoiceButtonState.IDLE -> Icon(
+                    Icons.Default.Mic,
+                    contentDescription = "Start voice input",
+                    modifier = Modifier.size(32.dp)
+                )
             }
         }
     }
