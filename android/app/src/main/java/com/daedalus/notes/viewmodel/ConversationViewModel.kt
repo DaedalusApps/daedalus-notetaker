@@ -181,9 +181,12 @@ class ConversationViewModel @JvmOverloads constructor(
 
     /**
      * Sets the spoken-reply rate: persists it, and — mirroring [setTtsEnabled]'s no-bind-when-
-     * disabled guarantee — applies it to the engine and speaks a short preview only if spoken
-     * replies are enabled or the engine has already been built. A disabled user who has never
-     * warmed the engine must not construct one just to change a setting they aren't using.
+     * disabled guarantee — applies it to the engine only if spoken replies are enabled or the
+     * engine has already been built. A disabled user who has never warmed the engine must not
+     * construct one just to change a setting they aren't using.
+     *
+     * The short preview is spoken only while spoken replies are ON: with the toggle off the user
+     * has asked for silence, so an already-built engine is reconfigured mutely.
      */
     fun setTtsRate(rate: Float) {
         _ttsRate.value = rate
@@ -198,7 +201,7 @@ class ConversationViewModel @JvmOverloads constructor(
             val alreadyBuilt = ttsDelegate.isInitialized()
             val engine = tts
             if (alreadyBuilt) engine.setSpeechRate(rate)
-            if (engine.isAvailable) engine.preview("This is a preview of the speech rate.")
+            if (_ttsEnabled.value && engine.isAvailable) engine.preview("This is a preview of the speech rate.")
         }
     }
 
@@ -214,12 +217,17 @@ class ConversationViewModel @JvmOverloads constructor(
             val alreadyBuilt = ttsDelegate.isInitialized()
             val engine = tts
             if (alreadyBuilt) engine.setVoice(id)
-            if (engine.isAvailable) engine.preview("This is a preview of the selected voice.")
+            if (_ttsEnabled.value && engine.isAvailable) engine.preview("This is a preview of the selected voice.")
         }
     }
 
-    /** Voices available for the picker UI; empty when TTS is unavailable. */
-    fun availableVoices(): List<VoiceInfo> = tts.availableVoices()
+    /**
+     * Voices available for the picker UI; empty when TTS is unavailable. Also empty — without
+     * touching the engine — when spoken replies are off and the engine was never built: merely
+     * opening the picker must not bind a TextToSpeech engine the user isn't using.
+     */
+    fun availableVoices(): List<VoiceInfo> =
+        if (_ttsEnabled.value || ttsDelegate.isInitialized()) tts.availableVoices() else emptyList()
 
     // Rolling summary of messages already folded out of the live context, and the index into
     // _messages up to which that summary applies. The session FILE always has every turn

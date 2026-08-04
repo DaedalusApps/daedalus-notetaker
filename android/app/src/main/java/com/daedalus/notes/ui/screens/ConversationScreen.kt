@@ -389,6 +389,14 @@ private fun VoiceDialog(
                     Spacer(Modifier.width(8.dp))
                     Text("System default")
                 }
+                if (voices.isEmpty()) {
+                    Text(
+                        "No other voices available. Turn spoken replies on to see the voices your " +
+                            "device's speech engine offers.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
                 voices.forEach { voice: VoiceInfo ->
                     Row(
                         modifier = Modifier

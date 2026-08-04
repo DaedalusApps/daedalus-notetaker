@@ -3,6 +3,7 @@ package com.daedalus.notes.ai
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeech.QUEUE_FLUSH
+import android.speech.tts.Voice
 import android.util.Log
 import java.util.Locale
 
@@ -31,7 +32,10 @@ interface SpeechService {
     /** Voices available for the engine's current/default language only, "Voice 1"/"Voice 2"…. */
     fun availableVoices(): List<VoiceInfo>
 
-    /** Selects the voice with the given [VoiceInfo.id]. Returns false if the id is unknown. */
+    /**
+     * Selects the voice with the given [VoiceInfo.id]; an empty id restores the engine's default
+     * voice. Returns false if the id is unknown.
+     */
     fun setVoice(id: String): Boolean
 
     /** Speaks [text] regardless of any caller-side conversation state — used for previews. */
@@ -47,8 +51,18 @@ class AndroidSpeechService(context: Context) : SpeechService {
 
     private var tts: TextToSpeech? = null
 
-    // Rate/voice requested before the engine finished initializing; applied once it has.
+    // The engine's voice as it was at init, so picking "system default" (an empty id) can put it
+    // back — without it, deselecting a custom voice would leave the custom voice speaking until
+    // the process restarted while the UI claimed the default was in use.
+    @Volatile
+    private var defaultVoice: Voice? = null
+
+    // Rate/voice requested before the engine finished initializing; applied once it has. Volatile
+    // because they are written by the caller and read from the engine's init callback.
+    @Volatile
     private var pendingRate: Float? = null
+
+    @Volatile
     private var pendingVoiceId: String? = null
 
     init {
@@ -64,8 +78,9 @@ class AndroidSpeechService(context: Context) : SpeechService {
                 Log.w(TAG, "TextToSpeech language unavailable: $result")
                 return@TextToSpeech
             }
+            defaultVoice = tts?.voice ?: tts?.defaultVoice
             pendingRate?.let { tts?.setSpeechRate(it) }
-            pendingVoiceId?.let { id -> tts?.voices?.firstOrNull { it.name == id }?.let { tts?.voice = it } }
+            pendingVoiceId?.let { applyVoice(it) }
         }
     }
 
@@ -91,13 +106,20 @@ class AndroidSpeechService(context: Context) : SpeechService {
     }
 
     override fun setVoice(id: String): Boolean {
-        val engine = tts
-        if (engine == null || !isAvailable) {
+        if (tts == null || !isAvailable) {
             pendingVoiceId = id
             return true
         }
-        val voice = engine.voices?.firstOrNull { it.name == id } ?: return false
-        engine.voice = voice
+        return applyVoice(id)
+    }
+
+    /** Applies [id] to a live engine; an empty id restores the voice captured at init. */
+    private fun applyVoice(id: String): Boolean {
+        val engine = tts ?: return false
+        val voice =
+            if (id.isEmpty()) defaultVoice
+            else engine.voices?.firstOrNull { it.name == id }
+        engine.voice = voice ?: return false
         return true
     }
 

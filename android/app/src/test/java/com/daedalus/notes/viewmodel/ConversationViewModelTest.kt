@@ -1004,11 +1004,55 @@ class ConversationViewModelTest {
     fun availableVoices_returnsEngineVoices() = runTest {
         every { tts.availableVoices() } returns listOf(VoiceInfo("a", "Voice 1"), VoiceInfo("b", "Voice 2"))
         val vm = newViewModel()
+        vm.setTtsEnabled(true)
 
         val voices = vm.availableVoices()
 
         assertEquals(2, voices.size)
         assertEquals("Voice 1", voices[0].label)
+    }
+
+    // (P8.2-b) Opening the voice picker with spoken replies off and the engine never built must
+    //     report no voices rather than binding a TextToSpeech engine the user isn't using.
+    @Test
+    fun availableVoices_ttsDisabledEngineNeverBuilt_returnsEmptyWithoutConstructingEngine() = runTest {
+        every { tts.availableVoices() } returns listOf(VoiceInfo("a", "Voice 1"))
+        val vm = newViewModel()
+
+        assertTrue(vm.availableVoices().isEmpty())
+        assertEquals(0, ttsConstructions)
+    }
+
+    // (P8.2-g) With the engine already built but spoken replies switched off, a settings change
+    //     still reaches the engine but must not speak — the user asked for silence.
+    @Test
+    fun setTtsRate_engineBuiltButTtsDisabled_appliesToEngineWithoutPreviewing() = runTest {
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+        vm.setTtsRate(1.5f) // builds the engine and previews once
+        vm.setTtsEnabled(false)
+
+        vm.setTtsRate(0.75f)
+
+        assertEquals(0.75f, vm.ttsRate.value)
+        verify(exactly = 1) { tts.setSpeechRate(0.75f) }
+        verify(exactly = 1) { tts.preview(any()) } // still just the enabled-state preview
+    }
+
+    // (P8.2-b) Picking "System default" persists the empty id and forwards it to the engine, which
+    //     is what restores the engine's original voice after a custom one was applied live.
+    @Test
+    fun setTtsVoice_systemDefault_persistsEmptyIdAndForwardsItToEngine() = runTest {
+        every { tts.setVoice(any()) } returns true
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+        vm.setTtsVoice("Voice-1")
+
+        vm.setTtsVoice("")
+
+        assertEquals("", vm.ttsVoiceId.value)
+        assertEquals("", prefs().getString(CONVERSATION_TTS_VOICE_KEY, null))
+        verify(exactly = 1) { tts.setVoice("") }
     }
 
     // (P8.2) Defaults: rate 1.0f, voice "" (system default), before any preference is set.
