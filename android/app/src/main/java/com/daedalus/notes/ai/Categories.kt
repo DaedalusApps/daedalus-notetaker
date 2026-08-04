@@ -21,9 +21,16 @@ Transcript:"""
 
 // Transcripts longer than this are split into chunks before LLM analysis.
 // Budget: 4096 total tokens − ~195 prompt (incl. guardrail) − ~800 output = ~3100 tokens ≈ 12,400 chars.
-private const val SINGLE_PASS_CHAR_LIMIT = 12_000
-private const val CHUNK_CHAR_SIZE = 10_000
+const val AI_TEXT_BUDGET_KEY = "ai_text_budget_chars"
+const val AI_TEXT_BUDGET_DEFAULT = 12_000
+private const val AI_TEXT_BUDGET_MIN = 2_000
 private const val CHUNK_OVERLAP_CHARS = 500
+
+/** Reads the configured AI text budget (chars), clamped to a sane floor. */
+fun aiTextBudget(context: Context): Int =
+    context.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
+        .getInt(AI_TEXT_BUDGET_KEY, AI_TEXT_BUDGET_DEFAULT)
+        .coerceAtLeast(AI_TEXT_BUDGET_MIN)
 
 const val CHUNK_SUMMARY_PROMPT = OFFLINE_GUARDRAIL + "\n\n" + """Summarize this section of a meeting transcript as concise bullet points.
 
@@ -31,15 +38,16 @@ Return ONLY bullet points: main points starting with "- ", sub-points with "  - 
 
 Section:"""
 
-fun chunkTranscript(transcript: String): List<String> {
-    if (transcript.length <= SINGLE_PASS_CHAR_LIMIT) return listOf(transcript)
+fun chunkTranscript(transcript: String, budget: Int = AI_TEXT_BUDGET_DEFAULT): List<String> {
+    if (transcript.length <= budget) return listOf(transcript)
+    val chunkSize = (budget - 2_000).coerceAtLeast(1_000)
     val chunks = mutableListOf<String>()
     var start = 0
     while (start < transcript.length) {
-        val end = minOf(start + CHUNK_CHAR_SIZE, transcript.length)
+        val end = minOf(start + chunkSize, transcript.length)
         val splitAt = if (end < transcript.length) {
             val wb = transcript.lastIndexOf(' ', end)
-            if (wb > start + CHUNK_CHAR_SIZE / 2) wb else end
+            if (wb > start + chunkSize / 2) wb else end
         } else end
         chunks.add(transcript.substring(start, splitAt))
         if (splitAt >= transcript.length) break
