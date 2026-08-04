@@ -1261,6 +1261,49 @@ class ConversationViewModelTest {
         assertFalse(vm.isSpeaking.value)
     }
 
+    // (P9.1-a) ttsReady starts false and flips true when the wrapper reports the engine ready,
+    //     mirroring how isSpeaking reflects the wrapper's speaking-changed callback.
+    @Test
+    fun ttsReady_reflectsWrapperReadyCallback() = runTest {
+        val listenerSlot = slot<(Boolean) -> Unit>()
+        every { tts.setOnReadyChangedListener(capture(listenerSlot)) } returns Unit
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+
+        // Engine is built lazily; trigger it the same way availableVoices()/setTtsRate() do.
+        vm.setTtsRate(vm.ttsRate.value)
+
+        assertFalse(vm.ttsReady.value)
+        listenerSlot.captured(true)
+        assertTrue(vm.ttsReady.value)
+        listenerSlot.captured(false)
+        assertFalse(vm.ttsReady.value)
+    }
+
+    // (P9.1-b) The ready listener must be registered at the same point the engine is lazily
+    //     built (mirroring setOnSpeakingChangedListener), so ttsReady tracks a freshly built engine.
+    @Test
+    fun ttsReady_listenerRegisteredWhenEngineBuilt() = runTest {
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+
+        vm.setTtsRate(vm.ttsRate.value) // first touch that builds the engine
+
+        verify(exactly = 1) { tts.setOnReadyChangedListener(any()) }
+        assertEquals(1, ttsConstructions)
+    }
+
+    // (P9.1-c) Observing ttsReady with spoken replies off must not build the engine — mirrors
+    //     availableVoices_ttsDisabledEngineNeverBuilt_returnsEmptyWithoutConstructingEngine.
+    @Test
+    fun ttsReady_ttsDisabled_neverBuildsEngine() = runTest {
+        val vm = newViewModel()
+
+        assertFalse(vm.ttsReady.value)
+
+        assertEquals(0, ttsConstructions)
+    }
+
     // (P8.4-d) Tapping the speaker while speaking must stop the speech without flipping the
     //     ttsEnabled preference — distinct from the toggle behavior when not speaking.
     @Test
