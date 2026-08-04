@@ -27,6 +27,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
@@ -75,6 +77,7 @@ fun ConversationScreen(
     val isRecordingVoice by conversationViewModel.isRecordingVoice.collectAsState()
     val isTranscribing by conversationViewModel.isTranscribing.collectAsState()
     val voiceTranscript by conversationViewModel.voiceTranscript.collectAsState()
+    val ttsEnabled by conversationViewModel.ttsEnabled.collectAsState()
 
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
@@ -113,10 +116,14 @@ fun ConversationScreen(
         }
     }
 
-    // Leaving the screen abandons an in-progress recording; the ViewModel outlives this
-    // composable, so an unstopped recorder would otherwise hold the mic indefinitely.
+    // Leaving the screen abandons an in-progress recording and stops any in-progress speech; the
+    // ViewModel outlives this composable, so leaving either running would otherwise hold the mic
+    // or keep talking after the user navigated away.
     DisposableEffect(Unit) {
-        onDispose { conversationViewModel.cancelVoiceInput() }
+        onDispose {
+            conversationViewModel.cancelVoiceInput()
+            conversationViewModel.stopSpeaking()
+        }
     }
 
     Scaffold(
@@ -131,6 +138,15 @@ fun ConversationScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { conversationViewModel.setTtsEnabled(!ttsEnabled) }
+                    ) {
+                        if (ttsEnabled) {
+                            Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Spoken replies on")
+                        } else {
+                            Icon(Icons.AutoMirrored.Filled.VolumeOff, contentDescription = "Spoken replies off")
+                        }
+                    }
                     IconButton(
                         onClick = { conversationViewModel.endSession() },
                         enabled = messages.isNotEmpty() && !isGenerating
