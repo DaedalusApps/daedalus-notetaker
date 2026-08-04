@@ -20,6 +20,7 @@ data class ChatTurn(val role: Role, val text: String)
 // Gemma has no system role, so the system prompt is folded into the first user turn.
 internal fun buildGemmaPrompt(systemPrompt: String, turns: List<ChatTurn>): String {
     require(turns.isNotEmpty()) { "turns must not be empty" }
+    require(turns.first().role == Role.USER) { "first turn must be USER" }
     require(turns.last().role == Role.USER) { "last turn must be USER" }
     for (i in 1 until turns.size) {
         require(turns[i].role != turns[i - 1].role) { "consecutive turns must not share the same role" }
