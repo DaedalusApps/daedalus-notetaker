@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.daedalus.notes.data.model.Recording
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -25,18 +24,25 @@ class OfflineGuardrailTest {
     }
 
     @Test
-    fun defaultPrompt_containsGuardrail() {
-        assertTrue(DEFAULT_PROMPT.contains(OFFLINE_GUARDRAIL))
+    fun defaultPrompt_containsGuardrailExactlyOnce() {
+        assertEquals(1, countOccurrences(DEFAULT_PROMPT, OFFLINE_GUARDRAIL))
     }
 
     @Test
-    fun chunkSummaryPrompt_containsGuardrail() {
-        assertTrue(CHUNK_SUMMARY_PROMPT.contains(OFFLINE_GUARDRAIL))
+    fun chunkSummaryPrompt_containsGuardrailExactlyOnce() {
+        assertEquals(1, countOccurrences(CHUNK_SUMMARY_PROMPT, OFFLINE_GUARDRAIL))
     }
 
     @Test
-    fun todoExtractionPrompt_containsGuardrail() {
-        assertTrue(TODO_EXTRACTION_PROMPT.contains(OFFLINE_GUARDRAIL))
+    fun todoExtractionPrompt_containsGuardrailExactlyOnce() {
+        assertEquals(1, countOccurrences(TODO_EXTRACTION_PROMPT, OFFLINE_GUARDRAIL))
+    }
+
+    /** TodoViewModel appends an "Already tracked" block; that must not add a second guardrail. */
+    @Test
+    fun todoExtractionPrompt_withTrackedBlock_containsGuardrailExactlyOnce() {
+        val prompt = TODO_EXTRACTION_PROMPT + "\n\nAlready tracked (do not repeat):\n- buy milk"
+        assertEquals(1, countOccurrences(prompt, OFFLINE_GUARDRAIL))
     }
 
     @Test
@@ -52,26 +58,33 @@ class OfflineGuardrailTest {
         assertEquals(1, countOccurrences(prompt, OFFLINE_GUARDRAIL))
     }
 
+    /** The prompt editor pre-fills DEFAULT_PROMPT, so a saved edit already has the guardrail. */
     @Test
-    fun noteQuestionPrompt_containsGuardrail() {
-        val prompt = buildNoteQuestionPrompt("Title", "Summary")
-        assertTrue(prompt.contains(OFFLINE_GUARDRAIL))
+    fun activePrompt_customEditedFromDefault_containsGuardrailExactlyOnce() {
+        prefs().edit().putString("custom_prompt", "$DEFAULT_PROMPT\nAlso be brief.").commit()
+        val prompt = activePrompt(context)
+        assertEquals(1, countOccurrences(prompt, OFFLINE_GUARDRAIL))
     }
 
     @Test
-    fun libraryQuestionPrompt_containsGuardrail() {
+    fun activePrompt_blankCustom_fallsBackToDefault() {
+        prefs().edit().putString("custom_prompt", "   \n ").commit()
+        assertEquals(DEFAULT_PROMPT, activePrompt(context))
+    }
+
+    @Test
+    fun noteQuestionPrompt_containsGuardrailExactlyOnce() {
+        val prompt = buildNoteQuestionPrompt("Title", "Summary")
+        assertEquals(1, countOccurrences(prompt, OFFLINE_GUARDRAIL))
+    }
+
+    @Test
+    fun libraryQuestionPrompt_containsGuardrailExactlyOnce() {
         val source = Recording(filename = "a.wav", title = "Note A", shortSummary = "Summary A")
         val prompt = buildLibraryQuestionPrompt(listOf(source))
-        assertTrue(prompt.contains(OFFLINE_GUARDRAIL))
+        assertEquals(1, countOccurrences(prompt, OFFLINE_GUARDRAIL))
     }
 
-    private fun countOccurrences(haystack: String, needle: String): Int {
-        var count = 0
-        var index = haystack.indexOf(needle)
-        while (index != -1) {
-            count++
-            index = haystack.indexOf(needle, index + needle.length)
-        }
-        return count
-    }
+    private fun countOccurrences(haystack: String, needle: String): Int =
+        haystack.split(needle).size - 1
 }

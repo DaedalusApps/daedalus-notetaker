@@ -20,7 +20,7 @@ Return ONLY a JSON object with exactly these 5 keys. No markdown, no code fences
 Transcript:"""
 
 // Transcripts longer than this are split into chunks before LLM analysis.
-// Budget: 4096 total tokens − ~135 prompt − ~800 output = ~3160 tokens ≈ 12,600 chars.
+// Budget: 4096 total tokens − ~195 prompt (incl. guardrail) − ~800 output = ~3100 tokens ≈ 12,400 chars.
 private const val SINGLE_PASS_CHAR_LIMIT = 12_000
 private const val CHUNK_CHAR_SIZE = 10_000
 private const val CHUNK_OVERLAP_CHARS = 500
@@ -52,7 +52,10 @@ fun chunkTranscript(transcript: String): List<String> {
 fun activePrompt(context: Context): String {
     val custom = context.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
         .getString("custom_prompt", null)
-    return if (custom != null) "$custom\n\n$OFFLINE_GUARDRAIL" else DEFAULT_PROMPT
+    // A saved custom prompt is usually an edit of DEFAULT_PROMPT, so it already carries the
+    // guardrail — appending unconditionally would repeat it.
+    if (custom.isNullOrBlank()) return DEFAULT_PROMPT
+    return if (custom.contains(OFFLINE_GUARDRAIL)) custom else "$custom\n\n$OFFLINE_GUARDRAIL"
 }
 
 fun buildNoteQuestionPrompt(title: String, summary: String): String =
