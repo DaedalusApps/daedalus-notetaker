@@ -9,6 +9,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.daedalus.notes.ui.screens.AskHomeScreen
+import com.daedalus.notes.ui.screens.ConversationScreen
 import com.daedalus.notes.ui.screens.GlobalMindMapScreen
 import com.daedalus.notes.ui.screens.ModelDownloadScreen
 import com.daedalus.notes.ui.screens.NoteDetailScreen
@@ -17,6 +18,7 @@ import com.daedalus.notes.ui.screens.RecordingsScreen
 import com.daedalus.notes.ui.screens.SettingsScreen
 import com.daedalus.notes.ui.screens.SplashScreen
 import com.daedalus.notes.ui.screens.TodoScreen
+import com.daedalus.notes.viewmodel.ConversationViewModel
 import com.daedalus.notes.viewmodel.DeviceViewModel
 import com.daedalus.notes.viewmodel.RecordingViewModel
 import com.daedalus.notes.viewmodel.TodoViewModel
@@ -26,7 +28,8 @@ fun NavGraph(
     navController: NavHostController,
     deviceViewModel: DeviceViewModel,
     recordingViewModel: RecordingViewModel,
-    todoViewModel: TodoViewModel
+    todoViewModel: TodoViewModel,
+    conversationViewModel: ConversationViewModel
 ) {
     NavHost(navController = navController, startDestination = "splash") {
 
@@ -56,13 +59,21 @@ fun NavGraph(
                 onNavigateToRecordings = { navController.navigate("recordings") },
                 onNavigateToExpandedMap = { navController.navigate("global_mind_map") },
                 onNavigateToSettings = { navController.navigate("settings") },
-                onNavigateToTodos = { navController.navigate("todos") }
+                onNavigateToTodos = { navController.navigate("todos") },
+                onNavigateToConversation = { navController.navigate("conversation") }
             )
         }
 
         composable("todos") {
             TodoScreen(
                 todoViewModel = todoViewModel,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("conversation") {
+            ConversationScreen(
+                conversationViewModel = conversationViewModel,
                 onBack = { navController.popBackStack() }
             )
         }
