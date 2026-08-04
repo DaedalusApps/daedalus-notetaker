@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -84,6 +83,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -94,7 +95,9 @@ import com.daedalus.notes.ai.Role
 import com.daedalus.notes.ai.VoiceInfo
 import com.daedalus.notes.viewmodel.ChatMessage
 import com.daedalus.notes.viewmodel.ConversationViewModel
+import com.daedalus.notes.viewmodel.VoiceButtonState
 import com.daedalus.notes.viewmodel.canStartNewSession
+import com.daedalus.notes.viewmodel.voiceButtonState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -369,10 +372,9 @@ fun ConversationScreen(
                     isRecordingVoice = isRecordingVoice,
                     isTranscribing = isTranscribing,
                     isGenerating = isGenerating,
-                    onMicClick = {
-                        if (isRecordingVoice) conversationViewModel.stopVoiceInput() else startVoiceInput()
-                    },
-                    onStopGeneratingClick = { conversationViewModel.stopGenerating() }
+                    onStartVoiceInput = startVoiceInput,
+                    onStopRecording = { conversationViewModel.stopVoiceInput() },
+                    onStopGenerating = { conversationViewModel.stopGenerating() }
                 )
             } else {
                 Row(
@@ -450,77 +452,90 @@ fun ConversationScreen(
 private val VOICE_ONLY_MIC_SIZE = 72.dp
 
 /**
- * The voice-only instant-send input surface (P9.3): replaces the text field + send button
- * entirely with one large centered mic button. Tapping it starts recording via [onMicClick]
- * (which — per [ConversationViewModel.startVoiceInputInterruptingSpeech] — stops any playing
- * reply first); while recording, the same-size button becomes Stop with a pulsing ring behind it;
- * on stop it reverts to mic, disabled only while [isTranscribing] runs (every other guard is
- * enforced by the ViewModel, not weakened here). Generation has no send button to double as a
- * Stop affordance in this mode, so a compact Stop pill is shown above the mic while [isGenerating].
+ * The voice-only instant-send input surface (P9.3, morphed into a single center button by
+ * P10.1): one button that morphs by [VoiceButtonState] rather than a big mic plus a separate Stop
+ * pill — the owner rule is that a stop and a mic are never visible at once.
+ *
+ * IDLE shows Mic and starts recording via [onStartVoiceInput] (which — per
+ * [ConversationViewModel.startVoiceInputInterruptingSpeech] — stops any playing reply first).
+ * RECORDING shows Stop with a pulsing ring and calls [onStopRecording]; it stays tappable even if
+ * generation starts mid-recording (e.g. via endSession), so the user can never be locked out of
+ * stopping their own recording (P9.3 mic-hostage lesson). TRANSCRIBING disables the button and
+ * shows a small spinner in its place. GENERATING shows Stop (no pulse) and calls
+ * [onStopGenerating]; recording cannot be started from this state — auto-listen handles
+ * hands-free continuation once generation ends.
  */
 @Composable
 private fun VoiceOnlyInputRow(
     isRecordingVoice: Boolean,
     isTranscribing: Boolean,
     isGenerating: Boolean,
-    onMicClick: () -> Unit,
-    onStopGeneratingClick: () -> Unit
+    onStartVoiceInput: () -> Unit,
+    onStopRecording: () -> Unit,
+    onStopGenerating: () -> Unit
 ) {
-    Column(
+    val state = voiceButtonState(isRecordingVoice, isTranscribing, isGenerating)
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+        contentAlignment = Alignment.Center
     ) {
-        if (isGenerating) {
-            TextButton(onClick = onStopGeneratingClick) {
-                Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Stop")
-            }
-            Spacer(Modifier.height(4.dp))
+        if (state == VoiceButtonState.RECORDING) {
+            val transition = rememberInfiniteTransition(label = "mic-pulse")
+            val ringScale by transition.animateFloat(
+                initialValue = 1f,
+                targetValue = 1.6f,
+                animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
+                label = "mic-pulse-scale"
+            )
+            val ringAlpha by transition.animateFloat(
+                initialValue = 0.5f,
+                targetValue = 0f,
+                animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
+                label = "mic-pulse-alpha"
+            )
+            Box(
+                modifier = Modifier
+                    .size(VOICE_ONLY_MIC_SIZE)
+                    .scale(ringScale)
+                    .alpha(ringAlpha)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.error)
+            )
         }
-        Box(contentAlignment = Alignment.Center) {
-            if (isRecordingVoice) {
-                val transition = rememberInfiniteTransition(label = "mic-pulse")
-                val ringScale by transition.animateFloat(
-                    initialValue = 1f,
-                    targetValue = 1.6f,
-                    animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
-                    label = "mic-pulse-scale"
-                )
-                val ringAlpha by transition.animateFloat(
-                    initialValue = 0.5f,
-                    targetValue = 0f,
-                    animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart),
-                    label = "mic-pulse-alpha"
-                )
-                Box(
+        FilledIconButton(
+            onClick = when (state) {
+                VoiceButtonState.IDLE -> onStartVoiceInput
+                VoiceButtonState.RECORDING -> onStopRecording
+                VoiceButtonState.GENERATING -> onStopGenerating
+                VoiceButtonState.TRANSCRIBING -> ({})
+            },
+            enabled = state != VoiceButtonState.TRANSCRIBING,
+            modifier = Modifier.size(VOICE_ONLY_MIC_SIZE)
+        ) {
+            when (state) {
+                VoiceButtonState.TRANSCRIBING -> CircularProgressIndicator(
                     modifier = Modifier
-                        .size(VOICE_ONLY_MIC_SIZE)
-                        .scale(ringScale)
-                        .alpha(ringAlpha)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.error)
+                        .size(20.dp)
+                        .semantics { contentDescription = "Transcribing" },
+                    strokeWidth = 2.dp
                 )
-            }
-            FilledIconButton(
-                onClick = onMicClick,
-                // Stays tappable while recording so the user can always stop; otherwise disabled
-                // only while transcribing — generation does not block the mic in this mode (P9.3
-                // item 5), the ViewModel's own guards decide whether a press actually does anything.
-                enabled = isRecordingVoice || !isTranscribing,
-                modifier = Modifier.size(VOICE_ONLY_MIC_SIZE)
-            ) {
-                when {
-                    isTranscribing -> CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp)
-                    isRecordingVoice -> Icon(
-                        Icons.Default.Stop,
-                        contentDescription = "Stop recording",
-                        modifier = Modifier.size(32.dp)
-                    )
-                    else -> Icon(Icons.Default.Mic, contentDescription = "Start voice input", modifier = Modifier.size(32.dp))
-                }
+                VoiceButtonState.RECORDING -> Icon(
+                    Icons.Default.Stop,
+                    contentDescription = "Stop recording",
+                    modifier = Modifier.size(32.dp)
+                )
+                VoiceButtonState.GENERATING -> Icon(
+                    Icons.Default.Stop,
+                    contentDescription = "Stop thinking",
+                    modifier = Modifier.size(32.dp)
+                )
+                VoiceButtonState.IDLE -> Icon(
+                    Icons.Default.Mic,
+                    contentDescription = "Start voice input",
+                    modifier = Modifier.size(32.dp)
+                )
             }
         }
     }
