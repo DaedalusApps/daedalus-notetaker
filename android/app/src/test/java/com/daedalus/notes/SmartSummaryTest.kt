@@ -49,6 +49,13 @@ class SmartSummaryTest {
         assertFalse(DateUtils.isConversationNote(""))
     }
 
+    /** An audio file imported via syncFiles keeps its own name, which may start with "conv_". */
+    @Test
+    fun isConversationNote_importedAudioNamedLikeConversation_returnsFalse() {
+        assertFalse(DateUtils.isConversationNote("conv_meeting.mp3"))
+        assertFalse(DateUtils.isConversationNote("conv_20260804080519.mp3"))
+    }
+
     @Test
     fun smartAnalysisParser_validJson_returnsAnalysis() {
         val json = """
