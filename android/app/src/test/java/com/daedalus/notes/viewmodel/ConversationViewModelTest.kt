@@ -337,6 +337,15 @@ class ConversationViewModelTest {
             firstRolloverReplyTurns.sumOf { it.text.length }
         assertTrue("live context ($totalContextChars) must fit the budget ($budget)", totalContextChars <= budget)
 
+        // The tail must still start with a USER turn: buildGemmaPrompt folds the system prompt
+        // (carrying the summary) into a leading USER turn only, and silently drops it otherwise.
+        assertEquals(Role.USER, firstRolloverReplyTurns.first().role)
+        val prompt = buildGemmaPrompt(firstRolloverSystemPrompt, firstRolloverReplyTurns)
+        assertTrue(
+            "the rolling summary must actually reach the model's prompt",
+            prompt.contains("Rolling summary one.")
+        )
+
         // One more send pushes past the budget again; the second summary call must compound on
         // top of the first rolling summary.
         vm.send("fourth $pad"); advanceUntilIdle()
@@ -384,5 +393,54 @@ class ConversationViewModelTest {
         // Next rollover retries summarizing rather than giving up permanently.
         vm.send("fifth $pad"); advanceUntilIdle()
         assertEquals(2, summaryCallCount)
+    }
+
+    // (l) P5.3: the summarizer's output length is not guaranteed and each rollover feeds the
+    //     previous summary back in, so an over-long summary must be clamped before injection —
+    //     otherwise the compounding summary defeats the very cap it exists to enforce.
+    @Test
+    fun send_oversizedSummary_isClampedBeforeInjection() = runTest {
+        val budget = 700
+        val replySystemPrompts = mutableListOf<String>()
+        coEvery { llm.generate(any(), any<String>()) } returns "S".repeat(5_000)
+        coEvery { llm.generate(capture(replySystemPrompts), any<List<ChatTurn>>()) } returns "reply"
+        val vm = newViewModel(contextBudgetChars = budget)
+        val pad = "x".repeat(60)
+
+        vm.send("first $pad"); advanceUntilIdle()
+        vm.send("second $pad"); advanceUntilIdle()
+        vm.send("third $pad"); advanceUntilIdle()
+        vm.send("fourth $pad"); advanceUntilIdle()
+
+        val injected = replySystemPrompts.last().substringAfter("so far: ")
+        assertEquals(175, injected.length)
+    }
+
+    // (m) P5.3: a later summarize failure must not throw away a summary an earlier rollover
+    //     already earned — falling back to the bare system prompt would lose that context for
+    //     nothing, since the tail-only send is already a subset of the over-budget context.
+    @Test
+    fun send_summaryFailsAfterEarlierSuccess_keepsPreviousSummary() = runTest {
+        val budget = 700
+        val replySystemPrompts = mutableListOf<String>()
+        coEvery { llm.generate(any(), any<String>()) } returns "Rolling summary one." andThenThrows
+            RuntimeException("summary failed")
+        coEvery { llm.generate(capture(replySystemPrompts), any<List<ChatTurn>>()) } returns "reply"
+        val vm = newViewModel(contextBudgetChars = budget)
+        val pad = "x".repeat(60)
+
+        vm.send("first $pad"); advanceUntilIdle()
+        vm.send("second $pad"); advanceUntilIdle()
+        vm.send("third $pad"); advanceUntilIdle()
+        vm.send("fourth $pad"); advanceUntilIdle()
+        assertTrue(replySystemPrompts.last().contains("Rolling summary one."))
+
+        vm.send("fifth $pad"); advanceUntilIdle()
+
+        assertNull(vm.error.value)
+        assertTrue(
+            "the earlier rolling summary must survive a later summarize failure",
+            replySystemPrompts.last().contains("Rolling summary one.")
+        )
     }
 }

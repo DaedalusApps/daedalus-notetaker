@@ -31,7 +31,8 @@ private const val IDEATION_SYSTEM_PROMPT = "You are a thoughtful ideation partne
 
 private const val SUMMARY_PROMPT = "Summarize this conversation so far as a concise rolling " +
     "summary, capturing key decisions, ideas, and open threads. Write it as prose (no bullet " +
-    "points) so it can be folded into a system prompt.\n\n" + OFFLINE_GUARDRAIL
+    "points) so it can be folded into a system prompt. Keep it under 200 words.\n\n" +
+    OFFLINE_GUARDRAIL
 
 // aiTextBudget() already derives its char budget from the model's 4096-token context minus
 // prompt/output headroom (see AI_TEXT_BUDGET_DEFAULT in Categories.kt). Conversation turns
@@ -43,6 +44,12 @@ private const val CONVERSATION_CONTEXT_FRACTION = 0.75
 
 // Keeps the last two exchanges (user + model turns) intact in the live context on rollover.
 private const val TAIL_MESSAGE_COUNT = 4
+
+// Hard ceiling on the injected summary, as a fraction of the context budget. The model is asked
+// for a short summary but its output length is not guaranteed, and each rollover feeds the
+// previous summary back in, so without a clamp a compounding summary could grow the real sent
+// context past the budget the trip-check assumes.
+private const val SUMMARY_BUDGET_FRACTION = 0.25
 
 private val SESSION_FILENAME_REGEX = Regex("""conv_(\d{14})\.md""")
 private val TURN_HEADER_REGEX = Regex("""^\*\*(Me|Agent)\*\* \((\d{2}):(\d{2})\):$""")
@@ -149,9 +156,11 @@ class ConversationViewModel @JvmOverloads constructor(
      * While the unsummarized tail of [messages] fits the budget, it is sent in full. Once it
      * would overflow, the older portion (everything but the last [TAIL_MESSAGE_COUNT] messages)
      * is folded into a rolling summary — compounding any prior summary — which is injected into
-     * the system prompt so the turn list keeps starting with USER and alternating. If the
-     * summarize call fails, this falls back to plain tail-truncation for this send only; the
-     * rolling summary state is left untouched so the next rollover retries it.
+     * the system prompt so the turn list keeps starting with USER and alternating. The summary is
+     * clamped to [SUMMARY_BUDGET_FRACTION] of the budget so compounding cannot grow it without
+     * bound. If the summarize call fails, this falls back to the previous summary plus the tail
+     * for this send only; the rolling summary state is left untouched so the next rollover
+     * retries it.
      */
     private suspend fun buildLiveContext(messages: List<ChatMessage>): Pair<String, List<ChatTurn>> {
         fun systemPromptWith(summary: String?): String =
@@ -169,7 +178,12 @@ class ConversationViewModel @JvmOverloads constructor(
             return systemPrompt to liveTurns
         }
 
-        val tailStart = messages.size - TAIL_MESSAGE_COUNT
+        // buildGemmaPrompt only folds the system prompt — and with it the injected summary — into
+        // a LEADING USER turn, so the tail must start on one. A complete history is odd-length at
+        // this point (the just-sent user turn is last), which puts a MODEL turn at the raw tail
+        // start; that turn is pushed into the summarized span instead, so nothing is skipped.
+        var tailStart = messages.size - TAIL_MESSAGE_COUNT
+        while (tailStart < messages.size - 1 && messages[tailStart].role != Role.USER) tailStart++
         val olderMessages = messages.subList(summarizedThroughIndex, tailStart)
         val tailMessages = messages.subList(tailStart, messages.size)
         val olderText = buildString {
@@ -181,19 +195,25 @@ class ConversationViewModel @JvmOverloads constructor(
             }
         }
 
+        // A blank generation is treated as a failure: accepting it would advance
+        // summarizedThroughIndex and drop the older span with nothing standing in for it.
         val newSummary = try {
-            llm.generate(SUMMARY_PROMPT, olderText)
+            llm.generate(SUMMARY_PROMPT, olderText).trim().ifBlank { null }
         } catch (e: Exception) {
             Log.e("ConversationViewModel", "Summary generation failed, falling back to tail truncation", e)
             null
         }
 
         if (newSummary == null) {
-            return IDEATION_SYSTEM_PROMPT to toChatTurns(tailMessages)
+            // Keep any summary earned by an earlier rollover: dropping it would discard context
+            // that is already safely folded down, for no budget gain (this send is a strict
+            // subset of the over-budget context measured above).
+            return systemPrompt to toChatTurns(tailMessages)
         }
-        rollingSummary = newSummary
+        val clamped = newSummary.take((contextBudgetChars * SUMMARY_BUDGET_FRACTION).toInt())
+        rollingSummary = clamped
         summarizedThroughIndex = tailStart
-        return systemPromptWith(newSummary) to toChatTurns(tailMessages)
+        return systemPromptWith(clamped) to toChatTurns(tailMessages)
     }
 
     private suspend fun appendToFile(message: ChatMessage) {
