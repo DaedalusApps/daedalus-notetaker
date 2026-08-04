@@ -124,6 +124,7 @@ fun ConversationScreen(
     var input by remember { mutableStateOf("") }
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showVoiceDialog by remember { mutableStateOf(false) }
+    var showNewConversationDialog by remember { mutableStateOf(false) }
 
     // Instant send ON routes through startVoiceInputInterruptingSpeech() instead of plain
     // startVoiceInput() (P9.3): the voice-only surface's big mic button must stop any playing
@@ -225,6 +226,20 @@ fun ConversationScreen(
         )
     }
 
+    if (showNewConversationDialog) {
+        NewConversationDialog(
+            onSaveAndStartNew = {
+                showNewConversationDialog = false
+                conversationViewModel.endSession()
+            },
+            onStartWithoutSaving = {
+                showNewConversationDialog = false
+                conversationViewModel.startNewSession()
+            },
+            onCancel = { showNewConversationDialog = false }
+        )
+    }
+
     Scaffold(
         modifier = Modifier.navigationBarsPadding().imePadding(),
         snackbarHost = { SnackbarHost(snackbar) { Snackbar(it) } },
@@ -275,7 +290,7 @@ fun ConversationScreen(
                             enabled = canStartNewSession(messages, isGenerating),
                             onClick = {
                                 menuExpanded = false
-                                conversationViewModel.startNewSession()
+                                showNewConversationDialog = true
                             }
                         )
                         DropdownMenuItem(
@@ -570,6 +585,40 @@ private fun PendingTranscriptionBubble() {
             )
         }
     }
+}
+
+/**
+ * Warns before starting a new conversation (P10.3): only "End session" saves the current one as a
+ * note, so leaving it via "New conversation" without saving would otherwise silently discard it.
+ * Shown only when the menu item that triggers it is enabled, i.e. there are messages to lose.
+ */
+@Composable
+private fun NewConversationDialog(
+    onSaveAndStartNew: () -> Unit,
+    onStartWithoutSaving: () -> Unit,
+    onCancel: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Save this conversation?") },
+        text = {
+            Text(
+                "This conversation is not saved as a note automatically. Save it to your " +
+                    "library before starting a new one?"
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onSaveAndStartNew) { Text("Save") }
+        },
+        dismissButton = {
+            // Kept short deliberately: this Row cannot wrap, so long labels would push "Cancel"
+            // off the edge of a phone-width dialog. The title and body carry the full meaning.
+            Row {
+                TextButton(onClick = onStartWithoutSaving) { Text("Don't save") }
+                TextButton(onClick = onCancel) { Text("Cancel") }
+            }
+        }
+    )
 }
 
 private val SPEED_OPTIONS = listOf(0.75f to "0.75×", 1.0f to "1×", 1.25f to "1.25×", 1.5f to "1.5×", 2.0f to "2×")
