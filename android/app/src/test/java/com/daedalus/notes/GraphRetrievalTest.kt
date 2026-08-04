@@ -81,6 +81,20 @@ class GraphRetrievalTest {
     }
 
     @Test
+    fun expandWithTopicSiblings_blankTopicsDoNotLinkNotes() {
+        val seed = Recording(filename = "seed.mp3", title = "Seed", shortSummary = "s", topics = listOf("  "))
+        val other = Recording(filename = "other.mp3", title = "Other", shortSummary = "o", topics = listOf(""))
+
+        val result = expandWithTopicSiblings(
+            seeds = listOf(seed),
+            all = listOf(seed, other),
+            budgetChars = 10_000
+        )
+
+        assertEquals(listOf(seed), result)
+    }
+
+    @Test
     fun expandWithTopicSiblings_topicMatchingIsCaseAndWhitespaceInsensitive() {
         val seed = Recording(filename = "seed.mp3", title = "Seed", shortSummary = "s", topics = listOf(" AI "))
         val sibling = Recording(filename = "sib.mp3", title = "Sibling", shortSummary = "sib", topics = listOf("ai"))

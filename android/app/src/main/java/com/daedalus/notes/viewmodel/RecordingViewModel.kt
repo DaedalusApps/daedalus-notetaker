@@ -797,7 +797,10 @@ class RecordingViewModel @JvmOverloads constructor(
                     _aiError.value = "No note embeddings found. Re-analyze your notes to enable library search."
                     return@launch
                 }
-                val expandedSources = expandWithTopicSiblings(sources, withEmbeddings, aiTextBudget(getApplication()))
+                // Only the note bodies are counted against the budget, but the prompt also carries a
+                // preamble, a title line per note and the guardrail, so keep a fraction back as headroom.
+                val graphBudget = aiTextBudget(getApplication()) * 3 / 4
+                val expandedSources = expandWithTopicSiblings(sources, withEmbeddings, graphBudget)
                 _librarySources.value = expandedSources
                 val context = buildLibraryQuestionPrompt(expandedSources)
                 llm.ensureLoaded()
