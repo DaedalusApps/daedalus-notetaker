@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -47,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -58,6 +60,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -152,7 +155,7 @@ fun ConversationScreen(
     }
 
     if (showVoiceDialog) {
-        VoiceDialog(
+        VoiceSheet(
             conversationViewModel = conversationViewModel,
             onDismiss = { showVoiceDialog = false }
         )
@@ -390,66 +393,110 @@ private fun SpeedDialog(
     )
 }
 
-/** Radio list of "System default" + the engine's available voices; each selection applies (and
- *  previews) immediately. Stays open until dismissed so the user can compare voices. */
+/** Full-width selectable list of "System default" + the engine's available voices; each
+ *  selection applies (and previews) immediately. Stays open until dismissed (swipe/scrim) so the
+ *  user can compare voices. Shows a loading row while the engine is still initializing (#52) —
+ *  [ConversationViewModel.ttsReady] is observed, so the list replaces the loading row as soon as
+ *  init finishes without the user needing to reopen the sheet, and a failed init gets its own
+ *  message rather than spinning forever. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun VoiceDialog(
+private fun VoiceSheet(
     conversationViewModel: ConversationViewModel,
     onDismiss: () -> Unit
 ) {
     val ttsVoiceId by conversationViewModel.ttsVoiceId.collectAsState()
-    val voices = remember { conversationViewModel.availableVoices() }
+    val ttsEnabled by conversationViewModel.ttsEnabled.collectAsState()
+    val ttsReady by conversationViewModel.ttsReady.collectAsState()
+    // Evaluated on every composition, not just in the branch that shows the list: this call is
+    // what lazily builds the engine (and so what starts init and eventually flips ttsReady).
+    // Moving it inside the `else` branch below would leave the loading row spinning forever.
+    val voices = remember(ttsReady, ttsEnabled) { conversationViewModel.availableVoices() }
 
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text("Voice") },
-        text = {
-            Column(Modifier.selectableGroup()) {
+        sheetState = rememberModalBottomSheetState()
+    ) {
+        Text(
+            "Voice",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+        when {
+            !ttsEnabled -> {
+                Text(
+                    "Turn spoken replies on to see available voices.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)
+                )
+            }
+            ttsReady == null -> {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .selectable(
+                        .heightIn(min = 48.dp)
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(16.dp))
+                    Text("Starting speech engine…")
+                }
+            }
+            ttsReady == false -> {
+                Text(
+                    "This device's speech engine could not be started, so no voices are available.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)
+                )
+            }
+            else -> {
+                LazyColumn(modifier = Modifier.selectableGroup()) {
+                    item {
+                        VoiceRow(
+                            label = "System default",
                             selected = ttsVoiceId.isEmpty(),
                             onClick = { conversationViewModel.setTtsVoice("") }
                         )
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(selected = ttsVoiceId.isEmpty(), onClick = { conversationViewModel.setTtsVoice("") })
-                    Spacer(Modifier.width(8.dp))
-                    Text("System default")
-                }
-                if (voices.isEmpty()) {
-                    Text(
-                        "No other voices available. Turn spoken replies on to see the voices your " +
-                            "device's speech engine offers.",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-                voices.forEach { voice: VoiceInfo ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .selectable(
-                                selected = ttsVoiceId == voice.id,
-                                onClick = { conversationViewModel.setTtsVoice(voice.id) }
+                    }
+                    if (voices.isEmpty()) {
+                        item {
+                            Text(
+                                "No other voices available — your speech engine offers only the " +
+                                    "system default.",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                             )
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(selected = ttsVoiceId == voice.id, onClick = { conversationViewModel.setTtsVoice(voice.id) })
-                        Spacer(Modifier.width(8.dp))
-                        Text(voice.label)
+                        }
+                    }
+                    items(voices) { voice: VoiceInfo ->
+                        VoiceRow(
+                            label = voice.label,
+                            selected = ttsVoiceId == voice.id,
+                            onClick = { conversationViewModel.setTtsVoice(voice.id) }
+                        )
                     }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
         }
-    )
+    }
+}
+
+/** A single full-width, tappable "radio + label" row used by [VoiceSheet]. */
+@Composable
+private fun VoiceRow(label: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .selectable(selected = selected, onClick = onClick)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Spacer(Modifier.width(8.dp))
+        Text(label)
+    }
 }
 
 @Composable
