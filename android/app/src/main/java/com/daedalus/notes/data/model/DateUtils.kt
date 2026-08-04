@@ -11,4 +11,10 @@ object DateUtils {
         val (year, month, day, hour, min, sec) = match.destructured
         return "$year-$month-$day $hour:$min:$sec"
     }
+
+    /**
+     * True for text-only conversation notes (filenames like "conv_20260804080519.md",
+     * possibly "conv_20260804080519.ended.md"), as opposed to audio recordings.
+     */
+    fun isConversationNote(filename: String): Boolean = filename.startsWith("conv_")
 }
