@@ -1852,4 +1852,53 @@ class ConversationViewModelTest {
         val reloaded = newViewModel()
         assertTrue(reloaded.autoListen.value)
     }
+
+    /**
+     * Arms an auto-spoken reply and makes the mock report speaking=false synchronously from
+     * stop(), the way [com.daedalus.notes.ai.AndroidSpeechService.stop] does — a flushed utterance
+     * is not guaranteed to deliver onDone, so the real engine emits that signal from stop()
+     * itself. Tests that a deliberate stop cannot be turned into a hands-free mic depend on it.
+     */
+    private fun sendReplyBeingSpoken(): ConversationViewModel {
+        markWhisperReady()
+        val listenerSlot = slot<(Boolean) -> Unit>()
+        every { tts.setOnSpeakingChangedListener(capture(listenerSlot)) } returns Unit
+        every { tts.stop() } answers { listenerSlot.captured(false) }
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
+        val vm = newViewModel()
+        vm.setTtsEnabled(true)
+        vm.setInstantSend(true)
+        vm.setAutoListen(true)
+        vm.setConversationVisible(true)
+        return vm
+    }
+
+    // (P9.4-h) Muting mid-reply stops the speech — it must not be read as "the reply finished
+    //     speaking" and open the mic the user just silenced.
+    @Test
+    fun autoListen_muteWhileReplySpeaking_doesNotOpenMic() = runTest {
+        val vm = sendReplyBeingSpoken()
+
+        vm.send("Hello")
+        advanceUntilIdle()
+        vm.setTtsEnabled(false) // mute tap while the reply is being spoken
+
+        assertFalse("muting must not open the mic", vm.isRecordingVoice.value)
+        verify(exactly = 0) { audioRecorder.start(any(), any()) }
+    }
+
+    // (P9.4-h2) A replay tapped while the reply is still being spoken takes the engine over; the
+    //     cut-short reply must not fire the hands-free mic.
+    @Test
+    fun autoListen_replayTappedWhileReplySpeaking_doesNotOpenMic() = runTest {
+        val vm = sendReplyBeingSpoken()
+
+        vm.send("Hello")
+        advanceUntilIdle()
+        val id = vm.messages.value.indexOfLast { it.role == Role.MODEL }.toString()
+        vm.replayMessage(id)
+
+        assertFalse("a replay taking the engine over must not open the mic", vm.isRecordingVoice.value)
+        verify(exactly = 0) { audioRecorder.start(any(), any()) }
+    }
 }

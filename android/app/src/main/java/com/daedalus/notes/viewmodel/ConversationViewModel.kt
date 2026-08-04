@@ -296,13 +296,16 @@ class ConversationViewModel @JvmOverloads constructor(
      * reply is ready would silently drop that reply.
      */
     fun stopSpeaking() {
+        // Cleared BEFORE stopping: the engine reports speaking=false synchronously from stop()
+        // (a flushed utterance may never deliver onDone — see AndroidSpeechService.stop), so
+        // clearing afterwards would let the speaking listener read the flag as "the reply
+        // finished" and open the mic. Every deliberate speech-stopping action (send,
+        // startVoiceInput, endSession, startNewSession, muting, screen dispose) routes through
+        // here — an interrupted reply must not still fire the hands-free mic once it's cut short.
+        awaitingAutoListen = false
         if (_ttsEnabled.value || ttsDelegate.isInitialized()) tts.stop()
         pendingReplayId = null
         _speakingMessageId.value = null
-        // Every deliberate speech-stopping action (send, startVoiceInput, endSession,
-        // startNewSession, muting, screen dispose) routes through here — an interrupted reply
-        // must not still fire the hands-free mic once it's cut short.
-        awaitingAutoListen = false
     }
 
     /**
@@ -320,6 +323,10 @@ class ConversationViewModel @JvmOverloads constructor(
      */
     fun replayMessage(id: String) {
         if (messageForId(id) == null) return
+        // Same ordering requirement as stopSpeaking(): this stop() reports speaking=false
+        // synchronously, and a replay taking the engine over from an auto-spoken reply must not
+        // be mistaken for that reply finishing.
+        awaitingAutoListen = false
         tts.stop()
         if (tts.isAvailable) startReplay(id) else pendingReplayId = id
     }
