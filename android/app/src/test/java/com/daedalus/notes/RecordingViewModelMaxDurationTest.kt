@@ -8,12 +8,12 @@ import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
+import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.recording.AudioRecorder
 import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_DEFAULT
 import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_KEY
 import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_UNLIMITED
 import com.daedalus.notes.viewmodel.RecordingViewModel
-import com.daedalus.notes.data.model.Recording
 import io.mockk.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
