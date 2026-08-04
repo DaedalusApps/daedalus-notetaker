@@ -44,6 +44,21 @@ data class ChatMessage(val role: Role, val text: String, val timestampMillis: Lo
 fun canStartNewSession(messages: List<ChatMessage>, isGenerating: Boolean): Boolean =
     messages.isNotEmpty() && !isGenerating
 
+/** Visual/interaction state of the single morphing center button on the voice-only instant-send
+ *  surface (P10.1). */
+enum class VoiceButtonState { IDLE, RECORDING, TRANSCRIBING, GENERATING }
+
+/** Derives [VoiceButtonState] with precedence RECORDING > TRANSCRIBING > GENERATING > IDLE.
+ *  Recording wins even if [isGenerating] flips true mid-recording (e.g. via endSession) — the
+ *  user must always be able to stop a recording they started (P9.3 mic-hostage lesson). */
+fun voiceButtonState(isRecordingVoice: Boolean, isTranscribing: Boolean, isGenerating: Boolean): VoiceButtonState =
+    when {
+        isRecordingVoice -> VoiceButtonState.RECORDING
+        isTranscribing -> VoiceButtonState.TRANSCRIBING
+        isGenerating -> VoiceButtonState.GENERATING
+        else -> VoiceButtonState.IDLE
+    }
+
 private const val IDEATION_SYSTEM_PROMPT = "You are a thoughtful ideation partner in a live " +
     "conversation with the user, like a working session with a colleague. Be concise, help " +
     "develop their thinking, and ask good clarifying follow-up questions rather than lecturing." +
