@@ -6,10 +6,16 @@ import androidx.test.core.app.ApplicationProvider
 import com.daedalus.notes.ai.ChatTurn
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.Role
+import com.daedalus.notes.ai.TranscriptionService
+import com.daedalus.notes.ai.WHISPER_DECODER_FILE
+import com.daedalus.notes.ai.WHISPER_ENCODER_FILE
+import com.daedalus.notes.ai.WHISPER_TOKENS_FILE
 import com.daedalus.notes.ai.aiTextBudget
 import com.daedalus.notes.ai.buildGemmaPrompt
+import com.daedalus.notes.ai.whisperModelDir
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.model.Recording
+import com.daedalus.notes.recording.AudioRecorder
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -17,6 +23,7 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkStatic
+import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -47,12 +54,23 @@ class ConversationViewModelTest {
     private lateinit var application: Application
     private val llm = mockk<LocalLlmService>(relaxed = true)
     private val repo = mockk<RecordingRepository>(relaxed = true)
+    private val audioRecorder = mockk<AudioRecorder>(relaxed = true)
+    private val transcriptionService = mockk<TranscriptionService>(relaxed = true)
     private val testDispatcher = StandardTestDispatcher()
 
     // Fixed instant so filenames/day comparisons are deterministic across the test run.
     private val nowMillis = 1_700_000_000_000L
 
     private fun conversationsDir(): File = File(application.filesDir, "conversations")
+
+    /** Marks the Whisper model as downloaded, so startVoiceInput proceeds. */
+    private fun markWhisperReady() {
+        val dir = whisperModelDir(application)
+        dir.mkdirs()
+        File(dir, WHISPER_ENCODER_FILE).writeText("x")
+        File(dir, WHISPER_DECODER_FILE).writeText("x")
+        File(dir, WHISPER_TOKENS_FILE).writeText("x")
+    }
 
     @Before
     fun setup() {
@@ -82,7 +100,9 @@ class ConversationViewModelTest {
         repo = repo,
         ioDispatcher = testDispatcher,
         clock = { nowMillis },
-        contextBudgetChars = contextBudgetChars ?: (aiTextBudget(application) * 0.75).toInt()
+        contextBudgetChars = contextBudgetChars ?: (aiTextBudget(application) * 0.75).toInt(),
+        audioRecorderProvider = { audioRecorder },
+        transcriptionServiceProvider = { transcriptionService }
     )
 
     // (a) send() twice produces user+model messages in order, and the session file contains
@@ -599,5 +619,90 @@ class ConversationViewModelTest {
         assertTrue(vm.messages.value.isNotEmpty())
         val endedFiles = conversationsDir().listFiles()?.filter { it.name.contains("ended") } ?: emptyList()
         assertTrue(endedFiles.isEmpty())
+    }
+
+    // (P6.1-a) start -> stop: recorder started/stopped, transcription invoked with the recorded
+    //     file, voiceTranscript exposes the text, and the temp audio file is deleted afterward.
+    @Test
+    fun voiceInput_startThenStop_transcribesAndCleansUpTempFile() = runTest {
+        markWhisperReady()
+        val startedFile = slot<File>()
+        every { audioRecorder.start(capture(startedFile), any()) } answers {
+            startedFile.captured.parentFile?.mkdirs()
+            startedFile.captured.writeBytes(byteArrayOf(1, 2, 3))
+        }
+        coEvery { transcriptionService.transcribe(any()) } returns "hello there"
+        val vm = newViewModel()
+
+        vm.startVoiceInput()
+        assertTrue(vm.isRecordingVoice.value)
+        verify { audioRecorder.start(any(), any()) }
+
+        vm.stopVoiceInput()
+        verify { audioRecorder.stop() }
+        assertFalse(vm.isRecordingVoice.value)
+
+        advanceUntilIdle()
+
+        assertFalse(vm.isTranscribing.value)
+        assertEquals("hello there", vm.voiceTranscript.value)
+        coVerify { transcriptionService.transcribe(startedFile.captured) }
+        assertFalse("temp audio file should be deleted after transcription", startedFile.captured.exists())
+        assertNull(vm.error.value)
+    }
+
+    // (P6.1-b) An empty/whitespace transcription result sets the error flow with a short message
+    //     and does not populate voiceTranscript.
+    @Test
+    fun voiceInput_emptyTranscription_setsErrorNoTranscript() = runTest {
+        markWhisperReady()
+        every { audioRecorder.start(any(), any()) } returns Unit
+        coEvery { transcriptionService.transcribe(any()) } returns "   "
+        val vm = newViewModel()
+
+        vm.startVoiceInput()
+        vm.stopVoiceInput()
+        advanceUntilIdle()
+
+        assertEquals("Didn't catch that", vm.error.value)
+        assertNull(vm.voiceTranscript.value)
+        assertFalse(vm.isTranscribing.value)
+    }
+
+    // (P6.1-c) A transcription failure sets the error flow, clears isTranscribing/isRecordingVoice,
+    //     and still cleans up the temp file.
+    @Test
+    fun voiceInput_transcriptionThrows_setsErrorClearsStateAndCleansUpTempFile() = runTest {
+        markWhisperReady()
+        val startedFile = slot<File>()
+        every { audioRecorder.start(capture(startedFile), any()) } answers {
+            startedFile.captured.parentFile?.mkdirs()
+            startedFile.captured.writeBytes(byteArrayOf(1, 2, 3))
+        }
+        coEvery { transcriptionService.transcribe(any()) } throws RuntimeException("boom")
+        val vm = newViewModel()
+
+        vm.startVoiceInput()
+        vm.stopVoiceInput()
+        advanceUntilIdle()
+
+        assertNotNull(vm.error.value)
+        assertFalse(vm.isTranscribing.value)
+        assertFalse(vm.isRecordingVoice.value)
+        assertNull(vm.voiceTranscript.value)
+        assertFalse("temp audio file should still be cleaned up", startedFile.captured.exists())
+    }
+
+    // (P6.1-d) If the Whisper model isn't downloaded, starting voice input sets an error
+    //     directing the user to Settings and never starts the recorder.
+    @Test
+    fun voiceInput_modelUnavailable_setsErrorAndNeverStartsRecorder() = runTest {
+        val vm = newViewModel()
+
+        vm.startVoiceInput()
+
+        assertFalse(vm.isRecordingVoice.value)
+        assertNotNull(vm.error.value)
+        verify(exactly = 0) { audioRecorder.start(any(), any()) }
     }
 }
