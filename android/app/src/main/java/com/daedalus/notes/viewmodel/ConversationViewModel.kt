@@ -257,8 +257,11 @@ class ConversationViewModel @JvmOverloads constructor(
     val autoListen: StateFlow<Boolean> = _autoListen
 
     init {
-        // Normalizes an inconsistent restored state (#72): autoListen=true with instantSend=false
-        // can only happen from a corrupted/old backup, since the setters below never produce it.
+        // Normalizes an inconsistent persisted state (#72): autoListen=true with instantSend=false
+        // is not producible by the setters below, but two paths still deliver it — an install
+        // upgrading from the pre-#72 build, where setAutoListen(true) alone was legal (the common
+        // case), and a restored backup carrying such a pair (see BackupManager.applySettings,
+        // which writes both keys straight to prefs without going through this class).
         // Auto-listen depends on instant send to function at all (see maybeAutoListen), so the
         // conservative choice is to turn auto-listen OFF rather than silently turning instant send
         // ON — the user never explicitly opted into instant send in that scenario, and enabling it

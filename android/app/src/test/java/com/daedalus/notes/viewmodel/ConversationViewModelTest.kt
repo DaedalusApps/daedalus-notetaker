@@ -1777,13 +1777,13 @@ class ConversationViewModelTest {
         verify(exactly = 0) { audioRecorder.start(any(), any()) }
     }
 
-    // (P9.4-c2, superseded by #72) instantSend off + autoListen on used to be reachable directly
-    // via setAutoListen(true) alone, and was asserted to never trigger. Under the #72 coupling,
-    // setAutoListen(true) also turns instant send on (see setAutoListen_alsoEnablesInstantSend
-    // below), so that state combination is no longer reachable through the public setters at all
-    // — the trigger now fires, exactly like the both-on case.
+    // (P9.4-c2, superseded by #72) This used to assert that setAutoListen(true) alone — which left
+    // instantSend off — never triggered. Under the #72 coupling that combination is no longer
+    // reachable through the public setters, so the case now proves the end-to-end payoff instead:
+    // flipping auto-listen on by itself actually starts the hands-free loop. maybeAutoListen's
+    // !instantSend guard is retained as defence in depth but is consequently no longer covered.
     @Test
-    fun autoListen_instantSendOff_noTrigger() = runTest {
+    fun autoListen_setAutoListenAlone_triggers_sinceInstantSendIsCoupledOn() = runTest {
         markWhisperReady()
         coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Reply"
         val vm = newViewModel()
@@ -1983,8 +1983,10 @@ class ConversationViewModelTest {
         assertTrue(prefs().getBoolean("conversation_instant_send", false))
     }
 
-    // (#72-d) Init normalization: prefs restored with autoListen=true and instantSend=false (e.g.
-    // an old/inconsistent backup) must be normalized at VM construction to autoListen=false — the
+    // (#72-d) Init normalization: prefs holding autoListen=true and instantSend=false (an install
+    // upgrading from the pre-#72 build, or a restored backup carrying that pair — BackupManager
+    // writes both keys straight to prefs) must be normalized at VM construction to
+    // autoListen=false — the
     // more conservative setting — rather than silently turning instant send on. The normalization
     // is persisted so it isn't re-applied (and re-logged) on every subsequent load.
     @Test
