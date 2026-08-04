@@ -756,21 +756,18 @@ private fun ChatBubble(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             )
             if (!isUser) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
+                IconButton(
+                    onClick = { if (isReplaying) onStopReplayClick() else onReplayClick() },
+                    modifier = Modifier
+                        .align(Alignment.End)
+                        .size(48.dp)
                 ) {
-                    IconButton(
-                        onClick = { if (isReplaying) onStopReplayClick() else onReplayClick() },
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isReplaying) Icons.Default.Stop else Icons.Default.PlayArrow,
-                            contentDescription = if (isReplaying) "Stop reading" else "Read aloud",
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Icon(
+                        imageVector = if (isReplaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                        contentDescription = if (isReplaying) "Stop reading" else "Read aloud",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
