@@ -17,6 +17,19 @@ private const val UTTERANCE_ID = "daedalus_reply"
 /** A selectable voice for the engine's current language, labeled in stable order. */
 data class VoiceInfo(val id: String, val label: String)
 
+/**
+ * A voice is usable only if it doesn't require a network connection and its data is actually
+ * installed on the device. Voices failing this (e.g. `en-us-x-star11-local` with data not
+ * downloaded) synthesize nothing engine-side — no exception, just silence (#67).
+ */
+fun isVoiceUsable(networkRequired: Boolean, features: Set<String>?): Boolean {
+    if (networkRequired) return false
+    if (features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) == true) return false
+    return true
+}
+
+private fun Voice.isUsable(): Boolean = isVoiceUsable(isNetworkConnectionRequired, features)
+
 /** Thin seam over Android's audio focus APIs so TTS focus requests are unit-testable (#57). */
 interface AudioFocusManager {
     fun request()
@@ -181,8 +194,18 @@ class AndroidSpeechService(
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = setSpeaking(true)
             override fun onDone(utteranceId: String?) = setSpeaking(false)
+            // Runtime fallback (#67): a persisted voice can still fail engine-side (e.g. its data
+            // was uninstalled after selection). Revert to the default voice so the *next*
+            // utterance is audible — the failed one is not retried, and the pref is left as-is.
             @Deprecated("Deprecated in Java", ReplaceWith(""))
-            override fun onError(utteranceId: String?) = setSpeaking(false)
+            override fun onError(utteranceId: String?) {
+                val engine = tts
+                val default = defaultVoice
+                if (engine != null && default != null && engine.voice != default) {
+                    engine.voice = default
+                }
+                setSpeaking(false)
+            }
         })
     }
 
@@ -206,7 +229,7 @@ class AndroidSpeechService(
         val voices = engine.voices ?: return emptyList()
         val language = engine.voice?.locale ?: engine.defaultVoice?.locale ?: Locale.getDefault()
         return voices
-            .filter { it.locale == language && !it.isNetworkConnectionRequired }
+            .filter { it.locale == language && it.isUsable() }
             .map { it.name }
             .sorted()
             .mapIndexed { index, name -> VoiceInfo(id = name, label = "Voice ${index + 1}") }
@@ -220,13 +243,24 @@ class AndroidSpeechService(
         return applyVoice(id)
     }
 
-    /** Applies [id] to a live engine; an empty id restores the voice captured at init. */
+    /**
+     * Applies [id] to a live engine; an empty id restores the voice captured at init. If [id]
+     * resolves to a voice whose data isn't usable (e.g. not installed on-device), falls back to
+     * the default voice so the engine keeps speaking instead of going silent, and returns false —
+     * self-heals devices already stuck with a bad persisted voice pref (#67).
+     */
     private fun applyVoice(id: String): Boolean {
         val engine = tts ?: return false
-        val voice =
-            if (id.isEmpty()) defaultVoice
-            else engine.voices?.firstOrNull { it.name == id }
-        engine.voice = voice ?: return false
+        if (id.isEmpty()) {
+            engine.voice = defaultVoice ?: return false
+            return true
+        }
+        val resolved = engine.voices?.firstOrNull { it.name == id }
+        if (resolved == null || !resolved.isUsable()) {
+            engine.voice = defaultVoice
+            return false
+        }
+        engine.voice = resolved
         return true
     }
 
