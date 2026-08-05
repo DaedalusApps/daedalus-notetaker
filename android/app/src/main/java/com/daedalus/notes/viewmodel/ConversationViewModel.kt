@@ -16,9 +16,12 @@ import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.VoiceInfo
 import com.daedalus.notes.ai.aiTextBudget
 import com.daedalus.notes.ai.analyzeTranscript
+import com.daedalus.notes.ai.expandWithTopicSiblings
 import com.daedalus.notes.ai.isWhisperReady
+import com.daedalus.notes.ai.sourceText
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
+import com.daedalus.notes.data.model.DateUtils
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.recording.AudioRecorder
 import kotlinx.coroutines.CancellationException
@@ -29,6 +32,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -77,6 +81,17 @@ private const val SUMMARY_PROMPT = "Summarize this conversation so far as a conc
 // default 12,000-char budget this leaves ~9,000 live-context chars (~2,250 tokens), well clear of
 // the model's 4096-token ceiling once the ~800-token reply headroom is spent.
 private const val CONVERSATION_CONTEXT_FRACTION = 0.75
+
+// Fraction of contextBudgetChars reserved for retrieved note context (#76).
+private const val NOTE_CONTEXT_FRACTION = 0.3
+
+private const val NOTE_RETRIEVAL_TOP_K = 3
+
+// Minimum cosine similarity for a retrieved note to be injected (#76). Below this a note is
+// unrelated to the turn and injecting it derails the small model — conversation mode injects
+// notes silently, unlike Ask Library where the user explicitly asked a library question, so it
+// must fail closed to "no notes" rather than surface a barely-related one.
+private const val NOTE_RELEVANCE_MIN_SCORE = 0.4f
 
 // Keeps the last two exchanges (user + model turns) intact in the live context on rollover.
 private const val TAIL_MESSAGE_COUNT = 4
@@ -748,8 +763,9 @@ class ConversationViewModel @JvmOverloads constructor(
             _messages.value = _messages.value + userMessage
             appendToFile(userMessage)
 
+            val noteContext = retrieveNoteContext(trimmed)
             llm.ensureLoaded()
-            val (systemPrompt, turns) = buildLiveContext(_messages.value)
+            val (systemPrompt, turns) = buildLiveContext(_messages.value, noteContext)
             val reply = llm.generate(systemPrompt, turns)
             val modelMessage = ChatMessage(Role.MODEL, reply, clock())
             _messages.value = _messages.value + modelMessage
@@ -800,6 +816,65 @@ class ConversationViewModel @JvmOverloads constructor(
     }
 
     /**
+     * Retrieves relevant notes from the user's library for [query] via semantic search + topic-
+     * sibling expansion (the same retrieval [RecordingViewModel.askLibraryQuestion] uses), rendered
+     * as a short bullet list for injection into the system prompt. Returns null if embeddings
+     * aren't available, nothing relevant is found, or retrieval fails for any reason — a
+     * conversation turn must never break because note lookup did.
+     *
+     * Unlike askLibraryQuestion, this does NOT backfill missing embeddings: a conversation turn
+     * must stay fast, semanticSearch already skips notes without embeddings, and analysis embeds
+     * notes at creation time.
+     *
+     * Runs on [ioDispatcher] (#76): the cosine scan over every embedded note and the topic-sibling
+     * expansion are non-trivial work that must not block Main.
+     */
+    private suspend fun retrieveNoteContext(query: String): String? = withContext(ioDispatcher) {
+        try {
+            if (!embedder.isReady) return@withContext null
+            embedder.ensureLoaded()
+            val queryEmbed = embedder.embed(query) ?: return@withContext null
+
+            // Ended conversation notes are excluded (#76): they're embedded like any other note,
+            // but being conversational text they tend to outrank real recordings for
+            // conversational queries, and the live session already carries its own history.
+            val all = repo.allRecordings.first()
+                .filter { it.summary.isNotBlank() && !DateUtils.isConversationNote(it.filename) }
+            val seeds = repo.semanticSearch(
+                queryEmbed,
+                all,
+                topK = NOTE_RETRIEVAL_TOP_K,
+                minScore = NOTE_RELEVANCE_MIN_SCORE
+            )
+            if (seeds.isEmpty()) return@withContext null
+
+            val noteBudget = (contextBudgetChars * NOTE_CONTEXT_FRACTION).toInt()
+            val expanded = expandWithTopicSiblings(seeds, all, noteBudget)
+            val lines = expanded.map { note ->
+                val title = note.title.ifBlank { note.filename }
+                "- $title: ${sourceText(note).replace('\n', ' ')}"
+            }
+
+            // Cumulative budget guard: an uncapped LLM-written shortSummary must not be able to
+            // blow noteBudget on its own. The first line is always kept even if it alone exceeds
+            // the budget (seeds are budget-exempt in expandWithTopicSiblings too).
+            val kept = mutableListOf<String>()
+            var used = 0
+            for (line in lines) {
+                used += line.length
+                if (kept.isNotEmpty() && used > noteBudget) break
+                kept.add(line)
+            }
+            kept.joinToString("\n")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("ConversationViewModel", "Note retrieval failed", e)
+            null
+        }
+    }
+
+    /**
      * Builds the (systemPrompt, turns) pair to send to the LLM, capped to [contextBudgetChars].
      * While the unsummarized tail of [messages] fits the budget, it is sent in full. Once it
      * would overflow, the older portion (everything but the last [TAIL_MESSAGE_COUNT] messages)
@@ -810,10 +885,33 @@ class ConversationViewModel @JvmOverloads constructor(
      * for this send only; the rolling summary state is left untouched so the next rollover
      * retries it.
      */
-    private suspend fun buildLiveContext(messages: List<ChatMessage>): Pair<String, List<ChatTurn>> {
-        fun systemPromptWith(summary: String?): String =
-            if (summary == null) IDEATION_SYSTEM_PROMPT
-            else "$IDEATION_SYSTEM_PROMPT\n\nSummary of the conversation so far: $summary"
+    private suspend fun buildLiveContext(
+        messages: List<ChatMessage>,
+        noteContext: String?
+    ): Pair<String, List<ChatTurn>> {
+        fun systemPromptWith(summary: String?, includeNotes: Boolean = true): String {
+            var prompt = IDEATION_SYSTEM_PROMPT
+            if (includeNotes && noteContext != null) {
+                prompt += "\n\nRelevant notes from the user's library (cite them when the user " +
+                    "asks about their notes; if the answer is not in them, say so):\n$noteContext"
+            }
+            if (summary != null) {
+                prompt += "\n\nSummary of the conversation so far: $summary"
+            }
+            return prompt
+        }
+
+        // Guards every return point against the note context (or a compounding summary) pushing
+        // the sent payload past contextBudgetChars (#76, M3): notes are regenerable next turn,
+        // unlike conversation history, so they're dropped first rather than truncating turns.
+        fun finalize(summary: String?, turns: List<ChatTurn>): Pair<String, List<ChatTurn>> {
+            val prompt = systemPromptWith(summary)
+            val total = prompt.length + turns.sumOf { it.text.length }
+            if (total > contextBudgetChars && noteContext != null) {
+                return systemPromptWith(summary, includeNotes = false) to turns
+            }
+            return prompt to turns
+        }
 
         val liveMessages = messages.subList(summarizedThroughIndex, messages.size)
         val systemPrompt = systemPromptWith(rollingSummary)
@@ -823,7 +921,7 @@ class ConversationViewModel @JvmOverloads constructor(
         // Nothing to gain from rolling over if the entire unsummarized region is already just
         // the tail — there is no older portion left to summarize away.
         if (contextChars <= contextBudgetChars || liveMessages.size <= TAIL_MESSAGE_COUNT) {
-            return systemPrompt to liveTurns
+            return finalize(rollingSummary, liveTurns)
         }
 
         // buildGemmaPrompt only folds the system prompt — and with it the injected summary — into
@@ -856,12 +954,12 @@ class ConversationViewModel @JvmOverloads constructor(
             // Keep any summary earned by an earlier rollover: dropping it would discard context
             // that is already safely folded down, for no budget gain (this send is a strict
             // subset of the over-budget context measured above).
-            return systemPrompt to toChatTurns(tailMessages)
+            return finalize(rollingSummary, toChatTurns(tailMessages))
         }
         val clamped = newSummary.take((contextBudgetChars * SUMMARY_BUDGET_FRACTION).toInt())
         rollingSummary = clamped
         summarizedThroughIndex = tailStart
-        return systemPromptWith(clamped) to toChatTurns(tailMessages)
+        return finalize(clamped, toChatTurns(tailMessages))
     }
 
     private suspend fun appendToFile(message: ChatMessage) {

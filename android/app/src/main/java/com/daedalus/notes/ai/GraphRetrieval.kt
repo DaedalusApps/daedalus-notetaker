@@ -3,7 +3,7 @@ package com.daedalus.notes.ai
 import com.daedalus.notes.data.model.Recording
 
 /** Text used per note when it's fed to the LLM, mirroring [buildLibraryQuestionPrompt]'s fallback. */
-private fun sourceText(r: Recording): String = r.shortSummary.ifBlank { r.summary.take(200) }
+internal fun sourceText(r: Recording): String = r.shortSummary.ifBlank { r.summary.take(200) }
 
 private fun normalizedTopics(r: Recording): Set<String> =
     r.topics.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.toSet()
