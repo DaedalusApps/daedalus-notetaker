@@ -2135,7 +2135,7 @@ class ConversationViewModelTest {
         every { embedder.isReady } returns true
         coEvery { embedder.embed(any()) } returns FloatArray(2) { 1f }
         every { repo.allRecordings } returns flowOf(listOf(note))
-        every { repo.semanticSearch(any(), any(), any()) } returns listOf(note)
+        every { repo.semanticSearch(any(), any(), any(), any()) } returns listOf(note)
         val systemPrompts = mutableListOf<String>()
         coEvery { llm.generate(capture(systemPrompts), any<List<ChatTurn>>()) } returns "Here you go"
         val vm = newViewModel()
@@ -2148,11 +2148,78 @@ class ConversationViewModelTest {
         assertTrue(prompt.contains("Panels on the garage roof"))
     }
 
+    // (#76 H1) A relevance floor keeps low-similarity notes out: when semanticSearch finds
+    //     nothing meeting the minScore floor (returns empty), no note title/summary is injected.
+    @Test
+    fun send_noRelevantNotes_doesNotInjectNoteContext() = runTest {
+        val note = Recording(
+            filename = "note1.m4a",
+            title = "Solar plans",
+            shortSummary = "Panels on the garage roof",
+            summary = "x",
+            embedding = floatArrayOf(1f, 1f)
+        )
+        every { embedder.isReady } returns true
+        coEvery { embedder.embed(any()) } returns FloatArray(2) { 1f }
+        every { repo.allRecordings } returns flowOf(listOf(note))
+        every { repo.semanticSearch(any(), any(), any(), any()) } returns emptyList()
+        val systemPrompts = mutableListOf<String>()
+        coEvery { llm.generate(capture(systemPrompts), any<List<ChatTurn>>()) } returns "Here you go"
+        val vm = newViewModel()
+
+        vm.send("help me name my cat")
+        advanceUntilIdle()
+
+        val prompt = systemPrompts.last()
+        assertFalse(prompt.contains("Solar plans"))
+        assertFalse(prompt.contains("Panels on the garage roof"))
+    }
+
+    // (#76 L5) Ended conversation notes must not be handed to semanticSearch as candidates: they
+    //     read as conversational text and would outrank real recordings for conversational
+    //     queries, and the live session already carries its own history.
+    @Test
+    fun send_embedderReady_excludesConversationNotesFromCandidates() = runTest {
+        val conversationNote = Recording(
+            filename = "conv_20260101120000.ended.md",
+            title = "Old chat",
+            summary = "some prior conversation",
+            embedding = floatArrayOf(1f, 1f)
+        )
+        val realNote = Recording(
+            filename = "note1.m4a",
+            title = "Solar plans",
+            shortSummary = "Panels on the garage roof",
+            summary = "x",
+            embedding = floatArrayOf(1f, 1f)
+        )
+        every { embedder.isReady } returns true
+        coEvery { embedder.embed(any()) } returns FloatArray(2) { 1f }
+        every { repo.allRecordings } returns flowOf(listOf(conversationNote, realNote))
+        val candidatesSlot = slot<List<Recording>>()
+        every { repo.semanticSearch(any(), capture(candidatesSlot), any(), any()) } returns listOf(realNote)
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Here you go"
+        val vm = newViewModel()
+
+        vm.send("what were my solar plans?")
+        advanceUntilIdle()
+
+        assertTrue(candidatesSlot.captured.none { it.filename == "conv_20260101120000.ended.md" })
+    }
+
     // (#76) Degradation: with the embedder not ready (no model downloaded), the conversation must
     //     work exactly as before — no note context injected, reply still appended.
     @Test
     fun send_embedderNotReady_doesNotInjectNoteContextAndStillSendsReply() = runTest {
+        val note = Recording(
+            filename = "note1.m4a",
+            title = "Solar plans",
+            shortSummary = "Panels on the garage roof",
+            summary = "x",
+            embedding = floatArrayOf(1f, 1f)
+        )
         every { embedder.isReady } returns false
+        every { repo.allRecordings } returns flowOf(listOf(note))
         val systemPrompts = mutableListOf<String>()
         coEvery { llm.generate(capture(systemPrompts), any<List<ChatTurn>>()) } returns "Here you go"
         val vm = newViewModel()
@@ -2160,7 +2227,9 @@ class ConversationViewModelTest {
         vm.send("what were my solar plans?")
         advanceUntilIdle()
 
-        assertFalse(systemPrompts.last().contains("Relevant notes"))
+        val prompt = systemPrompts.last()
+        assertFalse(prompt.contains("Solar plans"))
+        assertFalse(prompt.contains("Panels on the garage roof"))
         assertEquals("Here you go", vm.messages.value.last().text)
     }
 
@@ -2178,5 +2247,59 @@ class ConversationViewModelTest {
 
         assertEquals("Here you go", vm.messages.value.last().text)
         assertNull(vm.error.value)
+    }
+
+    // (#76) embed() returning null (embedder ready but embedding failed) must degrade the same
+    //     way as embedder-not-ready: no notes injected, send still succeeds with no error.
+    @Test
+    fun send_embedReturnsNull_doesNotInjectNoteContextAndStillSendsReply() = runTest {
+        every { embedder.isReady } returns true
+        coEvery { embedder.embed(any()) } returns null
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Here you go"
+        val vm = newViewModel()
+
+        vm.send("what were my solar plans?")
+        advanceUntilIdle()
+
+        assertEquals("Here you go", vm.messages.value.last().text)
+        assertNull(vm.error.value)
+    }
+
+    // (#76 M3) When the injected note context would push the sent payload over the context
+    //     budget, the over-budget guard in buildLiveContext must drop the notes rather than send
+    //     an over-budget payload: either the note title is absent, or the total sent chars stay
+    //     within budget.
+    @Test
+    fun send_rolloverWithNotes_dropsNotesRatherThanExceedingBudget() = runTest {
+        val note = Recording(
+            filename = "note1.m4a",
+            title = "Solar plans",
+            shortSummary = "Panels on the garage roof",
+            summary = "x",
+            embedding = floatArrayOf(1f, 1f)
+        )
+        every { embedder.isReady } returns true
+        coEvery { embedder.embed(any()) } returns FloatArray(2) { 1f }
+        every { repo.allRecordings } returns flowOf(listOf(note))
+        every { repo.semanticSearch(any(), any(), any(), any()) } returns listOf(note)
+        val systemPrompts = mutableListOf<String>()
+        val turnsSlot = mutableListOf<List<ChatTurn>>()
+        coEvery { llm.generate(capture(systemPrompts), capture(turnsSlot)) } returns "Here you go"
+        val budget = 400
+        val vm = newViewModel(contextBudgetChars = budget)
+
+        vm.send(
+            "what were my solar plans, and can you also help me think through a much longer " +
+                "follow-up question about them"
+        )
+        advanceUntilIdle()
+
+        val prompt = systemPrompts.last()
+        val turns = turnsSlot.last()
+        val totalSent = prompt.length + turns.sumOf { it.text.length }
+        assertTrue(
+            "note title must be dropped if the guard didn't keep the payload within budget",
+            !prompt.contains("Solar plans") || totalSent <= budget
+        )
     }
 }

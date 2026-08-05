@@ -101,7 +101,7 @@ class RecordingViewModelTest {
         every { embedder.isReady } returns true
         coEvery { embedder.embed(any()) } returns floatArrayOf(0.1f, 0.2f)
         every { repo.allRecordings } returns flowOf(recordings)
-        coEvery { repo.semanticSearch(any(), any(), any()) } returns recordings
+        coEvery { repo.semanticSearch(any(), any(), any(), any()) } returns recordings
         coEvery { llm.generate(any(), any<String>()) } returns answer
 
         viewModel.askLibraryQuestion(question)
@@ -125,7 +125,7 @@ class RecordingViewModelTest {
         every { embedder.isReady } returns true
         coEvery { embedder.embed(any()) } returns floatArrayOf(0.1f, 0.2f)
         every { repo.allRecordings } returns flowOf(all)
-        coEvery { repo.semanticSearch(any(), any(), any()) } returns listOf(seed)
+        coEvery { repo.semanticSearch(any(), any(), any(), any()) } returns listOf(seed)
         coEvery { llm.generate(any(), any<String>()) } returns answer
 
         viewModel.askLibraryQuestion(question)
