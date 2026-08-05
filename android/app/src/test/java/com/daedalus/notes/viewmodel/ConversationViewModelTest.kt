@@ -5,6 +5,7 @@ import android.content.Context
 import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import com.daedalus.notes.ai.ChatTurn
+import com.daedalus.notes.ai.EmbeddingService
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.Role
 import com.daedalus.notes.ai.SpeechService
@@ -32,6 +33,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -60,6 +62,7 @@ class ConversationViewModelTest {
     private lateinit var application: Application
     private val llm = mockk<LocalLlmService>(relaxed = true)
     private val repo = mockk<RecordingRepository>(relaxed = true)
+    private val embedder = mockk<EmbeddingService>(relaxed = true)
     private val audioRecorder = mockk<AudioRecorder>(relaxed = true)
     private val transcriptionService = mockk<TranscriptionService>(relaxed = true)
     private val tts = mockk<SpeechService>(relaxed = true)
@@ -97,6 +100,7 @@ class ConversationViewModelTest {
         every { Log.e(any(), any(), any()) } returns 0
         coEvery { llm.ensureLoaded() } returns Unit
         every { tts.isAvailable } returns true
+        every { embedder.isReady } returns false
         ttsConstructions = 0
 
         conversationsDir().deleteRecursively()
@@ -115,6 +119,7 @@ class ConversationViewModelTest {
         application = application,
         llm = llm,
         repo = repo,
+        embedder = embedder,
         ioDispatcher = testDispatcher,
         clock = { nowMillis },
         contextBudgetChars = contextBudgetChars ?: (aiTextBudget(application) * 0.75).toInt(),
@@ -2114,5 +2119,64 @@ class ConversationViewModelTest {
 
         assertFalse("a replay taking the engine over must not open the mic", vm.isRecordingVoice.value)
         verify(exactly = 0) { audioRecorder.start(any(), any()) }
+    }
+
+    // (#76) Conversation mode must retrieve the user's notes: a relevant note found via
+    //     semantic search is injected into the system prompt sent to the LLM.
+    @Test
+    fun send_embedderReady_injectsRetrievedNoteContextIntoSystemPrompt() = runTest {
+        val note = Recording(
+            filename = "note1.m4a",
+            title = "Solar plans",
+            shortSummary = "Panels on the garage roof",
+            summary = "x",
+            embedding = floatArrayOf(1f, 1f)
+        )
+        every { embedder.isReady } returns true
+        coEvery { embedder.embed(any()) } returns FloatArray(2) { 1f }
+        every { repo.allRecordings } returns flowOf(listOf(note))
+        every { repo.semanticSearch(any(), any(), any()) } returns listOf(note)
+        val systemPrompts = mutableListOf<String>()
+        coEvery { llm.generate(capture(systemPrompts), any<List<ChatTurn>>()) } returns "Here you go"
+        val vm = newViewModel()
+
+        vm.send("what were my solar plans?")
+        advanceUntilIdle()
+
+        val prompt = systemPrompts.last()
+        assertTrue(prompt.contains("Solar plans"))
+        assertTrue(prompt.contains("Panels on the garage roof"))
+    }
+
+    // (#76) Degradation: with the embedder not ready (no model downloaded), the conversation must
+    //     work exactly as before — no note context injected, reply still appended.
+    @Test
+    fun send_embedderNotReady_doesNotInjectNoteContextAndStillSendsReply() = runTest {
+        every { embedder.isReady } returns false
+        val systemPrompts = mutableListOf<String>()
+        coEvery { llm.generate(capture(systemPrompts), any<List<ChatTurn>>()) } returns "Here you go"
+        val vm = newViewModel()
+
+        vm.send("what were my solar plans?")
+        advanceUntilIdle()
+
+        assertFalse(systemPrompts.last().contains("Relevant notes"))
+        assertEquals("Here you go", vm.messages.value.last().text)
+    }
+
+    // (#76) Resilience: a failure while retrieving note context (e.g. embed() throws) must not
+    //     break the conversation turn — the reply still comes back with no error surfaced.
+    @Test
+    fun send_noteRetrievalThrows_sendStillSucceedsNoErrorSurfaced() = runTest {
+        every { embedder.isReady } returns true
+        coEvery { embedder.embed(any()) } throws RuntimeException("embed failed")
+        coEvery { llm.generate(any(), any<List<ChatTurn>>()) } returns "Here you go"
+        val vm = newViewModel()
+
+        vm.send("what were my solar plans?")
+        advanceUntilIdle()
+
+        assertEquals("Here you go", vm.messages.value.last().text)
+        assertNull(vm.error.value)
     }
 }
