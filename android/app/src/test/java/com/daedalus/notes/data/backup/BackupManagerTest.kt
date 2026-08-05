@@ -3,10 +3,13 @@ package com.daedalus.notes.data.backup
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.daedalus.notes.ai.AI_TEXT_BUDGET_DEFAULT
 import com.daedalus.notes.ai.normalizeTodoText
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.data.model.TodoItem
+import com.daedalus.notes.ui.screens.TODO_LOOKBACK_HOURS_DEFAULT
+import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_DEFAULT
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -196,6 +199,83 @@ class BackupManagerTest {
         val todos = target.todoDao().getAll()
         assertEquals(2, todos.size)
         target.close()
+    }
+
+    // Every settings key is written only from a UI save/toggle callback, so a backup taken before
+    // the user touches a control used to omit that setting entirely — a fresh install exported
+    // `settings: {}`. The export must carry the *effective* value: stored if present, else the
+    // documented default that the readers use.
+    @Test
+    fun buildBackupJson_untouchedSettings_exportsEffectiveDefaults() = runBlocking {
+        val db = newDb()
+
+        val settings = BackupManager(context, db).buildBackupJson().getJSONObject("settings")
+
+        assertFalse(settings.getBoolean("use_bluetooth_mic"))
+        assertFalse(settings.getBoolean("auto_process"))
+        assertEquals(TODO_LOOKBACK_HOURS_DEFAULT, settings.getLong("todo_lookback_hours"))
+        assertEquals(BackupPrefs.DEFAULT_INTERVAL_HOURS, settings.getLong(BackupPrefs.INTERVAL_HOURS))
+        assertEquals(BackupPrefs.DEFAULT_MAX_COUNT, settings.getInt(BackupPrefs.MAX_COUNT))
+        assertEquals(MAX_RECORDING_MINUTES_DEFAULT, settings.getInt("max_recording_minutes"))
+        assertEquals(AI_TEXT_BUDGET_DEFAULT, settings.getInt("ai_text_budget_chars"))
+        assertFalse(settings.getBoolean("conversation_tts_enabled"))
+        assertEquals(1.0, settings.getDouble("conversation_tts_rate"), 0.0001)
+        assertFalse(settings.getBoolean("conversation_instant_send"))
+        assertFalse(settings.getBoolean("conversation_auto_listen"))
+        db.close()
+    }
+
+    // Absence of these two is meaningful state — custom_prompt absent means "use the built-in
+    // DEFAULT_PROMPT", conversation_tts_voice absent means "system default voice". Exporting a
+    // fabricated default would convert an unset state into an explicit setting on restore.
+    @Test
+    fun buildBackupJson_untouchedNullableSettings_stayAbsent() = runBlocking {
+        val db = newDb()
+
+        val settings = BackupManager(context, db).buildBackupJson().getJSONObject("settings")
+
+        assertFalse(settings.has("custom_prompt"))
+        assertFalse(settings.has("conversation_tts_voice"))
+        db.close()
+    }
+
+    @Test
+    fun buildBackupJson_storedSettings_winOverDefaults() = runBlocking {
+        val db = newDb()
+        prefs().edit()
+            .putBoolean("use_bluetooth_mic", true)
+            .putLong("todo_lookback_hours", 24L)
+            .putInt("ai_text_budget_chars", 9_000)
+            .putFloat("conversation_tts_rate", 1.5f)
+            .putString("conversation_tts_voice", "Voice 2")
+            .commit()
+
+        val settings = BackupManager(context, db).buildBackupJson().getJSONObject("settings")
+
+        assertTrue(settings.getBoolean("use_bluetooth_mic"))
+        assertEquals(24L, settings.getLong("todo_lookback_hours"))
+        assertEquals(9_000, settings.getInt("ai_text_budget_chars"))
+        assertEquals(1.5, settings.getDouble("conversation_tts_rate"), 0.0001)
+        assertEquals("Voice 2", settings.getString("conversation_tts_voice"))
+        db.close()
+    }
+
+    // The Long keys must round-trip as Long: a bare Kotlin literal is an Int, and storing an Int
+    // under these keys makes the readers' getLong() throw ClassCastException.
+    @Test
+    fun buildBackupJson_defaultLongKeys_roundTripAsLongNotInt() = runBlocking {
+        val db = newDb()
+        val json = BackupManager(context, db).buildBackupJson()
+
+        prefs().edit().clear().commit()
+        BackupManager(context, db).importFromJson(json)
+
+        assertEquals(TODO_LOOKBACK_HOURS_DEFAULT, prefs().getLong("todo_lookback_hours", -1L))
+        assertEquals(
+            BackupPrefs.DEFAULT_INTERVAL_HOURS,
+            prefs().getLong(BackupPrefs.INTERVAL_HOURS, -1L)
+        )
+        db.close()
     }
 
     @Test
