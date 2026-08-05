@@ -1,14 +1,18 @@
 package com.daedalus.notes.data.backup
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
+import com.daedalus.notes.ai.AI_TEXT_BUDGET_DEFAULT
 import com.daedalus.notes.ai.normalizeTodoText
 import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.data.model.TodoItem
+import com.daedalus.notes.ui.screens.TODO_LOOKBACK_HOURS_DEFAULT
+import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_DEFAULT
 import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import org.json.JSONObject
@@ -80,13 +84,7 @@ class BackupManager(
             }
             put("todos", todosArr)
 
-            val settings = JSONObject()
-            SETTINGS_KEYS.forEach { key ->
-                if (prefs.contains(key)) {
-                    settings.put(key, prefs.all[key])
-                }
-            }
-            put("settings", settings)
+            put("settings", buildSettingsJson(prefs))
         }
     }
 
@@ -288,6 +286,42 @@ class BackupManager(
     }
 
     /**
+     * Exports the *effective* value of every setting — the stored value if the user has touched
+     * the control, otherwise the same default its readers use. Every key is written only from a
+     * UI save/toggle callback, so a `prefs.contains(key)` filter would omit whole settings from a
+     * backup and silently leave the target device's values alone on restore.
+     *
+     * Per-key typed getters, deliberately verbose: each line carries the key's canonical type and
+     * default, and the type must match its readers exactly (see [applySettings] — a bare Kotlin
+     * literal is an Int, and storing an Int under a Long key makes a later getLong() throw).
+     * Does not mutate SharedPreferences.
+     */
+    private fun buildSettingsJson(prefs: SharedPreferences) = JSONObject().apply {
+        put("use_bluetooth_mic", prefs.getBoolean("use_bluetooth_mic", false))
+        put("auto_process", prefs.getBoolean("auto_process", false))
+        put("conversation_tts_enabled", prefs.getBoolean("conversation_tts_enabled", false))
+        put("conversation_instant_send", prefs.getBoolean("conversation_instant_send", false))
+        put("conversation_auto_listen", prefs.getBoolean("conversation_auto_listen", false))
+        put("conversation_tts_rate", prefs.getFloat("conversation_tts_rate", 1.0f).toDouble())
+        put("todo_lookback_hours", prefs.getLong("todo_lookback_hours", TODO_LOOKBACK_HOURS_DEFAULT))
+        put(BackupPrefs.INTERVAL_HOURS, prefs.getLong(BackupPrefs.INTERVAL_HOURS, BackupPrefs.DEFAULT_INTERVAL_HOURS))
+        put(BackupPrefs.MAX_COUNT, prefs.getInt(BackupPrefs.MAX_COUNT, BackupPrefs.DEFAULT_MAX_COUNT))
+        put("max_recording_minutes", prefs.getInt("max_recording_minutes", MAX_RECORDING_MINUTES_DEFAULT))
+        put("ai_text_budget_chars", prefs.getInt("ai_text_budget_chars", AI_TEXT_BUDGET_DEFAULT))
+
+        // These two stay present-only: their absence is meaningful state. custom_prompt absent
+        // means "use the built-in DEFAULT_PROMPT", conversation_tts_voice absent means "system
+        // default voice" — exporting a fabricated default would turn an unset state into an
+        // explicit setting on restore.
+        if (prefs.contains("custom_prompt")) {
+            put("custom_prompt", prefs.getString("custom_prompt", null))
+        }
+        if (prefs.contains("conversation_tts_voice")) {
+            put("conversation_tts_voice", prefs.getString("conversation_tts_voice", null))
+        }
+    }
+
+    /**
      * Applies restored settings with a typed whitelist. Each key is read and written
      * with its canonical SharedPreferences type — never inferred from the JSON value's
      * runtime type. org.json parses `24` as Integer, so type-sniffing would store an
@@ -325,22 +359,6 @@ class BackupManager(
         private const val PREFS_NAME = "daedalus_prefs"
 
         private val BACKUP_FILENAME_REGEX = Regex("daedalus_backup_.*\\.json")
-
-        private val SETTINGS_KEYS = listOf(
-            "use_bluetooth_mic",
-            "auto_process",
-            "custom_prompt",
-            "todo_lookback_hours",
-            BackupPrefs.INTERVAL_HOURS,
-            BackupPrefs.MAX_COUNT,
-            "max_recording_minutes",
-            "ai_text_budget_chars",
-            "conversation_tts_enabled",
-            "conversation_tts_rate",
-            "conversation_tts_voice",
-            "conversation_instant_send",
-            "conversation_auto_listen"
-        )
 
         /**
          * Given all filenames in the backup folder, returns the names of backups that
