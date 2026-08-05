@@ -127,6 +127,16 @@ class RecordingAnalysisTest {
     }
 
     @Test
+    fun updateSummary_degradedResponseOpeningWithABareMarker_titlesFromTheFirstRealLine() = runTest {
+        // The first non-blank line is nothing but a bullet marker; the title must come from the
+        // first line that still has content after cleaning, not from the marker line.
+        val (title, _) = capturePersistedTitleAndSummary("-\n###\n- Offsite venue options", "tx")
+
+        assertTrue("title should come from the first line with content, was '$title'",
+            title.startsWith("Offsite venue options"))
+    }
+
+    @Test
     fun updateSummary_degradedResponseWithLongUnbrokenWord_isStillTruncated() = runTest {
         // No space to back off to, so word-boundary truncation must not yield an empty string.
         val (title, _) = capturePersistedTitleAndSummary("a".repeat(300), "tx")
