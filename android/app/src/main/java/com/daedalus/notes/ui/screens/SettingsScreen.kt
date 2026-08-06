@@ -97,7 +97,8 @@ private fun DeviceSelectionRow(
     subtitle: String,
     isSelected: Boolean,
     onSelect: () -> Unit,
-    subtitleColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant
+    subtitleColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    isConnected: Boolean = false
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -108,10 +109,10 @@ private fun DeviceSelectionRow(
             Text(title, style = MaterialTheme.typography.bodyMedium)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = subtitleColor)
         }
-        if (isSelected) {
-            Text("Selected", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-        } else {
-            TextButton(onClick = onSelect) { Text("Connect") }
+        when (deviceRowAction(isSelected = isSelected, isConnected = isConnected)) {
+            DeviceRowAction.SELECTED -> Text("Selected", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            DeviceRowAction.CONNECT -> TextButton(onClick = onSelect) { Text("Connect") }
+            DeviceRowAction.NONE -> {}
         }
     }
 }
@@ -282,7 +283,8 @@ fun SettingsScreen(
                             subtitle = shortenMac(device.mac) + if (isConnected) " · Connected" else "",
                             subtitleColor = if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                             isSelected = selectedDeviceMac == device.mac,
-                            onSelect = { deviceViewModel.selectDevice(device.mac) }
+                            onSelect = { deviceViewModel.selectDevice(device.mac) },
+                            isConnected = isConnected
                         )
                     }
                     if (knownDevices.isEmpty()) {

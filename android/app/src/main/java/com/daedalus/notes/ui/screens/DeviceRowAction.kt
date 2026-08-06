@@ -9,4 +9,8 @@ enum class DeviceRowAction { SELECTED, CONNECT, NONE }
  * - not selected, not connected: "Connect" button.
  * - not selected, connected (auto mode picked it): no action.
  */
-fun deviceRowAction(isSelected: Boolean, isConnected: Boolean): DeviceRowAction = DeviceRowAction.CONNECT
+fun deviceRowAction(isSelected: Boolean, isConnected: Boolean): DeviceRowAction = when {
+    isSelected -> DeviceRowAction.SELECTED
+    isConnected -> DeviceRowAction.NONE
+    else -> DeviceRowAction.CONNECT
+}
