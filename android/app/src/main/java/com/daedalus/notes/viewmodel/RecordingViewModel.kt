@@ -353,10 +353,12 @@ class RecordingViewModel @JvmOverloads constructor(
                 if (file != null) {
                     val duration = AudioUtils.getDurationMillis(file.absolutePath)
                     val recording = existing ?: Recording(filename = entry.filename)
+                    val serial = bleManager.bleState.value.deviceSerial.takeIf { it.isNotBlank() }
                     repo.save(recording.copy(
-                        localPath = file.absolutePath, 
+                        localPath = file.absolutePath,
                         sizeBytes = file.length(),
-                        durationMillis = duration
+                        durationMillis = duration,
+                        deviceSerial = serial
                     ))
                     newFilenames.add(entry.filename)
                     synced++
