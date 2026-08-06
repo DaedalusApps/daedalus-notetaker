@@ -9,7 +9,5 @@ sealed class ScanTarget {
     object ByName : ScanTarget()
 }
 
-/**
- * STUB: always targets by name — ignores [selectedMac]. See issue #82.
- */
-fun scanTargetFor(selectedMac: String?): ScanTarget = ScanTarget.ByName
+fun scanTargetFor(selectedMac: String?): ScanTarget =
+    if (selectedMac.isNullOrBlank()) ScanTarget.ByName else ScanTarget.ByMac(selectedMac)

@@ -25,6 +25,14 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
         bleManager.disconnect()
     }
 
+    /** Selects a known device (or null for "any device"), then reconnects using that selection. */
+    fun selectDevice(mac: String?) {
+        shouldAutoConnect = true
+        bleManager.deviceRegistry.selectDevice(mac)
+        bleManager.disconnect()
+        bleManager.startScan()
+    }
+
     fun refreshFiles() = viewModelScope.launch {
         bleManager.listFiles()
     }

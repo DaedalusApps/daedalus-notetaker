@@ -43,6 +43,7 @@ enum class ConnectionState { DISCONNECTED, SCANNING, CONNECTING, CONNECTED, ERRO
 data class BleState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val deviceSerial: String = "",
+    val deviceMac: String = "",
     val fwVersion: String = "",
     val batteryPct: Int = 0,
     val storageFreeKb: Long = 0,
@@ -65,6 +66,9 @@ class BleManager(private val context: Context) {
 
     private val _bleState = MutableStateFlow(BleState())
     val bleState: StateFlow<BleState> = _bleState.asStateFlow()
+
+    /** Known devices (MAC + serial) and the user's device selection (issue #82). */
+    val deviceRegistry = DeviceRegistry(context.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE))
 
     // ------------------------------------------------------------------
     // Internals
@@ -107,9 +111,10 @@ class BleManager(private val context: Context) {
                 as android.bluetooth.BluetoothManager
         leScanner = btManager.adapter?.bluetoothLeScanner
 
-        val filter = ScanFilter.Builder()
-            .setDeviceName("FW920")
-            .build()
+        val filter = when (val target = scanTargetFor(deviceRegistry.selectedMac())) {
+            is ScanTarget.ByMac -> ScanFilter.Builder().setDeviceAddress(target.mac).build()
+            ScanTarget.ByName -> ScanFilter.Builder().setDeviceName(FW920_NAME).build()
+        }
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -171,7 +176,7 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     private fun connect(device: BluetoothDevice) {
-        _bleState.update { it.copy(connectionState = ConnectionState.CONNECTING) }
+        _bleState.update { it.copy(connectionState = ConnectionState.CONNECTING, deviceMac = device.address) }
         bluetoothGatt = device.connectGatt(
             context,
             false,
@@ -315,7 +320,10 @@ class BleManager(private val context: Context) {
         
         // Eagerly update state based on parsed response
         when (parsed) {
-            is ParsedResponse.Serial  -> _bleState.update { it.copy(deviceSerial = parsed.value) }
+            is ParsedResponse.Serial  -> {
+                _bleState.update { it.copy(deviceSerial = parsed.value) }
+                bluetoothGatt?.device?.address?.let { mac -> deviceRegistry.upsert(mac, parsed.value) }
+            }
             is ParsedResponse.FwVersion -> _bleState.update { it.copy(fwVersion = parsed.value) }
             is ParsedResponse.Status  -> mergeStatus(parsed)
             is ParsedResponse.RecordingStarted -> _bleState.update { it.copy(isRecording = true) }

@@ -36,6 +36,7 @@ import com.daedalus.notes.ai.isWhisperReady
 import com.daedalus.notes.data.backup.BackupManager
 import com.daedalus.notes.data.backup.BackupPrefs
 import com.daedalus.notes.data.backup.BackupWorker
+import com.daedalus.notes.ble.ConnectionState
 import com.daedalus.notes.ui.components.DeviceStatusRow
 import com.daedalus.notes.viewmodel.DeviceViewModel
 import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_DEFAULT
@@ -80,9 +81,39 @@ private fun aiTextBudgetLabel(chars: Int): String =
 private fun todoLookbackLabel(hours: Long): String =
     LOOKBACK_OPTIONS.firstOrNull { it.hours == hours }?.label ?: "Last $hours hours"
 
+private fun shortenMac(mac: String): String {
+    val parts = mac.split(":")
+    return if (parts.size >= 3) parts.takeLast(3).joinToString(":") else mac
+}
+
 private fun formatLastBackupTime(millis: Long): String {
     if (millis <= 0L) return "never"
     return java.text.SimpleDateFormat("MMM d, yyyy h:mm a", java.util.Locale.getDefault()).format(java.util.Date(millis))
+}
+
+@Composable
+private fun DeviceSelectionRow(
+    title: String,
+    subtitle: String,
+    isSelected: Boolean,
+    onSelect: () -> Unit,
+    subtitleColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = subtitleColor)
+        }
+        if (isSelected) {
+            Text("Selected", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+        } else {
+            TextButton(onClick = onSelect) { Text("Connect") }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -232,6 +263,44 @@ fun SettingsScreen(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp)
             ) {
+                // Devices
+                Text("Devices", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                // The registry only changes when a serial is read after connect, and the selection
+                // only via selectDevice() (which restarts the connection) — key on those state
+                // fields rather than the whole bleState, which also emits on every status poll.
+                val knownDevices = remember(bleState.deviceSerial, bleState.deviceMac) {
+                    deviceViewModel.bleManager.deviceRegistry.knownDevices()
+                }
+                val selectedDeviceMac = remember(bleState.connectionState) {
+                    deviceViewModel.bleManager.deviceRegistry.selectedMac()
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DeviceSelectionRow(
+                        title = "Any device (auto)",
+                        subtitle = "Connect to the first FW920 found",
+                        isSelected = selectedDeviceMac == null,
+                        onSelect = { deviceViewModel.selectDevice(null) }
+                    )
+                    knownDevices.forEach { device ->
+                        val isConnected = bleState.connectionState == ConnectionState.CONNECTED &&
+                                bleState.deviceMac == device.mac
+                        DeviceSelectionRow(
+                            title = device.serial,
+                            subtitle = shortenMac(device.mac) + if (isConnected) " · Connected" else "",
+                            subtitleColor = if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            isSelected = selectedDeviceMac == device.mac,
+                            onSelect = { deviceViewModel.selectDevice(device.mac) }
+                        )
+                    }
+                    if (knownDevices.isEmpty()) {
+                        Text(
+                            "No devices seen yet. Scan to register one.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
                 // AI model — single active model, no picker needed
                 Text("AI Summarization Engine", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
