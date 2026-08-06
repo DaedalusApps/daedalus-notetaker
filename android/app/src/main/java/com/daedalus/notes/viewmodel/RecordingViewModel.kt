@@ -325,6 +325,9 @@ class RecordingViewModel @JvmOverloads constructor(
             _syncProgress.value = "Listing files on device…"
             bleManager.listFiles()
             val files = bleManager.bleState.value.files
+            // Read once and reuse for every file downloaded this sync pass — all of them
+            // come from the same connected FW920.
+            val deviceSerial = bleManager.bleState.value.deviceSerial.takeIf { it.isNotBlank() }
             if (files.isEmpty()) {
                 _syncProgress.value = "No files on device"
                 delay(1000)
@@ -352,14 +355,14 @@ class RecordingViewModel @JvmOverloads constructor(
                 }
                 if (file != null) {
                     val duration = AudioUtils.getDurationMillis(file.absolutePath)
-                    val recording = existing ?: Recording(filename = entry.filename)
-                    val serial = bleManager.bleState.value.deviceSerial.takeIf { it.isNotBlank() }
-                    repo.save(recording.copy(
+                    saveSyncedRecording(
+                        filename = entry.filename,
+                        existing = existing,
                         localPath = file.absolutePath,
                         sizeBytes = file.length(),
                         durationMillis = duration,
-                        deviceSerial = serial
-                    ))
+                        deviceSerial = deviceSerial
+                    )
                     newFilenames.add(entry.filename)
                     synced++
                 }
@@ -374,6 +377,29 @@ class RecordingViewModel @JvmOverloads constructor(
                 throw e
             }
         }
+    }
+
+    /**
+     * Builds and persists a Recording row for a file that just landed locally via any sync
+     * path (BLE, USB-OTG, or SAF import), preserving whatever analysis already existed.
+     * `deviceSerial` is passed explicitly by each call site so provenance is stated, not
+     * inferred: BLE passes the connected unit's serial, USB-OTG and SAF pass null.
+     */
+    private suspend fun saveSyncedRecording(
+        filename: String,
+        existing: Recording?,
+        localPath: String,
+        sizeBytes: Long,
+        durationMillis: Long,
+        deviceSerial: String?
+    ) {
+        val recording = existing ?: Recording(filename = filename)
+        repo.save(recording.copy(
+            localPath = localPath,
+            sizeBytes = sizeBytes,
+            durationMillis = durationMillis,
+            deviceSerial = deviceSerial
+        ))
     }
 
     private suspend fun autoAnalyzePending() {
@@ -453,12 +479,15 @@ class RecordingViewModel @JvmOverloads constructor(
                                     }
                                 }
                                 val duration = AudioUtils.getDurationMillis(destFile.absolutePath)
-                                val recording = repo.get(file.name) ?: Recording(filename = file.name)
-                                repo.save(recording.copy(
-                                    localPath = destFile.absolutePath, 
+                                saveSyncedRecording(
+                                    filename = file.name,
+                                    existing = repo.get(file.name),
+                                    localPath = destFile.absolutePath,
                                     sizeBytes = destFile.length(),
-                                    durationMillis = duration
-                                ))
+                                    durationMillis = duration,
+                                    // Mounted storage exposes no device identity — no serial recoverable here.
+                                    deviceSerial = null
+                                )
                             } catch (e: Exception) {
                                 Log.e("DaedalusSync", "Error copying ${file.name}", e)
                                 _aiError.value = "Failed to copy ${file.name}: ${e.message}"
@@ -502,12 +531,15 @@ class RecordingViewModel @JvmOverloads constructor(
                             }
                         }
                         val duration = AudioUtils.getDurationMillis(destFile.absolutePath)
-                        val recording = repo.get(name) ?: Recording(filename = name)
-                        repo.save(recording.copy(
-                            localPath = destFile.absolutePath, 
+                        saveSyncedRecording(
+                            filename = name,
+                            existing = repo.get(name),
+                            localPath = destFile.absolutePath,
                             sizeBytes = destFile.length(),
-                            durationMillis = duration
-                        ))
+                            durationMillis = duration,
+                            // Arbitrary source picked via SAF — no device to attribute.
+                            deviceSerial = null
+                        )
                     } catch (e: Exception) {
                         _aiError.value = "Failed to sync $name: ${e.message}"
                     }
