@@ -68,7 +68,6 @@ abstract class AppDatabase : RoomDatabase() {
         internal fun buildDatabase(context: Context, name: String): AppDatabase {
             return Room.databaseBuilder(context, AppDatabase::class.java, name)
                 .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
-                .fallbackToDestructiveMigration()
                 .build()
         }
 
