@@ -1,6 +1,7 @@
 package com.daedalus.notes.data.db
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -63,16 +64,16 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        @VisibleForTesting
+        internal fun buildDatabase(context: Context, name: String): AppDatabase {
+            return Room.databaseBuilder(context, AppDatabase::class.java, name)
+                .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+                .build()
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: Room.databaseBuilder(
-                    context.applicationContext,
-                    AppDatabase::class.java,
-                    "daedalus_notes.db"
-                )
-                .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
-                .fallbackToDestructiveMigration()
-                .build().also { INSTANCE = it }
+                INSTANCE ?: buildDatabase(context.applicationContext, "daedalus_notes.db").also { INSTANCE = it }
             }
         }
     }
