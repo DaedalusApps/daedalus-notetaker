@@ -34,7 +34,7 @@ class DeviceRegistryTest {
         registry.upsert("AA:BB:CC:DD:EE:01", "SERIALOLD")
         registry.upsert("AA:BB:CC:DD:EE:01", "SERIALNEW")
 
-        val devices = registry.knownDevices()
+        val devices = registry.knownDevices.value
         assertEquals(1, devices.size)
         assertEquals("SERIALNEW", devices.single().serial)
     }
@@ -46,7 +46,7 @@ class DeviceRegistryTest {
         registry.upsert("AA:BB:CC:DD:EE:01", "SERIAL1")
         registry.upsert("AA:BB:CC:DD:EE:02", "SERIAL2")
 
-        val macs = registry.knownDevices().map { it.mac }.toSet()
+        val macs = registry.knownDevices.value.map { it.mac }.toSet()
         assertEquals(setOf("AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"), macs)
     }
 
@@ -54,7 +54,7 @@ class DeviceRegistryTest {
     fun selectedMac_defaultsToNull_meaningAnyDevice() {
         val registry = DeviceRegistry(prefs())
 
-        assertNull(registry.selectedMac())
+        assertNull(registry.selectedMac.value)
     }
 
     @Test
@@ -62,10 +62,20 @@ class DeviceRegistryTest {
         val registry = DeviceRegistry(prefs())
 
         registry.selectDevice("AA:BB:CC:DD:EE:01")
-        assertEquals("AA:BB:CC:DD:EE:01", DeviceRegistry(prefs()).selectedMac())
+        assertEquals("AA:BB:CC:DD:EE:01", DeviceRegistry(prefs()).selectedMac.value)
 
         // Selecting "any" (null) clears the persisted choice.
         registry.selectDevice(null)
-        assertNull(DeviceRegistry(prefs()).selectedMac())
+        assertNull(DeviceRegistry(prefs()).selectedMac.value)
+    }
+
+    @Test
+    fun upsert_persistsAcrossNewRegistryInstance() {
+        val registry = DeviceRegistry(prefs())
+
+        registry.upsert("AA:BB:CC:DD:EE:01", "SERIAL1")
+
+        val reloaded = DeviceRegistry(prefs())
+        assertEquals(listOf("SERIAL1"), reloaded.knownDevices.value.map { it.serial })
     }
 }

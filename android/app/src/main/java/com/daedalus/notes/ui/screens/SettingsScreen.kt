@@ -265,15 +265,8 @@ fun SettingsScreen(
             ) {
                 // Devices
                 Text("Devices", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                // The registry only changes when a serial is read after connect, and the selection
-                // only via selectDevice() (which restarts the connection) — key on those state
-                // fields rather than the whole bleState, which also emits on every status poll.
-                val knownDevices = remember(bleState.deviceSerial, bleState.deviceMac) {
-                    deviceViewModel.bleManager.deviceRegistry.knownDevices()
-                }
-                val selectedDeviceMac = remember(bleState.connectionState) {
-                    deviceViewModel.bleManager.deviceRegistry.selectedMac()
-                }
+                val knownDevices by deviceViewModel.bleManager.deviceRegistry.knownDevices.collectAsState()
+                val selectedDeviceMac by deviceViewModel.bleManager.deviceRegistry.selectedMac.collectAsState()
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     DeviceSelectionRow(
                         title = "Any device (auto)",

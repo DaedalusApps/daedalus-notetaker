@@ -111,9 +111,11 @@ class BleManager(private val context: Context) {
                 as android.bluetooth.BluetoothManager
         leScanner = btManager.adapter?.bluetoothLeScanner
 
-        val filter = when (val target = scanTargetFor(deviceRegistry.selectedMac())) {
-            is ScanTarget.ByMac -> ScanFilter.Builder().setDeviceAddress(target.mac).build()
-            ScanTarget.ByName -> ScanFilter.Builder().setDeviceName(FW920_NAME).build()
+        val targetMac = scanTargetMac(deviceRegistry.selectedMac.value)
+        val filter = if (targetMac != null) {
+            ScanFilter.Builder().setDeviceAddress(targetMac).build()
+        } else {
+            ScanFilter.Builder().setDeviceName(FW920_NAME).build()
         }
 
         val settings = ScanSettings.Builder()

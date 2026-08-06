@@ -1,24 +1,23 @@
 package com.daedalus.notes.ble
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ScanTargetingTest {
 
     @Test
-    fun scanTargetFor_selectedMac_targetsThatAddress() {
-        val target = scanTargetFor("AA:BB:CC:DD:EE:01")
-
-        assertEquals(ScanTarget.ByMac("AA:BB:CC:DD:EE:01"), target)
+    fun scanTargetMac_selectedMac_returnsThatAddress() {
+        assertEquals("AA:BB:CC:DD:EE:01", scanTargetMac("AA:BB:CC:DD:EE:01"))
     }
 
     @Test
-    fun scanTargetFor_noSelection_targetsByFw920Name() {
-        assertEquals(ScanTarget.ByName, scanTargetFor(null))
+    fun scanTargetMac_noSelection_returnsNull() {
+        assertNull(scanTargetMac(null))
     }
 
     @Test
-    fun scanTargetFor_blankSelection_targetsByFw920Name() {
-        assertEquals(ScanTarget.ByName, scanTargetFor(""))
+    fun scanTargetMac_blankSelection_returnsNull() {
+        assertNull(scanTargetMac(""))
     }
 }
