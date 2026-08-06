@@ -383,7 +383,9 @@ class RecordingViewModel @JvmOverloads constructor(
      * Builds and persists a Recording row for a file that just landed locally via any sync
      * path (BLE, USB-OTG, or SAF import), preserving whatever analysis already existed.
      * `deviceSerial` is passed explicitly by each call site so provenance is stated, not
-     * inferred: BLE passes the connected unit's serial, USB-OTG and SAF pass null.
+     * inferred: BLE passes the connected unit's serial, USB-OTG and SAF pass null. A null
+     * here never clobbers a serial an earlier BLE sync already recorded — it only fills in
+     * when nothing was known before.
      */
     private suspend fun saveSyncedRecording(
         filename: String,
@@ -398,7 +400,7 @@ class RecordingViewModel @JvmOverloads constructor(
             localPath = localPath,
             sizeBytes = sizeBytes,
             durationMillis = durationMillis,
-            deviceSerial = deviceSerial
+            deviceSerial = deviceSerial ?: existing?.deviceSerial
         ))
     }
 

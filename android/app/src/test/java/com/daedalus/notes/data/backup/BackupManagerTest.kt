@@ -53,7 +53,7 @@ class BackupManagerTest {
     fun v2ExportRoundTrip_restoresRecordingsTodosAndSettings() = runBlocking {
         val source = newDb()
         source.recordingDao().upsert(
-            Recording(filename = "note1.mp3", title = "First", transcript = "hello", category = 2)
+            Recording(filename = "note1.mp3", title = "First", transcript = "hello", category = 2, deviceSerial = "K9THA22775")
         )
         source.recordingDao().upsert(
             Recording(filename = "note2.mp3", title = "Second", transcript = "world", topics = listOf("a", "b"))
@@ -91,6 +91,8 @@ class BackupManagerTest {
         val recordings = target.recordingDao().getAllFlow().first()
         assertEquals(setOf("note1.mp3", "note2.mp3"), recordings.map { it.filename }.toSet())
         assertEquals("First", recordings.first { it.filename == "note1.mp3" }.title)
+        assertEquals("K9THA22775", recordings.first { it.filename == "note1.mp3" }.deviceSerial)
+        assertEquals(null, recordings.first { it.filename == "note2.mp3" }.deviceSerial)
 
         val todos = target.todoDao().getAll()
         assertEquals(setOf("Buy milk", "Call Bob"), todos.map { it.text }.toSet())
