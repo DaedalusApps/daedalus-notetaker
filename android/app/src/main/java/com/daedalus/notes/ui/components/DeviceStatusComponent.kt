@@ -171,7 +171,7 @@ fun DeviceStatusRow(
                             tint = MaterialTheme.colorScheme.onErrorContainer
                         )
                         Text(
-                            text = if (bleState.connectionState == ConnectionState.ERROR && bleState.errorMessage.isNotBlank())
+                            text = if (bleState.errorMessage.isNotBlank())
                                 bleState.errorMessage else "FW920 not connected",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onErrorContainer,
