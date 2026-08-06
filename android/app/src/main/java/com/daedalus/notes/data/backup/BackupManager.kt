@@ -57,6 +57,7 @@ class BackupManager(
                     put("shortSummary", r.shortSummary)
                     put("durationMillis", r.durationMillis)
                     put("isLocal", r.isLocal)
+                    r.deviceSerial?.let { put("deviceSerial", it) }
 
                     val topicsArr = JSONArray()
                     r.topics.forEach { topicsArr.put(it) }
@@ -178,7 +179,11 @@ class BackupManager(
                 topics = topics,
                 durationMillis = obj.optLong("durationMillis", existing?.durationMillis ?: 0L),
                 embedding = embedding ?: existing?.embedding,
-                isLocal = obj.optBoolean("isLocal", existing?.isLocal ?: false)
+                isLocal = obj.optBoolean("isLocal", existing?.isLocal ?: false),
+                // Absent in older (pre-#83) backups — fall back to whatever is already there
+                // rather than wiping provenance on restore.
+                deviceSerial = if (obj.has("deviceSerial") && !obj.isNull("deviceSerial"))
+                    obj.getString("deviceSerial") else existing?.deviceSerial
             )
 
             repo.save(recording)

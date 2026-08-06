@@ -258,6 +258,14 @@ fun NoteDetailScreen(
                         }
                     }
                 }
+                note?.deviceSerial?.let { serial ->
+                    Text(
+                        text = "From $serial",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                }
 
                 Row(
                     modifier = Modifier

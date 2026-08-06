@@ -181,7 +181,12 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     private fun connect(device: BluetoothDevice) {
-        _bleState.update { it.copy(connectionState = ConnectionState.CONNECTING, deviceMac = device.address) }
+        // Reset the previous unit's serial at connect-start — otherwise a device swap
+        // whose serial read then times out leaves the new device permanently mislabeled
+        // with the old one's serial (and its files silently skipped by future syncs).
+        _bleState.update {
+            it.copy(connectionState = ConnectionState.CONNECTING, deviceMac = device.address, deviceSerial = "")
+        }
         bluetoothGatt = device.connectGatt(
             context,
             false,

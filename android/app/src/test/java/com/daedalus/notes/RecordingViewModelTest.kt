@@ -265,6 +265,80 @@ class RecordingViewModelTest {
     }
 
     @Test
+    fun syncAllBleFiles_tagsDownloadedRecordingWithConnectedDeviceSerial() = runTest {
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "device1.mp3", sizeBytes = 100L)
+        coEvery { repo.getPendingDeletes() } returns emptyList()
+        coEvery { bleManager.listFiles() } returns Unit
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(
+                connectionState = ConnectionState.CONNECTED,
+                files = listOf(entry),
+                deviceSerial = "K9THA22775"
+            )
+        )
+        coEvery { repo.get("device1.mp3") } returns null
+        val tempFile = java.io.File.createTempFile("device1", ".mp3").apply { deleteOnExit() }
+        coEvery { bleManager.downloadFile(eq("device1.mp3"), any()) } returns tempFile
+
+        viewModel.syncAllBleFiles(bleManager)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) {
+            repo.save(match { it.filename == "device1.mp3" && it.deviceSerial == "K9THA22775" })
+        }
+    }
+
+    @Test
+    fun syncAllBleFiles_blankDeviceSerial_persistsNull() = runTest {
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "device2.mp3", sizeBytes = 100L)
+        coEvery { repo.getPendingDeletes() } returns emptyList()
+        coEvery { bleManager.listFiles() } returns Unit
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(
+                connectionState = ConnectionState.CONNECTED,
+                files = listOf(entry),
+                deviceSerial = ""
+            )
+        )
+        coEvery { repo.get("device2.mp3") } returns null
+        val tempFile = java.io.File.createTempFile("device2", ".mp3").apply { deleteOnExit() }
+        coEvery { bleManager.downloadFile(eq("device2.mp3"), any()) } returns tempFile
+
+        viewModel.syncAllBleFiles(bleManager)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) {
+            repo.save(match { it.filename == "device2.mp3" && it.deviceSerial == null })
+        }
+    }
+
+    @Test
+    fun syncAllBleFiles_blankDeviceSerial_preservesPriorKnownSerial() = runTest {
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "device3.mp3", sizeBytes = 100L)
+        coEvery { repo.getPendingDeletes() } returns emptyList()
+        coEvery { bleManager.listFiles() } returns Unit
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(
+                connectionState = ConnectionState.CONNECTED,
+                files = listOf(entry),
+                // This sync pass' own serial read failed/is blank, but the row was already
+                // tagged by an earlier successful sync — that provenance must not be clobbered.
+                deviceSerial = ""
+            )
+        )
+        coEvery { repo.get("device3.mp3") } returns Recording("device3.mp3", deviceSerial = "K9THA22775")
+        val tempFile = java.io.File.createTempFile("device3", ".mp3").apply { deleteOnExit() }
+        coEvery { bleManager.downloadFile(eq("device3.mp3"), any()) } returns tempFile
+
+        viewModel.syncAllBleFiles(bleManager)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) {
+            repo.save(match { it.filename == "device3.mp3" && it.deviceSerial == "K9THA22775" })
+        }
+    }
+
+    @Test
     fun wipeLocalAnalysis_callsRepoWipe() = runTest {
         var successCalled = false
         var errorMessage: String? = null

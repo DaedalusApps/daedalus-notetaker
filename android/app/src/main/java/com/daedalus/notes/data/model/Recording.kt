@@ -20,5 +20,6 @@ data class Recording(
     val durationMillis: Long = 0,
     @ColumnInfo(typeAffinity = ColumnInfo.BLOB) val embedding: FloatArray? = null,
     val isLocal: Boolean = false,        // true = recorded on phone (not present on FW920)
-    val pendingDelete: Boolean = false
+    val pendingDelete: Boolean = false,
+    val deviceSerial: String? = null     // serial of the FW920 this was synced from; null for phone-local recordings
 )
