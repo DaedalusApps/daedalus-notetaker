@@ -20,4 +20,17 @@ class ScanTargetingTest {
     fun scanTargetMac_blankSelection_returnsNull() {
         assertNull(scanTargetMac(""))
     }
+
+    @Test
+    fun scanTimeoutMessage_targetedMac_mentionsSwitchingToAnyDevice() {
+        assertEquals(
+            "Selected device not found — pick Any device to reconnect",
+            scanTimeoutMessage(targetedMac = true)
+        )
+    }
+
+    @Test
+    fun scanTimeoutMessage_noTargetedMac_isGenericNotFound() {
+        assertEquals("No FW920 found", scanTimeoutMessage(targetedMac = false))
+    }
 }

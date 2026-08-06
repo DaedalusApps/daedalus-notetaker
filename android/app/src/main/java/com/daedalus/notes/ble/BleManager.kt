@@ -81,6 +81,7 @@ class BleManager(private val context: Context) {
     private var leScanner: BluetoothLeScanner? = null
     private var pollJob: Job? = null
     private var scanTimeoutJob: Job? = null
+    private var initJob: Job? = null
 
     /** Single-consumer channel; responses flow here from onCharacteristicChanged. */
     private val responseChannel = Channel<ParsedResponse>(capacity = Channel.UNLIMITED)
@@ -130,7 +131,9 @@ class BleManager(private val context: Context) {
             delay(SCAN_TIMEOUT_MS)
             if (_bleState.value.connectionState == ConnectionState.SCANNING) {
                 Log.d("BleManager", "Scan timed out after ${SCAN_TIMEOUT_MS}ms — stopping")
+                val targetedMac = scanTargetMac(deviceRegistry.selectedMac.value) != null
                 stopScan()
+                _bleState.update { it.copy(errorMessage = scanTimeoutMessage(targetedMac)) }
             }
         }
     }
@@ -194,6 +197,8 @@ class BleManager(private val context: Context) {
     fun disconnect() {
         stopScan()
         stopPoller()
+        initJob?.cancel()
+        initJob = null
         bluetoothGatt?.disconnect()
         bluetoothGatt?.close()
         bluetoothGatt = null
@@ -208,6 +213,12 @@ class BleManager(private val context: Context) {
     private val gattCallback = object : BluetoothGattCallback() {
 
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (gatt != bluetoothGatt) {
+                // Stale callback from a connection superseded by a newer connect()/disconnect()
+                // (e.g. a device swap) — release its resources but don't touch current state.
+                if (newState == BluetoothProfile.STATE_DISCONNECTED) gatt.close()
+                return
+            }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     gatt.requestMtu(512)
@@ -215,7 +226,7 @@ class BleManager(private val context: Context) {
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     stopPoller()
                     writeChar = null
-                    bluetoothGatt?.close()
+                    gatt.close()
                     bluetoothGatt = null
                     _bleState.update {
                         it.copy(connectionState = ConnectionState.DISCONNECTED)
@@ -250,7 +261,11 @@ class BleManager(private val context: Context) {
 
             // Enable notifications one at a time (GATT requires serialized operations),
             // then start the init sequence only after all descriptors are written.
-            scope.launch {
+            // Tracked in initJob so a disconnect()/device swap mid-sequence can cancel it —
+            // otherwise it keeps draining responseChannel for the superseded device and can
+            // mark the new connection CONNECTED prematurely at the tail of its own sequence.
+            initJob?.cancel()
+            initJob = scope.launch {
                 for (notifyUuid in listOf(NOTIFY_B0B2_UUID, NOTIFY_B0B3_UUID, NOTIFY_B0B4_UUID)) {
                     val notifyChar = service.getCharacteristic(UUID.fromString(notifyUuid)) ?: continue
                     enableNotification(gatt, notifyChar)
@@ -260,6 +275,7 @@ class BleManager(private val context: Context) {
                 Log.i("BleManager", "All notifications enabled, starting init sequence")
                 runInitSequence()
             }
+            initJob?.invokeOnCompletion { initJob = null }
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
@@ -281,7 +297,7 @@ class BleManager(private val context: Context) {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            handleIncoming(characteristic.value)
+            handleIncoming(gatt, characteristic.value)
         }
 
         override fun onCharacteristicChanged(
@@ -289,7 +305,7 @@ class BleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            handleIncoming(value)
+            handleIncoming(gatt, value)
         }
     }
 
@@ -314,17 +330,20 @@ class BleManager(private val context: Context) {
     // Incoming data handler
     // ------------------------------------------------------------------
 
-    private fun handleIncoming(data: ByteArray) {
+    private fun handleIncoming(gatt: BluetoothGatt, data: ByteArray) {
         val hex = data.joinToString(" ") { "%02X".format(it) }
         Log.d("BleManager", "RX [${data.size}b]: $hex")
         val parsed = parseResponse(data) ?: return
         Log.d("BleManager", "RX parsed: $parsed")
-        
+
         // Eagerly update state based on parsed response
         when (parsed) {
             is ParsedResponse.Serial  -> {
                 _bleState.update { it.copy(deviceSerial = parsed.value) }
-                bluetoothGatt?.device?.address?.let { mac -> deviceRegistry.upsert(mac, parsed.value) }
+                // Use the delivering gatt's own device, not the mutable bluetoothGatt field —
+                // during a fast device swap an in-flight notification from the old device would
+                // otherwise register the old serial under the new device's MAC.
+                gatt.device?.address?.let { mac -> deviceRegistry.upsert(mac, parsed.value) }
             }
             is ParsedResponse.FwVersion -> _bleState.update { it.copy(fwVersion = parsed.value) }
             is ParsedResponse.Status  -> mergeStatus(parsed)

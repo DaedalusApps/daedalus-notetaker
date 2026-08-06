@@ -25,10 +25,16 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
         bleManager.disconnect()
     }
 
-    /** Selects a known device (or null for "any device"), then reconnects using that selection. */
+    /**
+     * Selects a known device (or null for "any device"), then reconnects using that selection.
+     * The selection is always persisted; if a recording is in progress on the current device,
+     * the reconnect is skipped so it isn't interrupted — the existing auto-connect effects will
+     * pick up the new selection once recording ends.
+     */
     fun selectDevice(mac: String?) {
-        shouldAutoConnect = true
         bleManager.deviceRegistry.selectDevice(mac)
+        if (bleManager.bleState.value.isRecording) return
+        shouldAutoConnect = true
         bleManager.disconnect()
         bleManager.startScan()
     }
