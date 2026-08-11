@@ -106,6 +106,7 @@ adb shell am broadcast -a com.daedalus.notes.ANALYZE --es filename "202605242134
 - **ROADMAP.md:** Future feature development and backlog.
 - **PLAN.md:** Original design document and strategy.
 - **android/BUILD.md:** Android build and environment documentation.
+- **android/docs/SPLIT_RECORDINGS.md:** How recordings >15 min are split into parts.
 
 ## Workflows
 
