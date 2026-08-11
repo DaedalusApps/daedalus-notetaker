@@ -61,6 +61,9 @@ const val MAX_RECORDING_MINUTES_DEFAULT = 120
 /** Sentinel value meaning "no cap" — mirrors the -1 "all recordings" convention used by [TODO_LOOKBACK_HOURS_KEY]. */
 const val MAX_RECORDING_MINUTES_UNLIMITED = -1
 
+/** Recordings longer than this are split into parts, each transcribed and analyzed independently. */
+private const val PART_DURATION_MS = 15L * 60 * 1000  // 15 minutes
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class RecordingViewModel @JvmOverloads constructor(
     application: Application,
@@ -559,6 +562,9 @@ class RecordingViewModel @JvmOverloads constructor(
         }
     }
 
+    /** Returns all child parts for a recording that was split, empty if it wasn't split. */
+    suspend fun getPartsOf(filename: String): List<Recording> = repo.getPartsOf(filename)
+
     fun analyze(filename: String) {
         viewModelScope.launch { doAnalyze(filename) }
     }
@@ -577,7 +583,67 @@ class RecordingViewModel @JvmOverloads constructor(
                     return
                 }
 
-                // Step 1: Always re-transcribe to get fresh text
+                // Determine duration, healing the DB value if needed.
+                val durationMs = note.durationMillis.takeIf { it > 0 }
+                    ?: AudioUtils.getDurationMillis(localFile.absolutePath).also { d ->
+                        if (d > 0) repo.save(note.copy(durationMillis = d))
+                    }
+
+                // --- Long-recording split: > 15 min → create parts ---
+                if (durationMs > PART_DURATION_MS && note.parentFilename == null) {
+                    val numParts = ((durationMs + PART_DURATION_MS - 1) / PART_DURATION_MS).toInt()
+                    Log.i("DaedalusAI", "Splitting ${filename} into $numParts parts (${durationMs}ms)")
+
+                    // Remove stale parts from a previous analysis run, if any.
+                    for (old in repo.getPartsOf(filename)) {
+                        repo.delete(old)
+                    }
+
+                    for (i in 1..numParts) {
+                        val startMs = (i - 1) * PART_DURATION_MS
+                        val endMs = minOf(i * PART_DURATION_MS, durationMs)
+                        val partFilename = "${filename.removeSuffix(".mp3")}_p${i}.mp3"
+                        val partDuration = endMs - startMs
+
+                        _syncProgress.value = "Transcribing part $i of $numParts…"
+                        Log.i("DaedalusAI", "Transcribing part $i: ${startMs}ms–${endMs}ms")
+                        val transcript = transcriber.transcribeRange(localFile, startMs, endMs)
+
+                        val partRecording = Recording(
+                            filename = partFilename,
+                            localPath = localFile.absolutePath,
+                            sizeBytes = note.sizeBytes,
+                            transcript = transcript,
+                            durationMillis = partDuration,
+                            createdAt = note.createdAt + (i - 1),  // slight offset to preserve order
+                            isLocal = note.isLocal,
+                            deviceSerial = note.deviceSerial,
+                            parentFilename = filename,
+                            partIndex = i
+                        )
+                        repo.save(partRecording)
+
+                        if (!isTranscriptReadable(transcript)) {
+                            Log.w("DaedalusAI", "Part $i transcript not readable, skipping analysis")
+                            continue
+                        }
+
+                        analyzeTranscript(
+                            getApplication(), llm, embedder, repo,
+                            partFilename, transcript
+                        ) { _syncProgress.value = it }
+                    }
+
+                    // Mark the parent as split so it shows the part count in the UI.
+                    repo.save(note.copy(
+                        title = note.title.ifBlank { "Long Recording ($numParts parts)" },
+                        shortSummary = "Split into $numParts parts of ~15 min each. Tap to expand."
+                    ))
+                    _currentNote.value = repo.get(filename)
+                    return
+                }
+
+                // --- Normal (short) recording: transcribe + analyze as one ---
                 _syncProgress.value = "Transcribing audio…"
                 Log.i("DaedalusAI", "Transcribing ${localFile.name}")
                 val transcript = transcriber.transcribe(localFile)
@@ -621,6 +687,11 @@ class RecordingViewModel @JvmOverloads constructor(
     fun deleteRecording(filename: String, bleManager: BleManager) {
         viewModelScope.launch {
             val recording = repo.get(filename) ?: return@launch
+
+            // Cascade-delete child parts if this is a split parent.
+            for (part in repo.getPartsOf(filename)) {
+                repo.delete(part)
+            }
 
             // Local-only recordings aren't on the FW920 — delete without requiring a device.
             if (recording.isLocal) {

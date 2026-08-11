@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface RecordingDao {
 
-    @Query("SELECT * FROM recordings WHERE pendingDelete = 0 ORDER BY createdAt DESC")
+    @Query("SELECT * FROM recordings WHERE pendingDelete = 0 AND parentFilename IS NULL ORDER BY createdAt DESC")
     fun getAllFlow(): Flow<List<Recording>>
 
     @Query("SELECT * FROM recordings WHERE filename = :filename")
@@ -21,9 +21,12 @@ interface RecordingDao {
     (filename LIKE '%' || :q || '%' OR
     transcript LIKE '%' || :q || '%' OR
     summary LIKE '%' || :q || '%') AND
-    pendingDelete = 0
+    pendingDelete = 0 AND parentFilename IS NULL
     ORDER BY createdAt DESC""")
     fun searchFlow(q: String): Flow<List<Recording>>
+
+    @Query("SELECT * FROM recordings WHERE parentFilename = :parent ORDER BY partIndex ASC")
+    suspend fun getPartsOf(parent: String): List<Recording>
 
     @Query("SELECT * FROM recordings WHERE pendingDelete = 1")
     suspend fun getPendingDeletes(): List<Recording>

@@ -1,5 +1,6 @@
 package com.daedalus.notes.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +29,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -51,6 +54,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -301,6 +305,19 @@ fun RecordingsScreen(
                 ) {
                     items(recordings, key = { it.filename }) { recording ->
                         val isSelected = selectedFilenames.contains(recording.filename)
+
+                        // Track which parents are expanded and their loaded parts.
+                        var expanded by remember { mutableStateOf(false) }
+                        var parts by remember { mutableStateOf<List<Recording>>(emptyList()) }
+                        val coroutineScope = rememberCoroutineScope()
+
+                        // Lazily load parts count on first compose to show the expand button.
+                        LaunchedEffect(recording.filename) {
+                            parts = recordingViewModel.getPartsOf(recording.filename)
+                        }
+
+                        val hasParts = parts.isNotEmpty()
+
                         RecordingSwipeToDeleteCard(
                             recording = recording,
                             bleManager = viewModel.bleManager,
@@ -313,7 +330,11 @@ fun RecordingsScreen(
                                     else
                                         selectedFilenames + recording.filename
                                 } else {
-                                    onNavigateToNote(recording.filename)
+                                    if (hasParts) {
+                                        expanded = !expanded
+                                    } else {
+                                        onNavigateToNote(recording.filename)
+                                    }
                                 }
                             },
                             onLongClick = {
@@ -334,6 +355,85 @@ fun RecordingsScreen(
                                 )
                             }
                         )
+
+                        // Expand/collapse button for split recordings
+                        if (hasParts && !isSelectionMode) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { expanded = !expanded }
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = if (expanded) "Collapse parts" else "Expand parts",
+                                    modifier = Modifier.size(20.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = "${parts.size} parts",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+
+                        // Show part cards when expanded
+                        if (expanded && hasParts) {
+                            parts.forEach { part ->
+                                Row(modifier = Modifier.padding(start = 24.dp, top = 4.dp)) {
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { onNavigateToNote(part.filename) },
+                                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                        )
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = part.title.ifBlank { "Part ${part.partIndex}" },
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                if (part.shortSummary.isNotBlank()) {
+                                                    Text(
+                                                        text = part.shortSummary,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                                Text(
+                                                    text = AudioUtils.formatDuration(part.durationMillis),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                            Icon(
+                                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                                contentDescription = "Open part",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

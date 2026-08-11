@@ -71,6 +71,61 @@ class TranscriptionService(private val context: Context) {
         }
     }
 
+    /**
+     * Transcribe only the audio in the time window [startMs, endMs).
+     * Decodes the full file to PCM, slices to the requested range, then chunks
+     * the slice into 30-second Whisper segments as usual.
+     */
+    suspend fun transcribeRange(audioFile: File, startMs: Long, endMs: Long): String =
+        withContext(Dispatchers.IO) {
+            if (!isWhisperReady(context)) return@withContext ""
+            Log.i(TAG, "Transcribing ${audioFile.name} range ${startMs}ms–${endMs}ms")
+
+            val dir = whisperModelDir(context)
+            val config = OfflineRecognizerConfig(
+                modelConfig = OfflineModelConfig(
+                    whisper = OfflineWhisperModelConfig(
+                        encoder = File(dir, WHISPER_ENCODER_FILE).absolutePath,
+                        decoder = File(dir, WHISPER_DECODER_FILE).absolutePath,
+                        language = "en",
+                        task = "transcribe",
+                    ),
+                    tokens = File(dir, WHISPER_TOKENS_FILE).absolutePath,
+                    numThreads = 4,
+                )
+            )
+            val recognizer = OfflineRecognizer(config = config)
+            try {
+                val fullPcm = decodeToPcmFloat(audioFile)
+                val startSample = ((startMs * TARGET_SAMPLE_RATE) / 1000).toInt()
+                    .coerceIn(0, fullPcm.size)
+                val endSample = ((endMs * TARGET_SAMPLE_RATE) / 1000).toInt()
+                    .coerceIn(startSample, fullPcm.size)
+                val pcm = fullPcm.copyOfRange(startSample, endSample)
+                Log.i(TAG, "Sliced to $startSample–$endSample (${pcm.size} samples)")
+
+                val parts = mutableListOf<String>()
+                var offset = 0
+                while (offset < pcm.size) {
+                    val end = minOf(offset + CHUNK_SAMPLES, pcm.size)
+                    val chunk = pcm.copyOfRange(offset, end)
+                    val stream = recognizer.createStream()
+                    stream.acceptWaveform(samples = chunk, sampleRate = TARGET_SAMPLE_RATE)
+                    recognizer.decode(stream)
+                    val chunkText = recognizer.getResult(stream).text.trim()
+                    stream.release()
+                    if (chunkText.isNotEmpty()) parts.add(chunkText)
+                    offset = end
+                }
+
+                val text = parts.joinToString(" ")
+                Log.i(TAG, "Range transcription complete: ${text.length} chars across ${parts.size} chunk(s)")
+                text
+            } finally {
+                recognizer.release()
+            }
+        }
+
     private fun decodeToPcmFloat(file: File): FloatArray {
         val (buffer, size) = decodeToPcm(file)
         return FloatArray(size) { buffer[it] / 32768f }
