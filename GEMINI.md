@@ -38,7 +38,7 @@ This file provides foundational mandates, architecture, and workflows for the `n
 - Service: `0000b0b0-0000-1000-8000-00805f9b34fb`
 - Write: `0000b0b1-...` — send commands here
 - Notify B0B2: control responses (A0 0A 01 packets)
-- Notify B0B3/B0B4: audio data chunks during download
+- Notify B0B3/B0B4: audio data chunks during download (only B0B4 observed in practice)
 
 **Packet format:** `A0 0A 01 [CMD] [LEN] [PAYLOAD...] [CRC16-ARC-hi] [CRC16-ARC-lo]`
 
@@ -53,7 +53,7 @@ This file provides foundational mandates, architecture, and workflows for the `n
 | 0x07 | →device   | Confirm done (after stop) |
 | 0x08 | →device   | Stop recording |
 | 0x0A | →device   | List files (device replies with one 0x0A packet per file, null-entry = end) |
-| 0x0B | →device   | **Download file** — payload: 14-byte filename (space-padded) + 4-byte LE offset (always 0x00000000) |
+| 0x0B | →device   | **Download file** — payload: 14-byte filename (space-padded) + 4-byte BIG-endian start offset (app sends 0x00000000) |
 | 0x0D | →device   | **Delete file** — payload: 14-byte filename (space-padded) |
 
 **Download protocol (cmd=0x0B):**
@@ -63,9 +63,19 @@ This file provides foundational mandates, architecture, and workflows for the `n
 4. Device sends second `Ack(0x0B)` = end-of-file
 5. **Do not send any confirm/continue packet** — one request, device sends complete file
 
-**MTU:** Must request MTU 512 before service discovery (`gatt.requestMtu(512)` → `onMtuChanged` → `gatt.discoverServices()`). Without this, device may not stream audio chunks.
+**MTU:** Request MTU 512 before service discovery (`gatt.requestMtu(512)` → `onMtuChanged` → `gatt.discoverServices()`). Note the FW920 only grants **247** (`MTU changed to 247`), so notification payloads cap at 244 bytes.
 
-**File list `sizeBytes` field is NOT in bytes** — it appears to be raw PCM sample count or some other unit. Do not use it for size comparison. Trust the actual bytes received; a clean `Ack(0x0B)` after data = complete file.
+**Download offset is BIG-endian**, not little-endian (verified 2026-08-11 by probing: sending `00 00 01 00` seeked to byte 256, and `00 01 00 00` seeked to 65,536 — byte-exact both times). The field has always been sent as zeros, so the byte order never mattered until now. The device honours arbitrary start offsets, which makes a resume/repair mechanism feasible. There is **no length field** — the device streams from the offset to end of file.
+
+**Audio arrives on B0B4 only** (B0B3 was never observed carrying data). Chunks are raw MP3 with no framing — chunk 1 of a transfer begins with an MP3 frame sync (`FF F3 ...`) — so payloads are appended verbatim.
+
+**Transfers lose whole notifications, silently.** The device emits 512-byte logical blocks that arrive as `244 + 244 + 24` under the 247-byte MTU. Two transfers of one file produced different byte streams: identical for the first 30.5%, then diverging by exactly 244- and 48-byte gaps, ending 10,584 bytes apart. Every FW920 recording therefore loses ~2-4% of its audio to interior packet loss — ffmpeg reports hundreds of frame errors on nearly every file. There are no sequence numbers and no retransmission, so the app cannot currently detect this. The `244/244/24` cadence is the available detection signal: a broken group means a dropped packet.
+
+**Do not send other commands during a transfer.** The device answers the new command instead of continuing the stream. A 15s status poller (`CMD 0x05`) used to fire mid-download; `BleManager.transferInProgress` now suspends it.
+
+**Requesting a file the device does not have** returns `Ack(0x0B)` ("ready") followed by silence — no error code. Only a timeout distinguishes it from a dead transfer, so check `collectFileList()` first.
+
+**File list `sizeBytes` field is NOT in bytes** — it reports 1,454,612 for a file that transfers as ~1,323,518. Do not use it for size comparison. A clean `Ack(0x0B)` after data means the device thinks it is done, **not** that the file is intact.
 
 **ADB test automation:**
 ```powershell

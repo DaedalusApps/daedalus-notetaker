@@ -314,6 +314,7 @@ class BleManager(private val context: Context) {
         }
     }
 
+
     // ------------------------------------------------------------------
     // Notification helper
     // ------------------------------------------------------------------
@@ -437,11 +438,24 @@ class BleManager(private val context: Context) {
         }
     }
 
+    /**
+     * Set while a file transfer owns the link. The FW920 streams audio in response to one
+     * CMD 0x0B and has no way to multiplex; sending it an unrelated command mid-transfer makes
+     * it answer that instead — observed killing a download outright (Ack(0x0B) "ready" followed
+     * by no audio at all), and a 45-minute recording takes long enough to collect ~16 of these.
+     */
+    @Volatile
+    private var transferInProgress = false
+
     private fun startPoller() {
         stopPoller()
         pollJob = scope.launch {
             while (true) {
                 kotlinx.coroutines.delay(15000L)
+                if (transferInProgress) {
+                    Log.d("BleManager", "poller: transfer in progress, skipping status")
+                    continue
+                }
                 refreshStatus()
             }
         }
@@ -654,7 +668,10 @@ class BleManager(private val context: Context) {
         val localFile = File(localDir, safeName).also { it.delete() }
 
         var totalBytes = 0L
+        var chunkCount = 0
+        val chunkSizes = mutableMapOf<Int, Int>()
         val fos = FileOutputStream(localFile)
+        transferInProgress = true
 
         // Protocol: send CMD 0x0B → device responds Ack(0x0B) "ready" → streams AudioChunks →
         // signals Ack(0x0B) again when done. We treat the second Ack(0x0B) (after data) as EOF.
@@ -677,6 +694,8 @@ class BleManager(private val context: Context) {
                 when (response) {
                     is ParsedResponse.AudioChunk -> {
                         readyReceived = true
+
+
                         fos.write(response.data)
                         totalBytes += response.data.size
                         onProgress(totalBytes)
@@ -705,10 +724,20 @@ class BleManager(private val context: Context) {
                 }
             }
         } finally {
+            transferInProgress = false
             fos.close()
         }
 
         Log.i("BleManager", "downloadFile: done '$cleanName', totalBytes=$totalBytes")
+        // A raw byte stream should be almost entirely one MTU-sized chunk repeated, with a
+        // single odd-sized tail. Several distinct sizes, or a size that never matches the MTU,
+        // would mean the device frames its payloads and we are storing the framing as audio.
+        Log.i(
+            "BleAudit",
+            "transfer done: $chunkCount chunks, $totalBytes bytes, size histogram=" +
+                chunkSizes.entries.sortedByDescending { it.value }
+                    .joinToString(", ") { "${it.key}B x${it.value}" }
+        )
         return if (totalBytes > 0) localFile else null
     }
 
@@ -717,6 +746,8 @@ class BleManager(private val context: Context) {
     suspend fun listFiles() {
         collectFileList()
     }
+
+
 
     /** Probes CMD range 0x0D–0x17 with a filename payload to find the real delete command. */
     suspend fun probeDeleteCmds(filename: String) {
