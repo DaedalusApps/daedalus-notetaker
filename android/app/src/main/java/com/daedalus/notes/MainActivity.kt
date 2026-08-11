@@ -87,6 +87,15 @@ class MainActivity : ComponentActivity() {
                         lifecycleScope.launch { recordingViewModel.analyze(filename) }
                     }
                 }
+                "com.daedalus.notes.REDOWNLOAD" -> {
+                    val filename = intent?.getStringExtra("filename") ?: ""
+                    Log.i("DaedalusADB", "Re-download + analyze triggered for '$filename'")
+                    if (filename.isNotBlank()) {
+                        lifecycleScope.launch {
+                            recordingViewModel.redownloadAndAnalyze(filename, deviceViewModel.bleManager)
+                        }
+                    }
+                }
                 "com.daedalus.notes.DELETE_FILE" -> {
                     // Invokes the same hardware delete the app's delete path uses
                     // (RecordingViewModel.deleteRecording -> BleManager.deleteFile), which
@@ -123,6 +132,7 @@ class MainActivity : ComponentActivity() {
                 addAction("com.daedalus.notes.START_RECORDING")
                 addAction("com.daedalus.notes.STOP_RECORDING")
                 addAction("com.daedalus.notes.ANALYZE")
+                addAction("com.daedalus.notes.REDOWNLOAD")
                 addAction("com.daedalus.notes.DELETE_FILE")
             }
             // ADB shell (uid 2000) broadcasts are not delivered to RECEIVER_NOT_EXPORTED

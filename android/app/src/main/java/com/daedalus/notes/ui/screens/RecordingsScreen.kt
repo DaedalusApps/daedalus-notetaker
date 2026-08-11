@@ -54,7 +54,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,6 +84,7 @@ fun RecordingsScreen(
     val syncProgress by recordingViewModel.syncProgress.collectAsState()
     val recordings by recordingViewModel.filteredRecordings.collectAsState()
     val searchQuery by recordingViewModel.searchQuery.collectAsState()
+    val parentsWithParts by recordingViewModel.parentsWithParts.collectAsState()
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
@@ -306,17 +306,17 @@ fun RecordingsScreen(
                     items(recordings, key = { it.filename }) { recording ->
                         val isSelected = selectedFilenames.contains(recording.filename)
 
-                        // Track which parents are expanded and their loaded parts.
+                        // Split recordings expand to show their parts; the part rows themselves
+                        // are only queried once the user expands one.
+                        val hasParts = recording.filename in parentsWithParts
                         var expanded by remember { mutableStateOf(false) }
                         var parts by remember { mutableStateOf<List<Recording>>(emptyList()) }
-                        val coroutineScope = rememberCoroutineScope()
 
-                        // Lazily load parts count on first compose to show the expand button.
-                        LaunchedEffect(recording.filename) {
-                            parts = recordingViewModel.getPartsOf(recording.filename)
+                        LaunchedEffect(recording.filename, expanded, hasParts) {
+                            if (expanded && hasParts) {
+                                parts = recordingViewModel.getPartsOf(recording.filename)
+                            }
                         }
-
-                        val hasParts = parts.isNotEmpty()
 
                         RecordingSwipeToDeleteCard(
                             recording = recording,
@@ -373,7 +373,7 @@ fun RecordingsScreen(
                                 )
                                 Spacer(Modifier.width(4.dp))
                                 Text(
-                                    text = "${parts.size} parts",
+                                    text = if (expanded) "Hide parts" else "Show parts",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary,
                                     fontWeight = FontWeight.SemiBold
@@ -381,8 +381,20 @@ fun RecordingsScreen(
                             }
                         }
 
-                        // Show part cards when expanded
-                        if (expanded && hasParts) {
+                        // Show part cards when expanded. Hidden in selection mode: tapping one
+                        // navigates away and discards the selection in progress.
+                        if (expanded && hasParts && !isSelectionMode) {
+                            // Tapping a split parent expands it, so keep a way into the parent's
+                            // own note — full-file playback and the joined transcript live there.
+                            Text(
+                                text = "Open full recording",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .padding(start = 24.dp, top = 4.dp)
+                                    .clickable { onNavigateToNote(recording.filename) }
+                            )
                             parts.forEach { part ->
                                 Row(modifier = Modifier.padding(start = 24.dp, top = 4.dp)) {
                                     Card(

@@ -24,12 +24,13 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -59,6 +60,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Slider
@@ -105,6 +107,7 @@ fun NoteDetailScreen(
     // Player setup
     val player = remember { ExoPlayer.Builder(context).build() }
     var isPlaying by remember { mutableStateOf(false) }
+    var actionsExpanded by remember { mutableStateOf(false) }
     var playbackPosition by remember { mutableLongStateOf(0L) }
     var playbackDuration by remember { mutableLongStateOf(0L) }
 
@@ -305,19 +308,43 @@ fun NoteDetailScreen(
                         Text(if (isPlaying) "Stop" else "Play", maxLines = 1)
                     }
 
-                    Button(
-                        onClick = { recordingViewModel.analyze(filename) },
-                        enabled = !isProcessing,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Analyze")
-                    }
-                    OutlinedButton(
-                        onClick = { recordingViewModel.exportMarkdown(filename) },
-                        enabled = transcript.isNotEmpty() && !isProcessing,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Export MD")
+                    // Play is the one action worth a permanent button; the rest live in the
+                    // overflow so the row doesn't squeeze four labels onto one line.
+                    Box {
+                        IconButton(onClick = { actionsExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More actions")
+                        }
+                        DropdownMenu(
+                            expanded = actionsExpanded,
+                            onDismissRequest = { actionsExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Analyze") },
+                                enabled = !isProcessing,
+                                onClick = {
+                                    actionsExpanded = false
+                                    recordingViewModel.analyze(filename)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export full transcript") },
+                                enabled = transcript.isNotEmpty() && !isProcessing,
+                                onClick = {
+                                    actionsExpanded = false
+                                    recordingViewModel.exportMarkdown(filename)
+                                }
+                            )
+                            // Escape hatch for a corrupt local copy: sync skips files that
+                            // already exist locally, so only a forced re-download repairs one.
+                            DropdownMenuItem(
+                                text = { Text("Re-fetch from device") },
+                                enabled = !isProcessing,
+                                onClick = {
+                                    actionsExpanded = false
+                                    recordingViewModel.redownloadAndAnalyze(filename, bleManager)
+                                }
+                            )
+                        }
                     }
                 }
             }

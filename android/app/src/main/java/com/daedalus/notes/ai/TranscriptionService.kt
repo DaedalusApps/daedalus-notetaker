@@ -27,10 +27,33 @@ class TranscriptionService(private val context: Context) {
     suspend fun transcribe(audioFile: File): String = withContext(Dispatchers.IO) {
         if (!isWhisperReady(context)) return@withContext ""
         Log.i(TAG, "Using Whisper for ${audioFile.name}")
-        transcribeWithWhisper(audioFile)
+        val pcm = decodeToPcmFloat(audioFile)
+        Log.i(TAG, "Decoded ${pcm.size} float samples, feeding to Whisper")
+        val text = transcribePcm(pcm)
+        Log.i(TAG, "Whisper complete: ${text.length} chars")
+        text
     }
 
-    private fun transcribeWithWhisper(audioFile: File): String {
+    /**
+     * Transcribe only the audio in the time window [startMs, endMs), then chunk it into
+     * 30-second Whisper segments as usual. Only the window is kept in memory — decoding a
+     * whole hour-long file to PCM and slicing afterwards exhausts the heap.
+     */
+    suspend fun transcribeRange(audioFile: File, startMs: Long, endMs: Long): String =
+        withContext(Dispatchers.IO) {
+            if (!isWhisperReady(context)) return@withContext ""
+            Log.i(TAG, "Transcribing ${audioFile.name} range ${startMs}ms–${endMs}ms")
+
+            val pcm = decodeToPcmFloat(audioFile, startMs, endMs)
+            Log.i(TAG, "Sliced to ${pcm.size} samples")
+
+            val text = transcribePcm(pcm)
+            Log.i(TAG, "Range transcription complete: ${text.length} chars")
+            text
+        }
+
+    /** Feeds PCM to Whisper in 30-second windows and joins the recognized text. */
+    private fun transcribePcm(pcm: FloatArray): String {
         val dir = whisperModelDir(context)
         val config = OfflineRecognizerConfig(
             modelConfig = OfflineModelConfig(
@@ -46,9 +69,6 @@ class TranscriptionService(private val context: Context) {
         )
         val recognizer = OfflineRecognizer(config = config)
         return try {
-            val pcm = decodeToPcmFloat(audioFile)
-            Log.i(TAG, "Decoded ${pcm.size} float samples, feeding to Whisper")
-
             val parts = mutableListOf<String>()
             var offset = 0
             while (offset < pcm.size) {
@@ -62,78 +82,23 @@ class TranscriptionService(private val context: Context) {
                 if (chunkText.isNotEmpty()) parts.add(chunkText)
                 offset = end
             }
-
-            val text = parts.joinToString(" ")
-            Log.i(TAG, "Whisper complete: ${text.length} chars across ${parts.size} chunk(s)")
-            text
+            Log.i(TAG, "Decoded ${parts.size} chunk(s)")
+            parts.joinToString(" ")
         } finally {
             recognizer.release()
         }
     }
 
     /**
-     * Transcribe only the audio in the time window [startMs, endMs).
-     * Decodes the full file to PCM, slices to the requested range, then chunks
-     * the slice into 30-second Whisper segments as usual.
+     * Decodes the audio in [startMs, endMs) to 16 kHz mono float PCM. Only that window is
+     * retained, and decoding stops once it has been read, so peak memory is proportional to
+     * the window rather than to the whole file.
      */
-    suspend fun transcribeRange(audioFile: File, startMs: Long, endMs: Long): String =
-        withContext(Dispatchers.IO) {
-            if (!isWhisperReady(context)) return@withContext ""
-            Log.i(TAG, "Transcribing ${audioFile.name} range ${startMs}ms–${endMs}ms")
-
-            val dir = whisperModelDir(context)
-            val config = OfflineRecognizerConfig(
-                modelConfig = OfflineModelConfig(
-                    whisper = OfflineWhisperModelConfig(
-                        encoder = File(dir, WHISPER_ENCODER_FILE).absolutePath,
-                        decoder = File(dir, WHISPER_DECODER_FILE).absolutePath,
-                        language = "en",
-                        task = "transcribe",
-                    ),
-                    tokens = File(dir, WHISPER_TOKENS_FILE).absolutePath,
-                    numThreads = 4,
-                )
-            )
-            val recognizer = OfflineRecognizer(config = config)
-            try {
-                val fullPcm = decodeToPcmFloat(audioFile)
-                val startSample = ((startMs * TARGET_SAMPLE_RATE) / 1000).toInt()
-                    .coerceIn(0, fullPcm.size)
-                val endSample = ((endMs * TARGET_SAMPLE_RATE) / 1000).toInt()
-                    .coerceIn(startSample, fullPcm.size)
-                val pcm = fullPcm.copyOfRange(startSample, endSample)
-                Log.i(TAG, "Sliced to $startSample–$endSample (${pcm.size} samples)")
-
-                val parts = mutableListOf<String>()
-                var offset = 0
-                while (offset < pcm.size) {
-                    val end = minOf(offset + CHUNK_SAMPLES, pcm.size)
-                    val chunk = pcm.copyOfRange(offset, end)
-                    val stream = recognizer.createStream()
-                    stream.acceptWaveform(samples = chunk, sampleRate = TARGET_SAMPLE_RATE)
-                    recognizer.decode(stream)
-                    val chunkText = recognizer.getResult(stream).text.trim()
-                    stream.release()
-                    if (chunkText.isNotEmpty()) parts.add(chunkText)
-                    offset = end
-                }
-
-                val text = parts.joinToString(" ")
-                Log.i(TAG, "Range transcription complete: ${text.length} chars across ${parts.size} chunk(s)")
-                text
-            } finally {
-                recognizer.release()
-            }
-        }
-
-    private fun decodeToPcmFloat(file: File): FloatArray {
-        val (buffer, size) = decodeToPcm(file)
-        return FloatArray(size) { buffer[it] / 32768f }
-    }
-
-    // Returns the over-allocated backing buffer and the number of valid samples written.
-    // Callers must use the returned size, not buffer.size.
-    private fun decodeToPcm(file: File): Pair<ShortArray, Int> {
+    private fun decodeToPcmFloat(
+        file: File,
+        startMs: Long = 0,
+        endMs: Long = Long.MAX_VALUE
+    ): FloatArray {
         val extractor = MediaExtractor()
         extractor.setDataSource(file.absolutePath)
 
@@ -158,21 +123,35 @@ class TranscriptionService(private val context: Context) {
         codec.configure(format, null, null, 0)
         codec.start()
 
-        // Use a primitive ShortArray buffer to avoid boxing (mutableListOf<Short> would allocate
-        // ~24 bytes per sample as boxed objects — ~115 MB for a 5-min recording vs ~9.6 MB here).
-        var pcmBuffer = ShortArray(TARGET_SAMPLE_RATE * 60) // initial capacity: 1 minute
-        var pcmSize = 0
-        val info = MediaCodec.BufferInfo()
-        var sawEos = false
+        // Absolute sample indices of the requested window, in 16 kHz mono samples.
+        val startSample = (startMs.coerceAtLeast(0) * TARGET_SAMPLE_RATE / 1000)
+        val endSample = if (endMs == Long.MAX_VALUE) Long.MAX_VALUE
+            else (endMs.coerceAtLeast(0) * TARGET_SAMPLE_RATE / 1000)
 
-        while (!sawEos) {
-            val inputIdx = codec.dequeueInputBuffer(10_000)
+        // Write floats straight into a primitive buffer — a ShortArray staging copy plus the
+        // float conversion would double peak memory (both live at once for the whole file).
+        // Size it to the requested window up front: growing by doubling from one minute to a
+        // 15-minute part copies the whole buffer four times on the way.
+        val expectedSamples = if (endSample == Long.MAX_VALUE) TARGET_SAMPLE_RATE.toLong() * 60
+            else (endSample - startSample).coerceIn(1L, Int.MAX_VALUE.toLong())
+        var pcmBuffer = FloatArray(expectedSamples.toInt())
+        var pcmSize = 0
+        var decodedSamples = 0L  // absolute position in the source, including skipped samples
+        val info = MediaCodec.BufferInfo()
+        var inputDone = false
+        var outputDone = false
+
+        // Loop until the codec reports END_OF_STREAM on its *output*, not merely when the last
+        // input was queued: MediaCodec runs several buffers deep, so stopping at input EOS
+        // discarded the final seconds of every decode.
+        while (!outputDone && decodedSamples < endSample) {
+            val inputIdx = if (inputDone) -1 else codec.dequeueInputBuffer(10_000)
             if (inputIdx >= 0) {
                 val inputBuf = codec.getInputBuffer(inputIdx)!!
                 val sampleSize = extractor.readSampleData(inputBuf, 0)
                 if (sampleSize < 0) {
                     codec.queueInputBuffer(inputIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                    sawEos = true
+                    inputDone = true
                 } else {
                     codec.queueInputBuffer(inputIdx, 0, sampleSize, extractor.sampleTime, 0)
                     extractor.advance()
@@ -198,14 +177,31 @@ class TranscriptionService(private val context: Context) {
                     resample(mono, srcSampleRate, TARGET_SAMPLE_RATE)
                 } else mono
 
-                val needed = pcmSize + resampled.size
-                if (needed > pcmBuffer.size) {
-                    pcmBuffer = pcmBuffer.copyOf(maxOf(needed, pcmBuffer.size * 2))
+                // Keep only the part of this buffer that falls inside the requested window.
+                val bufStart = decodedSamples
+                val bufEnd = bufStart + resampled.size
+                decodedSamples = bufEnd
+
+                val from = maxOf(startSample, bufStart)
+                val to = minOf(endSample, bufEnd)
+                if (to > from) {
+                    val srcOffset = (from - bufStart).toInt()
+                    val count = (to - from).toInt()
+                    val needed = pcmSize + count
+                    if (needed > pcmBuffer.size) {
+                        pcmBuffer = pcmBuffer.copyOf(maxOf(needed, pcmBuffer.size * 2))
+                    }
+                    for (i in 0 until count) {
+                        pcmBuffer[pcmSize + i] = resampled[srcOffset + i] / 32768f
+                    }
+                    pcmSize += count
                 }
-                resampled.copyInto(pcmBuffer, pcmSize)
-                pcmSize += resampled.size
 
                 codec.releaseOutputBuffer(outputIdx, false)
+                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                    outputDone = true
+                    break
+                }
                 outputIdx = codec.dequeueOutputBuffer(info, 0)
             }
         }
@@ -213,7 +209,7 @@ class TranscriptionService(private val context: Context) {
         codec.stop()
         codec.release()
         extractor.release()
-        return Pair(pcmBuffer, pcmSize)
+        return if (pcmSize == pcmBuffer.size) pcmBuffer else pcmBuffer.copyOf(pcmSize)
     }
 
     private fun resample(input: ShortArray, fromRate: Int, toRate: Int): ShortArray {

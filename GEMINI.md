@@ -74,10 +74,11 @@ adb shell am broadcast -a com.daedalus.notes.SYNC -n com.daedalus.notes/.AdbRece
 # Start/stop recording:
 adb shell am broadcast -a com.daedalus.notes.START_RECORDING -n com.daedalus.notes/.AdbReceiver
 adb shell am broadcast -a com.daedalus.notes.STOP_RECORDING -n com.daedalus.notes/.AdbReceiver
-# Trigger analysis for a specific file:
-adb shell am broadcast -a com.daedalus.notes.ANALYZE --es filename "20260524213434.mp3" -n com.daedalus.notes/.AdbReceiver
+# Trigger analysis for a specific file (filename must match the DB key exactly —
+# BLE-synced recordings have no extension, imported files keep theirs):
+adb shell am broadcast -a com.daedalus.notes.ANALYZE --es filename "20260524213434" -n com.daedalus.notes/.AdbReceiver
 ```
-`AdbReceiver` (exported manifest receiver) re-broadcasts to same package UID, bypassing `RECEIVER_NOT_EXPORTED` on MainActivity's dynamic receiver.
+`AdbReceiver` (exported manifest receiver) re-broadcasts to same package UID, bypassing `RECEIVER_NOT_EXPORTED` on MainActivity's dynamic receiver. It only forwards — the app must be in the foreground so `MainActivity`'s receiver is registered, and every action then runs the same code path the UI uses.
 
 ### 3. File System & Storage
 - **BLE-First:** Audio files are downloaded via BLE (cmd=0x0B) into `getExternalFilesDir(null)/Recordings/`. USB OTG path is legacy/fallback only.

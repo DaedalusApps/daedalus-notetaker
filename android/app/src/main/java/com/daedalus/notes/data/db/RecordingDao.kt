@@ -28,10 +28,22 @@ interface RecordingDao {
     @Query("SELECT * FROM recordings WHERE parentFilename = :parent ORDER BY partIndex ASC")
     suspend fun getPartsOf(parent: String): List<Recording>
 
+    /** Filenames of every recording that has parts — lets the list show the expand affordance
+     *  without a per-row query. */
+    @Query("SELECT DISTINCT parentFilename FROM recordings WHERE parentFilename IS NOT NULL")
+    fun parentsWithPartsFlow(): Flow<List<String>>
+
+    @Query("DELETE FROM recordings WHERE parentFilename = :parent")
+    suspend fun deletePartsOf(parent: String)
+
     @Query("SELECT * FROM recordings WHERE pendingDelete = 1")
     suspend fun getPendingDeletes(): List<Recording>
 
-    @Query("SELECT * FROM recordings WHERE createdAt >= :cutoff AND pendingDelete = 0 ORDER BY createdAt DESC")
+    // Parts are excluded like everywhere else: a split parent already carries the joined
+    // transcript and the stitched part summaries, so including both would feed TODO
+    // extraction every long recording's content twice.
+    @Query("""SELECT * FROM recordings WHERE createdAt >= :cutoff AND pendingDelete = 0
+    AND parentFilename IS NULL ORDER BY createdAt DESC""")
     suspend fun getSince(cutoff: Long): List<Recording>
 
     @Query("UPDATE recordings SET pendingDelete = :pendingDelete WHERE filename = :filename")

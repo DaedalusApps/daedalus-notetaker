@@ -38,6 +38,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -47,6 +48,8 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -62,7 +65,10 @@ const val MAX_RECORDING_MINUTES_DEFAULT = 120
 const val MAX_RECORDING_MINUTES_UNLIMITED = -1
 
 /** Recordings longer than this are split into parts, each transcribed and analyzed independently. */
-private const val PART_DURATION_MS = 15L * 60 * 1000  // 15 minutes
+internal const val PART_DURATION_MS = 15L * 60 * 1000  // 15 minutes
+
+/** Titles the split path generates itself; matching ones are regenerated, not preserved. */
+private val SPLIT_PLACEHOLDER_TITLE = Regex("""Long Recording( \(\d+ parts?\))?""")
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class RecordingViewModel @JvmOverloads constructor(
@@ -82,9 +88,19 @@ class RecordingViewModel @JvmOverloads constructor(
 
     private var syncJob: Job? = null
 
+    /**
+     * Auto-analysis runs outside [syncJob] so cancelling a sync doesn't discard a multi-part
+     * analysis already minutes deep — but it is tracked here so the user can still stop it,
+     * and so a second sync doesn't start a duplicate pass over recordings the first is
+     * already working through.
+     */
+    private var autoAnalyzeJob: Job? = null
+
     fun cancelSync() {
         syncJob?.cancel()
         syncJob = null
+        autoAnalyzeJob?.cancel()
+        autoAnalyzeJob = null
         _syncProgress.value = null
     }
 
@@ -140,12 +156,31 @@ class RecordingViewModel @JvmOverloads constructor(
 
     val useBluetoothMic = MutableStateFlow(false)
 
+    /**
+     * Serializes the two CPU/radio-heavy jobs — BLE transfers and transcription/analysis — so
+     * only one runs at a time.
+     *
+     * Two analyses at once exhausted the heap (each holds a full PCM window plus its own Whisper
+     * recognizer). And the FW920 download protocol has no retransmission, sequence numbers or
+     * integrity check, so GATT notifications dropped while Whisper and Gemma saturate the CPU
+     * become silently corrupt audio that nothing downstream can detect.
+     *
+     * Acquire around one unit of work only — never hold this across a call that re-acquires it.
+     */
+    private val heavyWork = Mutex()
+
     val allRecordings: StateFlow<List<Recording>> = repo.allRecordings
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val globalGraph: StateFlow<GlobalGraph> = allRecordings
         .map { GraphBuilder.build(it) }
         .stateIn(viewModelScope, SharingStarted.Lazily, GlobalGraph(emptyList(), emptyList()))
+
+    /** Filenames of recordings that were split, so the list can show the expand affordance
+     *  without querying per row. */
+    val parentsWithParts: StateFlow<Set<String>> = repo.parentsWithParts
+        .map { it.toSet() }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery
@@ -341,6 +376,10 @@ class RecordingViewModel @JvmOverloads constructor(
             var synced = 0
             val newFilenames = mutableListOf<String>()
 
+            // One transfer at a time, and never while an analysis is running — dropped GATT
+            // notifications during CPU saturation land as silently corrupt audio. Released
+            // before autoAnalyzePending() below, which re-acquires per recording.
+            heavyWork.withLock {
             files.forEach { entry ->
                 if (!entry.filename.matches(Regex("[A-Za-z0-9._-]+"))) {
                     Log.w("DaedalusSync", "Skipping suspicious filename: ${entry.filename}")
@@ -370,11 +409,18 @@ class RecordingViewModel @JvmOverloads constructor(
                     synced++
                 }
             }
+            }
 
             _syncProgress.value = if (synced > 0) "Synced $synced file(s)" else "All files already synced"
             delay(1000)
-            autoAnalyzePending()
             _syncProgress.value = null
+            // Deliberately not part of syncJob: analysis of a long recording runs for many
+            // minutes, and cancelling the sync that happened to kick it off must not throw
+            // that work away. heavyWork still keeps it from overlapping a transfer, and
+            // cancelSync() can still stop it via autoAnalyzeJob.
+            if (autoAnalyzeJob?.isActive != true) {
+                autoAnalyzeJob = viewModelScope.launch { autoAnalyzePending() }
+            }
             } catch (e: CancellationException) {
                 _syncProgress.value = null
                 throw e
@@ -562,6 +608,16 @@ class RecordingViewModel @JvmOverloads constructor(
         }
     }
 
+    /** Puts the pre-download copy back after a transfer that deleted it and then failed. */
+    private suspend fun restoreBackup(backup: File?, localPath: String) {
+        val bak = backup ?: return
+        withContext(Dispatchers.IO) {
+            runCatching { bak.copyTo(File(localPath), overwrite = true) }
+                .onFailure { Log.e("DaedalusSync", "Could not restore $localPath", it) }
+            bak.delete()
+        }
+    }
+
     /** Returns all child parts for a recording that was split, empty if it wasn't split. */
     suspend fun getPartsOf(filename: String): List<Recording> = repo.getPartsOf(filename)
 
@@ -569,11 +625,108 @@ class RecordingViewModel @JvmOverloads constructor(
         viewModelScope.launch { doAnalyze(filename) }
     }
 
-    private suspend fun doAnalyze(filename: String) {
+    /**
+     * Pulls a fresh copy of the audio from the FW920 and re-runs analysis from scratch.
+     * Ordinary sync skips any file that already exists locally, so a truncated or corrupt
+     * download can never be repaired by syncing again — this is the way out of that.
+     */
+    fun redownloadAndAnalyze(requestedFilename: String, bleManager: BleManager) {
+        viewModelScope.launch {
+            // A part has no file of its own on the FW920 — re-fetch the parent it came from,
+            // which is what the user means from a part's screen anyway.
+            val requested = repo.get(requestedFilename)
+            val filename = requested?.parentFilename ?: requestedFilename
+            val recording = repo.get(filename) ?: run {
+                Log.w("DaedalusSync", "Re-download: no DB row for '$filename'")
+                _aiError.value = "Recording not found."
+                return@launch
+            }
+            if (recording.isLocal) {
+                Log.w("DaedalusSync", "Re-download: '$filename' is a phone recording")
+                _aiError.value = "This was recorded on the phone — there is no device copy to fetch."
+                return@launch
+            }
+            if (!isBleConnected(bleManager)) {
+                Log.w("DaedalusSync", "Re-download: BLE not connected " +
+                    "(state=${bleManager.bleState.value.connectionState})")
+                _aiError.value = "Device not connected. Connect the FW920 to re-download."
+                return@launch
+            }
+
+            // downloadFile() deletes the existing local copy before it starts streaming, so a
+            // failed transfer would otherwise destroy the only copy — and for a split recording
+            // leave the parent and every part pointing at a file that is gone. Keep a copy to
+            // put back if the transfer doesn't complete.
+            val current = File(recording.localPath).takeIf { it.exists() }
+            val backup = current?.let { src ->
+                withContext(Dispatchers.IO) {
+                    runCatching { src.copyTo(File(src.parentFile, src.name + ".bak"), overwrite = true) }
+                        .getOrNull()
+                }
+            }
+
+            _isProcessing.value = true
+            _aiError.value = null
+            // downloadFile() throws on a full disk or a revoked permission, and by then it has
+            // already deleted the original — an escaping exception would crash the app and
+            // strand the only copy in an orphaned .bak, so treat a throw like a failed transfer.
+            val downloaded = try {
+                _syncProgress.value = "Waiting for current processing to finish…"
+                // Held only across the transfer; doAnalyze below re-acquires it.
+                heavyWork.withLock {
+                    _syncProgress.value = "Re-downloading $filename…"
+                    Log.i("DaedalusSync", "Re-downloading $filename on request")
+                    bleManager.downloadFile(filename) { bytes ->
+                        _syncProgress.value = "Re-downloading $filename (${bytes / 1024} KB)…"
+                    }
+                }
+            } catch (e: CancellationException) {
+                withContext(NonCancellable) { restoreBackup(backup, recording.localPath) }
+                throw e
+            } catch (e: Exception) {
+                Log.e("DaedalusSync", "Re-download of $filename threw; restoring previous copy", e)
+                restoreBackup(backup, recording.localPath)
+                _aiError.value = e.message ?: "Re-download failed."
+                return@launch
+            } finally {
+                _isProcessing.value = false
+                _syncProgress.value = null
+            }
+
+            if (downloaded == null) {
+                restoreBackup(backup, recording.localPath)
+                Log.w("DaedalusSync", "Re-download of $filename failed; restored previous copy")
+                _aiError.value = "Re-download failed. Keep the FW920 connected and try again."
+                return@launch
+            }
+            withContext(Dispatchers.IO) { backup?.delete() }
+
+            // Fresh audio: drop the parts and analysis derived from the old copy.
+            repo.deletePartsOf(filename)
+            repo.save(recording.copy(
+                localPath = downloaded.absolutePath,
+                sizeBytes = downloaded.length(),
+                durationMillis = withContext(Dispatchers.IO) {
+                    AudioUtils.getDurationMillis(downloaded.absolutePath)
+                },
+                transcript = "", summary = "", mindMap = "",
+                title = "", shortSummary = "", topics = emptyList(), embedding = null
+            ))
+
+            doAnalyze(filename)
+        }
+    }
+
+    /** Waits for any in-flight transfer or analysis; see [heavyWork]. */
+    private suspend fun doAnalyze(filename: String) = heavyWork.withLock {
+        doAnalyzeExclusive(filename)
+    }
+
+    private suspend fun doAnalyzeExclusive(filename: String) {
             _isProcessing.value = true
             _aiError.value = null
             try {
-                val note = repo.get(filename) ?: run {
+                var note = repo.get(filename) ?: run {
                     _aiError.value = "Recording not synced. Download it first."
                     return
                 }
@@ -585,8 +738,14 @@ class RecordingViewModel @JvmOverloads constructor(
 
                 // Determine duration, healing the DB value if needed.
                 val durationMs = note.durationMillis.takeIf { it > 0 }
-                    ?: AudioUtils.getDurationMillis(localFile.absolutePath).also { d ->
-                        if (d > 0) repo.save(note.copy(durationMillis = d))
+                    ?: withContext(Dispatchers.IO) {
+                        AudioUtils.getDurationMillis(localFile.absolutePath)
+                    }.also { d ->
+                        // Rebind `note` so the later copy(...) saves below don't write the stale 0 back.
+                        if (d > 0) {
+                            note = note.copy(durationMillis = d)
+                            repo.save(note)
+                        }
                     }
 
                 // --- Long-recording split: > 15 min → create parts ---
@@ -595,19 +754,42 @@ class RecordingViewModel @JvmOverloads constructor(
                     Log.i("DaedalusAI", "Splitting ${filename} into $numParts parts (${durationMs}ms)")
 
                     // Remove stale parts from a previous analysis run, if any.
-                    for (old in repo.getPartsOf(filename)) {
-                        repo.delete(old)
-                    }
+                    repo.deletePartsOf(filename)
 
+                    var created = 0
+                    val fullTranscript = StringBuilder()
                     for (i in 1..numParts) {
                         val startMs = (i - 1) * PART_DURATION_MS
                         val endMs = minOf(i * PART_DURATION_MS, durationMs)
-                        val partFilename = "${filename.removeSuffix(".mp3")}_p${i}.mp3"
+                        // Keep the parent's extension (BLE keys have none, imports keep .mp3,
+                        // phone recordings are .m4a) so a part key never claims a wrong container.
+                        val ext = filename.substringAfterLast('.', "")
+                        val partFilename = filename.substringBeforeLast('.', filename) +
+                            "_p$i" + if (ext.isEmpty()) "" else ".$ext"
                         val partDuration = endMs - startMs
 
                         _syncProgress.value = "Transcribing part $i of $numParts…"
                         Log.i("DaedalusAI", "Transcribing part $i: ${startMs}ms–${endMs}ms")
-                        val transcript = transcriber.transcribeRange(localFile, startMs, endMs)
+                        val transcript = try {
+                            transcriber.transcribeRange(localFile, startMs, endMs)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            // Stop here rather than abandoning the run: the parent is still
+                            // written below from the parts that did succeed, so a later sync
+                            // won't see a blank summary and re-split the whole recording.
+                            Log.e("DaedalusAI", "Part $i failed; keeping the $created part(s) done so far", e)
+                            _aiError.value = e.message ?: "Analysis failed part-way through"
+                            break
+                        }
+
+                        // The container's duration metadata can overrun the decodable audio
+                        // (observed on FW920 files), leaving trailing ranges with no samples.
+                        // A part with nothing readable in it is a blank card, so don't make one.
+                        if (!isTranscriptReadable(transcript)) {
+                            Log.w("DaedalusAI", "Part $i produced no readable transcript — skipping")
+                            continue
+                        }
 
                         val partRecording = Recording(
                             filename = partFilename,
@@ -622,31 +804,94 @@ class RecordingViewModel @JvmOverloads constructor(
                             partIndex = i
                         )
                         repo.save(partRecording)
+                        created++
+                        if (fullTranscript.isNotEmpty()) fullTranscript.append("\n\n")
+                        fullTranscript.append(transcript)
 
-                        if (!isTranscriptReadable(transcript)) {
-                            Log.w("DaedalusAI", "Part $i transcript not readable, skipping analysis")
-                            continue
+                        try {
+                            analyzeTranscript(
+                                getApplication(), llm, embedder, repo,
+                                partFilename, transcript
+                            ) { _syncProgress.value = it }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.e("DaedalusAI", "Gemma analysis of part $i failed; transcript kept", e)
                         }
-
-                        analyzeTranscript(
-                            getApplication(), llm, embedder, repo,
-                            partFilename, transcript
-                        ) { _syncProgress.value = it }
                     }
 
-                    // Mark the parent as split so it shows the part count in the UI.
-                    repo.save(note.copy(
-                        title = note.title.ifBlank { "Long Recording ($numParts parts)" },
-                        shortSummary = "Split into $numParts parts of ~15 min each. Tap to expand."
-                    ))
+                    // Mark the parent as split so it shows the part count in the UI. Use the
+                    // parts actually created — trailing ranges can be skipped above.
+                    if (created > 0) {
+                        // Keep the joined transcript and a summary stitched from the parts on the
+                        // parent: NoteDetail, export, backup, search, the knowledge graph and
+                        // Ask all read the parent row and would otherwise see it as empty. A
+                        // blank summary would also make autoAnalyzePending() re-split forever.
+                        val savedParts = repo.getPartsOf(filename)
+                        val summary = savedParts.joinToString("\n\n") { p ->
+                            "## Part ${p.partIndex}: ${p.title.ifBlank { "Untitled" }}\n${p.summary}"
+                        }
+                        // Topics come from the parts too. Without them the knowledge graph
+                        // (which iterates Recording.topics) drops split recordings entirely,
+                        // and Ask backfills the parent's embedding from shortSummary + topics —
+                        // i.e. from "Split into N parts…", so every long recording would embed
+                        // to the same boilerplate vector and match every query equally.
+                        val mergedTopics = savedParts.flatMap { it.topics }.distinct()
+                        // The count lives only in the summary, which is rewritten every run.
+                        // Putting it in the kept-if-present title made the two drift apart
+                        // ("Long Recording (2 parts)" over "Split into 1 parts").
+                        repo.save(note.copy(
+                            transcript = fullTranscript.toString(),
+                            summary = summary,
+                            topics = mergedTopics,
+                            // A previously stored placeholder (including the old
+                            // "Long Recording (2 parts)" form) is replaced, not preserved;
+                            // only a real Gemma-derived title survives a re-analysis.
+                            title = note.title
+                                .takeIf { it.isNotBlank() && !SPLIT_PLACEHOLDER_TITLE.matches(it) }
+                                ?: "Long Recording",
+                            shortSummary = if (created == 1) {
+                                "Split into 1 part. Tap to expand."
+                            } else {
+                                "Split into $created parts of ~15 min each. Tap to expand."
+                            }
+                        ))
+
+                        // Embed the parts' own summaries, not the "Split into N parts" boilerplate.
+                        if (embedder.isReady) {
+                            embedder.ensureLoaded()
+                            val embText = savedParts.joinToString(" ") {
+                                "${it.shortSummary} ${it.topics.joinToString(" ")}"
+                            }
+                            embedder.embed(embText)?.let { repo.updateEmbedding(filename, it) }
+                        }
+                    } else {
+                        _aiError.value = if (isWhisperReady(getApplication())) {
+                            "No speech or readable content detected in this recording."
+                        } else {
+                            "Transcription model not found. Please download it in Settings."
+                        }
+                    }
                     _currentNote.value = repo.get(filename)
                     return
                 }
 
                 // --- Normal (short) recording: transcribe + analyze as one ---
+                // A parent that is no longer over the threshold (repaired container, healed
+                // duration) must shed the parts an earlier split left behind, or the list keeps
+                // offering "Show parts" over transcripts from the old audio.
+                if (note.parentFilename == null) repo.deletePartsOf(filename)
+
                 _syncProgress.value = "Transcribing audio…"
                 Log.i("DaedalusAI", "Transcribing ${localFile.name}")
-                val transcript = transcriber.transcribe(localFile)
+                // Re-analyzing a single part must stay within that part's window — it shares the
+                // parent's audio file, so a plain transcribe() would pull in the whole recording.
+                val transcript = if (note.parentFilename != null && note.partIndex > 0) {
+                    val startMs = (note.partIndex - 1) * PART_DURATION_MS
+                    transcriber.transcribeRange(localFile, startMs, startMs + durationMs)
+                } else {
+                    transcriber.transcribe(localFile)
+                }
                 repo.save(note.copy(transcript = transcript))
 
                 if (!isTranscriptReadable(transcript)) {
@@ -666,6 +911,11 @@ class RecordingViewModel @JvmOverloads constructor(
                 }
 
                 _currentNote.value = repo.get(filename)
+            } catch (e: CancellationException) {
+                // Structured concurrency: cancellation is not a failure and must propagate,
+                // or the coroutine machinery is left believing this job is still alive.
+                Log.i("DaedalusAI", "Analysis of $filename cancelled")
+                throw e
             } catch (e: Exception) {
                 Log.e("DaedalusAI", "Analysis failed", e)
                 _aiError.value = e.message ?: "Unknown AI error"
@@ -688,15 +938,18 @@ class RecordingViewModel @JvmOverloads constructor(
         viewModelScope.launch {
             val recording = repo.get(filename) ?: return@launch
 
-            // Cascade-delete child parts if this is a split parent.
-            for (part in repo.getPartsOf(filename)) {
-                repo.delete(part)
+            // A part is a DB-only row sharing the parent's audio file — never touch the file
+            // or the FW920, or we'd wipe the audio the parent and sibling parts still need.
+            if (recording.parentFilename != null) {
+                repo.delete(recording)
+                return@launch
             }
 
             // Local-only recordings aren't on the FW920 — delete without requiring a device.
             if (recording.isLocal) {
                 deleteFileSafely(recording.localPath)
                 repo.delete(recording)
+                repo.deletePartsOf(filename)
                 _syncProgress.value = "Deleted successfully"
                 delay(1500)
                 _syncProgress.value = null
@@ -707,6 +960,7 @@ class RecordingViewModel @JvmOverloads constructor(
                 // Device not connected — delete local cache and queue delete for later
                 deleteFileSafely(recording.localPath)
                 repo.markPendingDelete(filename)
+                repo.deletePartsOf(filename)
                 _syncProgress.value = "Queued deletion"
                 delay(1500)
                 _syncProgress.value = null
@@ -721,8 +975,9 @@ class RecordingViewModel @JvmOverloads constructor(
             if (bleSuccess) {
                 // 2. Remove local file
                 deleteFileSafely(recording.localPath)
-                // 3. Remove from database
+                // 3. Remove from database, child parts included
                 repo.delete(recording)
+                repo.deletePartsOf(filename)
                 _syncProgress.value = "Deleted successfully"
             } else {
                 _aiError.value = "Hardware delete failed. File still on FW920."
@@ -748,9 +1003,19 @@ class RecordingViewModel @JvmOverloads constructor(
                 count++
                 _syncProgress.value = "Deleting $count of $total..."
 
+                // Same reasoning as deleteRecording: parts are DB-only rows.
+                if (recording.parentFilename != null) {
+                    repo.delete(recording)
+                    continue
+                }
+
+                // Child parts are cascade-deleted below, but only once the parent's own
+                // deletion has actually gone through — a failed BLE wipe keeps the parent,
+                // and its parts must survive with it.
                 if (recording.isLocal) {
                     deleteFileSafely(recording.localPath)
                     repo.delete(recording)
+                    repo.deletePartsOf(recording.filename)
                     continue
                 }
 
@@ -758,6 +1023,7 @@ class RecordingViewModel @JvmOverloads constructor(
                     // Queue hardware deletion, remove local cache
                     deleteFileSafely(recording.localPath)
                     repo.markPendingDelete(recording.filename)
+                    repo.deletePartsOf(recording.filename)
                     queuedCount++
                     continue
                 }
@@ -769,6 +1035,7 @@ class RecordingViewModel @JvmOverloads constructor(
                     // 2. Local cleanup
                     deleteFileSafely(recording.localPath)
                     repo.delete(recording)
+                    repo.deletePartsOf(recording.filename)
                 } else {
                     Log.w("RecordingViewModel", "Failed to wipe ${recording.filename} from hardware")
                     failedCount++
@@ -791,12 +1058,15 @@ class RecordingViewModel @JvmOverloads constructor(
 
     fun exportMarkdown(filename: String) {
         viewModelScope.launch {
-            val recording = repo.get(filename) ?: return@launch
-            val content = MarkdownExporter.export(recording)
+            // Export the whole recording, whether the user is looking at the parent or at one
+            // part — a part on its own is half a meeting.
+            val requested = repo.get(filename) ?: return@launch
+            val recording = requested.parentFilename?.let { repo.get(it) } ?: requested
+            val content = MarkdownExporter.export(recording, repo.getPartsOf(recording.filename))
             val context = getApplication<Application>()
 
             val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val outFile = File(downloadsDir, "${File(filename).nameWithoutExtension}.md")
+            val outFile = File(downloadsDir, "${File(recording.filename).nameWithoutExtension}.md")
             withContext(Dispatchers.IO) { outFile.writeText(content) }
 
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", outFile)
@@ -963,6 +1233,9 @@ class RecordingViewModel @JvmOverloads constructor(
                             deleteFileSafely(r.localPath)
                         }
                     }
+                    // Split parts only exist as a product of analysis — wiping analysis
+                    // removes them outright rather than leaving rows with no content.
+                    repo.allRecordings.first().forEach { repo.deletePartsOf(it.filename) }
                     repo.wipeAllAnalysis()
                     if (deleteLocalAudio) {
                         val recordings = repo.allRecordings.first()

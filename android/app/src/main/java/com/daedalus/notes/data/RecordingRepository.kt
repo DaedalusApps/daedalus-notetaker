@@ -24,6 +24,10 @@ class RecordingRepository(private val dao: RecordingDao) {
 
     suspend fun getPartsOf(filename: String): List<Recording> = dao.getPartsOf(filename)
 
+    val parentsWithParts: Flow<List<String>> = dao.parentsWithPartsFlow()
+
+    suspend fun deletePartsOf(filename: String) = dao.deletePartsOf(filename)
+
     suspend fun getPendingDeletes(): List<Recording> = dao.getPendingDeletes()
 
     suspend fun markPendingDelete(filename: String) = dao.updatePendingDelete(filename, true)
