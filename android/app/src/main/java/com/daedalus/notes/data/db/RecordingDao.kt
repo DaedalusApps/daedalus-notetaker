@@ -14,6 +14,9 @@ interface RecordingDao {
     @Query("SELECT * FROM recordings WHERE pendingDelete = 0 AND parentFilename IS NULL ORDER BY createdAt DESC")
     fun getAllFlow(): Flow<List<Recording>>
 
+    @Query("SELECT * FROM recordings WHERE (summary IS NULL OR summary = '') AND pendingDelete = 0 AND parentFilename IS NULL AND analysisFailed = 0 ORDER BY createdAt DESC")
+    suspend fun getPendingRecordings(): List<Recording>
+
     @Query("SELECT * FROM recordings WHERE filename = :filename")
     suspend fun get(filename: String): Recording?
 

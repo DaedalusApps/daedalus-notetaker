@@ -95,7 +95,15 @@ class BleManager(private val context: Context) {
     private val responseChannel = Channel<ParsedResponse>(capacity = Channel.UNLIMITED)
 
     /** Signals completion of each writeDescriptor call (one per notification enable). */
-    private val descriptorChannel = Channel<Unit>(capacity = Channel.UNLIMITED)
+    private val descriptorChannel = Channel<String>(capacity = Channel.UNLIMITED)
+
+    private fun drainResponseChannel() {
+        while (responseChannel.tryReceive().isSuccess) { /* discard */ }
+    }
+
+    private fun drainDescriptorChannel() {
+        while (descriptorChannel.tryReceive().isSuccess) { /* discard */ }
+    }
 
     // Descriptor UUID required to enable notifications on Android
     private val CCC_DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -227,22 +235,40 @@ class BleManager(private val context: Context) {
 
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (gatt != bluetoothGatt) {
-                // Stale callback from a connection superseded by a newer connect()/disconnect()
-                // (e.g. a device swap) — release its resources but don't touch current state.
-                if (newState == BluetoothProfile.STATE_DISCONNECTED) gatt.close()
+                Log.w("BleManager", "Ignoring callback from superseded gatt instance (newState=$newState)")
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    @Suppress("DEPRECATION")
+                    gatt.disconnect()
+                }
+                gatt.close()
                 return
             }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    gatt.requestMtu(512)
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        Log.e("BleManager", "Connected with failure status=$status")
+                        _bleState.update { it.copy(connectionState = ConnectionState.ERROR) }
+                        @Suppress("DEPRECATION")
+                        gatt.disconnect()
+                        gatt.close()
+                        return
+                    }
+                    _bleState.update { it.copy(connectionState = ConnectionState.CONNECTING) }
+                    val mtuOk = gatt.requestMtu(512)
+                    if (!mtuOk) {
+                        Log.w("BleManager", "requestMtu returned false; falling back to discoverServices directly")
+                        gatt.discoverServices()
+                    }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     stopPoller()
                     writeChar = null
                     gatt.close()
                     bluetoothGatt = null
+                    val nextState = if (status == BluetoothGatt.GATT_SUCCESS) ConnectionState.DISCONNECTED else ConnectionState.ERROR
+                    Log.d("BleManager", "Disconnected: status=$status -> state=$nextState")
                     _bleState.update {
-                        it.copy(connectionState = ConnectionState.DISCONNECTED)
+                        it.copy(connectionState = nextState)
                     }
                 }
             }
@@ -279,11 +305,11 @@ class BleManager(private val context: Context) {
             // mark the new connection CONNECTED prematurely at the tail of its own sequence.
             initJob?.cancel()
             initJob = scope.launch {
-                for (notifyUuid in listOf(NOTIFY_B0B2_UUID, NOTIFY_B0B3_UUID, NOTIFY_B0B4_UUID)) {
-                    val notifyChar = service.getCharacteristic(UUID.fromString(notifyUuid)) ?: continue
-                    enableNotification(gatt, notifyChar)
-                    // Wait up to 2s for onDescriptorWrite before continuing to the next one
-                    withTimeoutOrNull(2000L) { descriptorChannel.receive() }
+                val ok = enableNotifications(gatt)
+                if (!ok) {
+                    Log.e("BleManager", "Service discovery failed: could not enable notifications")
+                    _bleState.update { it.copy(connectionState = ConnectionState.ERROR) }
+                    return@launch
                 }
                 Log.i("BleManager", "All notifications enabled, starting init sequence")
                 runInitSequence()
@@ -306,8 +332,11 @@ class BleManager(private val context: Context) {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
-            Log.d("BleManager", "onDescriptorWrite status=$status char=${descriptor.characteristic.uuid}")
-            descriptorChannel.trySend(Unit)
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                descriptorChannel.trySend(descriptor.characteristic.uuid.toString())
+            } else {
+                Log.w("BleManager", "onDescriptorWrite failed status=$status for ${descriptor.characteristic.uuid}")
+            }
         }
 
         @Deprecated("Used for API < 33")
@@ -332,17 +361,49 @@ class BleManager(private val context: Context) {
     // Notification helper
     // ------------------------------------------------------------------
 
-    private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic) {
-        gatt.setCharacteristicNotification(char, true)
-        val descriptor = char.getDescriptor(CCC_DESCRIPTOR_UUID) ?: return
+    private suspend fun enableNotifications(gatt: BluetoothGatt): Boolean {
+        val service = gatt.getService(UUID.fromString(SERVICE_UUID)) ?: return false
+        val b0b2 = service.getCharacteristic(UUID.fromString(NOTIFY_B0B2_UUID)) ?: return false
+        val b0b3 = service.getCharacteristic(UUID.fromString(NOTIFY_B0B3_UUID))
+        val b0b4 = service.getCharacteristic(UUID.fromString(NOTIFY_B0B4_UUID))
+        val notifyChars = listOfNotNull(b0b2, b0b3, b0b4)
+
+        for (notifyChar in notifyChars) {
+            drainDescriptorChannel()
+            val ok = enableNotification(gatt, notifyChar)
+            if (!ok) {
+                Log.e("BleManager", "Failed to enable notifications for ${notifyChar.uuid}")
+                return false
+            }
+        }
+        return true
+    }
+
+    private suspend fun enableNotification(gatt: BluetoothGatt, notifyChar: BluetoothGattCharacteristic): Boolean {
+        val descriptor = notifyChar.getDescriptor(CCC_DESCRIPTOR_UUID) ?: return false
+        
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            gatt.setCharacteristicNotification(notifyChar, true)
+            val res = gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            if (res != BluetoothGatt.GATT_SUCCESS) return false
         } else {
+            @Suppress("DEPRECATION")
+            gatt.setCharacteristicNotification(notifyChar, true)
             @Suppress("DEPRECATION")
             descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             @Suppress("DEPRECATION")
-            gatt.writeDescriptor(descriptor)
+            if (!gatt.writeDescriptor(descriptor)) return false
         }
+        
+        val targetUuid = notifyChar.uuid.toString()
+        val ok = withTimeoutOrNull(2000) {
+            var r: String
+            do {
+                r = descriptorChannel.receive()
+            } while (r != targetUuid)
+            true
+        } != null
+        return ok
     }
 
     // ------------------------------------------------------------------
@@ -529,7 +590,6 @@ class BleManager(private val context: Context) {
                 val ch  = svc?.getCharacteristic(UUID.fromString(notifyUuid)) ?: return@forEach
                 if (ch.properties and 0x10 != 0 || ch.properties and 0x20 != 0) {
                     enableNotification(gatt, ch)
-                    withTimeoutOrNull(2000L) { descriptorChannel.receive() }
                     Log.i("FW920_PROBE", "  Subscribed to $name/$notifyUuid")
                 }
             }
@@ -655,6 +715,7 @@ class BleManager(private val context: Context) {
 
     suspend fun deleteFile(filename: String): Boolean {
         Log.i("BleManager", "deleteFile: '$filename'")
+        drainResponseChannel()
         // Two-phase delete: first 0x0D stages (payload=[0]), second 0x0D commits (payload=[1])
         val stage = sendAndAwait(buildDeleteFile(filename), expectedCmd = 0x0D)
         Log.i("BleManager", "deleteFile: stage=$stage")
@@ -699,6 +760,7 @@ class BleManager(private val context: Context) {
         try {
             val pkt = buildPacket(0x0B, nameBytes + byteArrayOf(0x00, 0x00, 0x00, 0x00))
             Log.i("BleManager", "downloadFile: CMD 0x0B '$cleanName'")
+            drainResponseChannel()
             sendPacket(pkt)
 
             var readyReceived = false
@@ -860,6 +922,7 @@ class BleManager(private val context: Context) {
 
     private suspend fun collectFileList() {
         Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")
+        drainResponseChannel()
         sendPacket(PKT_LIST_FILES)
         val collected = mutableListOf<FileEntry>()
         val timeoutMs = 5000L
@@ -924,6 +987,7 @@ class BleManager(private val context: Context) {
         expectedCmd: Int,
         timeoutMs: Long = 3000L
     ): ParsedResponse? {
+        drainResponseChannel()
         sendPacket(data)
         return withTimeoutOrNull(timeoutMs) { awaitResponse(expectedCmd) }
     }

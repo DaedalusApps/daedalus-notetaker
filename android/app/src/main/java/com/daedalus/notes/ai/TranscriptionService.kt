@@ -116,8 +116,8 @@ class TranscriptionService(private val context: Context) {
 
         extractor.selectTrack(trackIndex)
         val mime = format!!.getString(MediaFormat.KEY_MIME)!!
-        val srcSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+        var srcSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        var channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
 
         val codec = MediaCodec.createDecoderByType(mime)
         codec.configure(format, null, null, 0)
@@ -165,9 +165,18 @@ class TranscriptionService(private val context: Context) {
             }
 
             var outputIdx = codec.dequeueOutputBuffer(info, 10_000)
-            while (outputIdx >= 0) {
-                val outputBuf = codec.getOutputBuffer(outputIdx)!!
-                val shortBuf = outputBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            while (outputIdx >= 0 || outputIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                if (outputIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val newFormat = codec.outputFormat
+                    if (newFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                        channelCount = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                    }
+                    if (newFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                        srcSampleRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    }
+                } else {
+                    val outputBuf = codec.getOutputBuffer(outputIdx)!!
+                    val shortBuf = outputBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
                 val samples = ShortArray(shortBuf.remaining())
                 shortBuf.get(samples)
 
@@ -207,6 +216,7 @@ class TranscriptionService(private val context: Context) {
                 if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                     outputDone = true
                     break
+                }
                 }
                 outputIdx = codec.dequeueOutputBuffer(info, 0)
             }

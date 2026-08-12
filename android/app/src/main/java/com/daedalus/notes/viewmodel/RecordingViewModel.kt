@@ -471,18 +471,14 @@ class RecordingViewModel @JvmOverloads constructor(
 
         if (!autoProcess) return
 
-        // Fetch current list from repo
-        val recordings = repo.allRecordings.first()
-        for (recording in recordings) {
-            // analysisFailed skips the ones that already ran and produced nothing usable. Without
-            // it, audio that can never yield a transcript is re-attempted on every sync — and the
-            // costly failures are the ones that fail *after* a full Whisper pass, not the cheap
-            // ones. A re-fetch clears the flag, and manual analysis never consults it.
-            if (recording.summary.isBlank() && !recording.analysisFailed && recording.localPath.isNotBlank()) {
+        val pending = repo.getPendingRecordings()
+
+        for (recording in pending) {
+            if (recording.localPath.isNotBlank()) {
                 val file = File(recording.localPath)
                 if (file.exists()) {
                     _syncProgress.value = "Auto-analyzing ${recording.filename}…"
-                    doAnalyze(recording.filename)
+                    doAnalyze(recording.filename, autoTriggered = true)
                     delay(500) // Brief pause between analyses
                 }
             }
@@ -767,16 +763,21 @@ class RecordingViewModel @JvmOverloads constructor(
     }
 
     /** Waits for any in-flight transfer or analysis; see [heavyWork]. */
-    private suspend fun doAnalyze(filename: String) = heavyWork.withLock {
-        doAnalyzeExclusive(filename)
+    private suspend fun doAnalyze(filename: String, autoTriggered: Boolean = false) = heavyWork.withLock {
+        doAnalyzeExclusive(filename, autoTriggered)
     }
 
-    private suspend fun doAnalyzeExclusive(filename: String) {
+    private suspend fun doAnalyzeExclusive(filename: String, autoTriggered: Boolean = false) {
             _isProcessing.value = true
             _aiError.value = null
             try {
                 var note = repo.get(filename) ?: run {
                     _aiError.value = "Recording not synced. Download it first."
+                    return
+                }
+
+                if (autoTriggered && note.summary.isNotBlank()) {
+                    Log.i("DaedalusAI", "Skipping auto-analysis of $filename: already analyzed")
                     return
                 }
 
@@ -897,14 +898,15 @@ class RecordingViewModel @JvmOverloads constructor(
                         // The count lives only in the summary, which is rewritten every run.
                         // Putting it in the kept-if-present title made the two drift apart
                         // ("Long Recording (2 parts)" over "Split into 1 parts").
-                        repo.save(note.copy(
+                        val currentParent = repo.get(filename) ?: note
+                        repo.save(currentParent.copy(
                             transcript = fullTranscript.toString(),
                             summary = summary,
                             topics = mergedTopics,
                             // A previously stored placeholder (including the old
                             // "Long Recording (2 parts)" form) is replaced, not preserved;
                             // only a real Gemma-derived title survives a re-analysis.
-                            title = note.title
+                            title = currentParent.title
                                 .takeIf { it.isNotBlank() && !SPLIT_PLACEHOLDER_TITLE.matches(it) }
                                 ?: "Long Recording",
                             shortSummary = if (abortedByError) {
@@ -965,6 +967,29 @@ class RecordingViewModel @JvmOverloads constructor(
                 // The split path above clears the flag inside its own parent save rather than
                 // paying for a second write here.
                 repo.updateAnalysisFailed(filename, false)
+
+                // If this note is a part of a split recording, update the parent's stitched transcript & summary
+                if (note.parentFilename != null) {
+                    val parentName = note.parentFilename!!
+                    val currentParent = repo.get(parentName)
+                    if (currentParent != null) {
+                        val allParts = repo.getPartsOf(parentName)
+                        val stitchedTranscript = allParts.mapIndexed { idx, p ->
+                            "--- Part ${idx + 1} (${p.partIndex}) ---\n${p.transcript}"
+                        }.joinToString("\n\n")
+                        val stitchedSummary = allParts.mapIndexed { idx, p ->
+                            "## Part ${idx + 1}\n${p.summary}"
+                        }.joinToString("\n\n")
+                        val mergedTopics = allParts.flatMap { it.topics }.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+                        
+                        repo.save(currentParent.copy(
+                            transcript = stitchedTranscript,
+                            summary = stitchedSummary,
+                            shortSummary = "Split into ${allParts.size} parts",
+                            topics = mergedTopics
+                        ))
+                    }
+                }
 
                 _currentNote.value = repo.get(filename)
             } catch (e: CancellationException) {

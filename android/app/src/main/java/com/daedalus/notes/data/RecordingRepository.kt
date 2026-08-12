@@ -11,6 +11,8 @@ class RecordingRepository(private val dao: RecordingDao) {
 
     fun search(query: String): Flow<List<Recording>> = dao.searchFlow(query)
 
+    suspend fun getPendingRecordings(): List<Recording> = dao.getPendingRecordings()
+
     suspend fun get(filename: String): Recording? = dao.get(filename)
 
     suspend fun save(recording: Recording) = dao.upsert(recording)
