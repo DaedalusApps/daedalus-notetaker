@@ -5,7 +5,7 @@ Fix BLE synchronization, audio integrity, chronological UI sorting, and release 
 
 ## Status & Branches
 - **`main`**: Clean working tree, up-to-date with `origin/main`.
-- **Latest Commit**: `docs: update HANDOFF.md with release build details` (`cd9bb22`).
+- **Latest Commit**: `docs: sanitize HANDOFF.md notes` (`8154b01`).
 
 ## Key Root Causes & Fixes Solved
 1. **Release Build Installation (`app-release.apk`):**
@@ -17,7 +17,7 @@ Fix BLE synchronization, audio integrity, chronological UI sorting, and release 
    - Updated `saveSyncedRecording` and ViewModel `init` database healing to populate `createdAt` from filename timestamps so Room queries (`ORDER BY createdAt DESC`) sort recordings in exact chronological order.
 
 3. **Audio Transfer & Content Integrity:**
-   - Verified raw audio content via Pocketsphinx speech recognition on device files. `20260812113220.mp3` (18m 48s, 4.5 MB) is the Josh recording; `20260812102746.mp3` (2m 30s, 600 KB) is the Susan meeting.
+   - Verified raw audio content via speech recognition on device files: `20260812113220.mp3` (18m 48s, 4.5 MB) verified as primary long recording; `20260812102746.mp3` (2m 30s, 600 KB) verified as short meeting recording.
    - Re-downloaded full audio over BLE and split long recording (>15 min) into 2 parts.
 
 4. **CRC Validation & Incomplete Download Fixes:**
