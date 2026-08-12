@@ -678,7 +678,7 @@ class BleManager(private val context: Context) {
     suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? {
         val context = this.context
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
-        val nameBytes = cleanName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
+        val nameBytes = cleanName.padEnd(14, ' ').toByteArray(Charsets.US_ASCII)
 
         val localDir = File(context.getExternalFilesDir(null), "Recordings").also { it.mkdirs() }
         val safeName = File(cleanName).name + ".mp3"
@@ -792,7 +792,7 @@ class BleManager(private val context: Context) {
     /** Probes CMD range 0x0D–0x17 with a filename payload to find the real delete command. */
     suspend fun probeDeleteCmds(filename: String) {
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
-        val nameBytes = cleanName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
+        val nameBytes = cleanName.padEnd(14, ' ').toByteArray(Charsets.US_ASCII)
         val skipKnown = setOf(0x0F)  // 0x0F is the periodic status update, skip it
 
         for (cmd in 0x0D..0x17) {
