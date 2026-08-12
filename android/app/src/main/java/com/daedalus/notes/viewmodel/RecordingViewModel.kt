@@ -392,11 +392,11 @@ class RecordingViewModel @JvmOverloads constructor(
                     return@forEach
                 }
                 val existing = repo.get(entry.filename)
-
                 val localFile = existing?.localPath?.let { java.io.File(it) }
-                val localSize = localFile?.takeIf { it.exists() }?.length() ?: 0L
-                Log.i("DaedalusSync", "file=${entry.filename} localSize=$localSize deviceSize=${entry.sizeBytes}")
-                if (localSize > 0) return@forEach
+                val isComplete = existing != null && existing.durationMillis > 0L && localFile?.exists() == true && localFile.length() > 0L
+
+                Log.i("DaedalusSync", "file=${entry.filename} isComplete=$isComplete duration=${existing?.durationMillis} deviceSize=${entry.sizeBytes}")
+                if (isComplete) return@forEach
                 _syncProgress.value = "Downloading ${entry.filename} via BLE…"
                 val file = bleManager.downloadFile(entry.filename) { bytes ->
                     _syncProgress.value = "Downloading ${entry.filename} (${bytes / 1024} KB)…"
