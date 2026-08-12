@@ -74,5 +74,10 @@
                 android:resource="@xml/provider_paths" />
         </provider>
 
+        <service
+            android:name=".ai.AnalysisForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
     </application>
 </manifest>

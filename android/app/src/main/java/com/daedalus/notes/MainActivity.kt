@@ -16,6 +16,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
+import java.io.File
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -107,6 +108,21 @@ class MainActivity : ComponentActivity() {
                             val ok = deviceViewModel.bleManager.deleteFile(filename)
                             Log.i("DaedalusADB", "Hardware delete result for '$filename': $ok")
                         }
+                    }
+                }
+                "com.daedalus.notes.ADD_CALENDAR" -> {
+                    val title = intent?.getStringExtra("title") ?: "Action Item"
+                    val note = intent?.getStringExtra("note") ?: ""
+                    Log.i("DaedalusADB", "Add to calendar triggered for '$title'")
+                    com.daedalus.notes.util.CalendarIntegration.addToCalendar(this@MainActivity, title, note)
+                }
+                "com.daedalus.notes.REPAIR_FILE" -> {
+                    val filename = intent?.getStringExtra("filename") ?: ""
+                    Log.i("DaedalusADB", "Repair file triggered for '$filename'")
+                    if (filename.isNotBlank()) {
+                        val file = File(getExternalFilesDir(null), "Recordings/$filename")
+                        val ok = com.daedalus.notes.data.model.AudioRepairEngine.repairMp3File(file)
+                        Log.i("DaedalusADB", "Audio repair result for '$filename': $ok")
                     }
                 }
             }

@@ -44,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -112,6 +113,7 @@ fun NoteDetailScreen(
     var actionsExpanded by remember { mutableStateOf(false) }
     var playbackPosition by remember { mutableLongStateOf(0L) }
     var playbackDuration by remember { mutableLongStateOf(0L) }
+    var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
 
     // Sync isPlaying when audio finishes naturally
     DisposableEffect(player) {
@@ -276,7 +278,8 @@ fun NoteDetailScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Play / Stop Button
                     Button(
@@ -307,6 +310,7 @@ fun NoteDetailScreen(
                                     }
 
                                     player.setMediaItem(mediaItem)
+                                    player.setPlaybackSpeed(playbackSpeed)
                                     player.prepare()
                                     player.play()
                                     playbackDuration = if (isPart) partDuration else (note?.durationMillis ?: 0L)
@@ -327,8 +331,45 @@ fun NoteDetailScreen(
                         Text(if (isPlaying) "Stop" else "Play", maxLines = 1)
                     }
 
-                    // Play is the one action worth a permanent button; the rest live in the
-                    // overflow so the row doesn't squeeze four labels onto one line.
+                    // -10s Skip Button
+                    IconButton(
+                        onClick = {
+                            val newPos = maxOf(0L, player.currentPosition - 10000L)
+                            player.seekTo(newPos)
+                            playbackPosition = newPos
+                        },
+                        enabled = isPlaying
+                    ) {
+                        Text("-10s", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+
+                    // +10s Skip Button
+                    IconButton(
+                        onClick = {
+                            val newPos = minOf(playbackDuration, player.currentPosition + 10000L)
+                            player.seekTo(newPos)
+                            playbackPosition = newPos
+                        },
+                        enabled = isPlaying
+                    ) {
+                        Text("+10s", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+
+                    // Speed Toggle Button
+                    TextButton(
+                        onClick = {
+                            playbackSpeed = when (playbackSpeed) {
+                                1.0f -> 1.25f
+                                1.25f -> 1.5f
+                                1.5f -> 2.0f
+                                else -> 1.0f
+                            }
+                            player.setPlaybackSpeed(playbackSpeed)
+                        }
+                    ) {
+                        Text("${playbackSpeed}x", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    }
+
                     Box {
                         IconButton(onClick = { actionsExpanded = true }) {
                             Icon(Icons.Default.MoreVert, contentDescription = "More actions")

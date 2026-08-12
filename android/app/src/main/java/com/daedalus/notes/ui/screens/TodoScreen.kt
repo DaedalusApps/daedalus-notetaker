@@ -296,6 +296,18 @@ private fun TodoSwipeToDeleteCard(
                         .padding(start = 8.dp)
                         .clickable { showEditDialog = true }
                 )
+                val context = LocalContext.current
+                IconButton(
+                    onClick = {
+                        com.daedalus.notes.util.CalendarIntegration.addToCalendar(context, todo.text)
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Add to Calendar",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
             }
         }
     }
