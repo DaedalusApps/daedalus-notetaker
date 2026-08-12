@@ -381,6 +381,161 @@ class RecordingViewModelTest {
         coVerify(exactly = 0) { repo.get("written-off") }
     }
 
+    // A recording flagged unanalyzable, then re-synced with a clean transfer (local file pruned
+    // in between), must be eligible for auto-analysis again — the flag described the old, bad
+    // copy of the audio, and saveSyncedRecording only ever runs when fresh audio just landed.
+    @Test
+    fun syncAllBleFiles_freshDownloadClearsAnalysisFailedFromThePreviousCopy() = runTest {
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "flagged.mp3", sizeBytes = 100L)
+        coEvery { repo.getPendingDeletes() } returns emptyList()
+        coEvery { bleManager.listFiles() } returns Unit
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { repo.get("flagged.mp3") } returns
+            Recording("flagged.mp3", analysisFailed = true)
+        val tempFile = File.createTempFile("flagged", ".mp3").apply { deleteOnExit() }
+        coEvery { bleManager.downloadFile(eq("flagged.mp3"), any()) } returns tempFile
+
+        viewModel.syncAllBleFiles(bleManager)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) {
+            repo.save(match { it.filename == "flagged.mp3" && !it.analysisFailed })
+        }
+    }
+
+    // The generic catch around transcribeRange in the split loop breaks rather than aborting the
+    // whole run, so part 1's audio getting nothing usable ends up on the same created==0 path as
+    // a genuine transient exception. Only the latter is supposed to write the recording off —
+    // the deliberate rule (mirrored by the flag-free catch at the bottom of doAnalyzeExclusive)
+    // is that transient failures must stay retryable.
+    @Test
+    fun splitAnalysis_transientExceptionMidSplit_doesNotMarkAnalysisFailed() = runTest {
+        val audio = File.createTempFile("split-error", ".mp3").also { it.deleteOnExit() }
+        val transcriber = mockk<TranscriptionService>(relaxed = true)
+        coEvery { transcriber.transcribeRange(any(), any(), any()) } throws RuntimeException("native OOM")
+        val vm = RecordingViewModel(
+            application = application, db = db, repo = repo, llm = llm,
+            transcriber = transcriber, embedder = embedder, ioDispatcher = testDispatcher
+        )
+        coEvery { repo.get("long1") } returns Recording(
+            filename = "long1", localPath = audio.absolutePath, durationMillis = 20L * 60 * 1000
+        )
+        // Whisper reads as installed, so if the exception path fell through to
+        // reportNothingReadable (the bug), it WOULD flag the recording — proving this test
+        // actually exercises the distinction rather than passing for the wrong reason.
+        val filesDir = java.nio.file.Files.createTempDirectory("whisper-model").toFile()
+        every { application.filesDir } returns filesDir
+        val whisperDir = File(File(filesDir, "models"), "sherpa-whisper-base").apply { mkdirs() }
+        File(whisperDir, "base.en-encoder.int8.onnx").createNewFile()
+        File(whisperDir, "base.en-decoder.int8.onnx").createNewFile()
+        File(whisperDir, "base.en-tokens.txt").createNewFile()
+
+        vm.analyze("long1")
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { repo.updateAnalysisFailed("long1", true) }
+    }
+
+    // The genuine "nothing readable" case must still be remembered — only a caught exception
+    // is exempt.
+    @Test
+    fun splitAnalysis_zeroPartsBecauseUnreadable_marksAnalysisFailed() = runTest {
+        val audio = File.createTempFile("split-unreadable", ".mp3").also { it.deleteOnExit() }
+        val transcriber = mockk<TranscriptionService>(relaxed = true)
+        coEvery { transcriber.transcribeRange(any(), any(), any()) } returns ""
+        val vm = RecordingViewModel(
+            application = application, db = db, repo = repo, llm = llm,
+            transcriber = transcriber, embedder = embedder, ioDispatcher = testDispatcher
+        )
+        coEvery { repo.get("long2") } returns Recording(
+            filename = "long2", localPath = audio.absolutePath, durationMillis = 20L * 60 * 1000
+        )
+        // Whisper must read as installed, or reportNothingReadable treats this as an
+        // environment problem instead and deliberately does not set the flag.
+        val filesDir = java.nio.file.Files.createTempDirectory("whisper-model").toFile()
+        every { application.filesDir } returns filesDir
+        val whisperDir = File(File(filesDir, "models"), "sherpa-whisper-base").apply { mkdirs() }
+        File(whisperDir, "base.en-encoder.int8.onnx").createNewFile()
+        File(whisperDir, "base.en-decoder.int8.onnx").createNewFile()
+        File(whisperDir, "base.en-tokens.txt").createNewFile()
+
+        vm.analyze("long2")
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repo.updateAnalysisFailed("long2", true) }
+    }
+
+    // An abort with created > 0 must still save the parent (so a blank summary doesn't make
+    // autoAnalyzePending() re-split forever), but the shortSummary must say the run was
+    // interrupted and give both the created and expected part counts — claiming "Split into 1
+    // part" when 3 of 4 parts are missing silently truncates the recording forever.
+    @Test
+    fun splitAnalysis_abortedAfterSomePartsSucceed_shortSummaryConveysInterruption() = runTest {
+        val audio = File.createTempFile("split-partial-abort", ".mp3").also { it.deleteOnExit() }
+        val transcriber = mockk<TranscriptionService>(relaxed = true)
+        coEvery { transcriber.transcribeRange(any(), any(), any()) } returns
+            "this is a readable transcript with enough words" andThenThrows
+            RuntimeException("native OOM")
+        val vm = RecordingViewModel(
+            application = application, db = db, repo = repo, llm = llm,
+            transcriber = transcriber, embedder = embedder, ioDispatcher = testDispatcher
+        )
+        coEvery { repo.get("long3") } returns Recording(
+            filename = "long3", localPath = audio.absolutePath, durationMillis = 60L * 60 * 1000
+        )
+        val savedNotes = mutableListOf<Recording>()
+        coEvery { repo.save(capture(savedNotes)) } answers { }
+
+        vm.analyze("long3")
+        advanceUntilIdle()
+
+        val parentSave = savedNotes.lastOrNull { it.filename == "long3" }
+        assertTrue("expected a save of the parent recording", parentSave != null)
+        val summary = parentSave!!.shortSummary
+        assertTrue(
+            "expected shortSummary to mention interruption, was: $summary",
+            summary.contains("interrupted", ignoreCase = true) ||
+                summary.contains("Re-analyze", ignoreCase = true)
+        )
+        assertTrue("expected shortSummary to report created count (1), was: $summary", "1" in summary)
+        assertTrue("expected shortSummary to report expected count (4), was: $summary", "4" in summary)
+        assertTrue(
+            "aborted run must not be flagged as a hard failure",
+            !parentSave.analysisFailed
+        )
+    }
+
+    // A clean run (no abort) must keep the existing wording unchanged.
+    @Test
+    fun splitAnalysis_cleanFourOfFourParts_shortSummaryUnchanged() = runTest {
+        val audio = File.createTempFile("split-clean", ".mp3").also { it.deleteOnExit() }
+        val transcriber = mockk<TranscriptionService>(relaxed = true)
+        coEvery { transcriber.transcribeRange(any(), any(), any()) } returns
+            "this is a readable transcript with enough words"
+        val vm = RecordingViewModel(
+            application = application, db = db, repo = repo, llm = llm,
+            transcriber = transcriber, embedder = embedder, ioDispatcher = testDispatcher
+        )
+        coEvery { repo.get("long4") } returns Recording(
+            filename = "long4", localPath = audio.absolutePath, durationMillis = 60L * 60 * 1000
+        )
+        val savedNotes = mutableListOf<Recording>()
+        coEvery { repo.save(capture(savedNotes)) } answers { }
+
+        vm.analyze("long4")
+        advanceUntilIdle()
+
+        val parentSave = savedNotes.lastOrNull { it.filename == "long4" }
+        assertTrue("expected a save of the parent recording", parentSave != null)
+        assertEquals(
+            "Split into 4 parts of ~15 min each. Tap to expand.",
+            parentSave!!.shortSummary
+        )
+        assertTrue(!parentSave.analysisFailed)
+    }
+
     @Test
     fun importBackup_withValidData_importsSuccessfully() = runTest {
         val uri = mockk<Uri>()

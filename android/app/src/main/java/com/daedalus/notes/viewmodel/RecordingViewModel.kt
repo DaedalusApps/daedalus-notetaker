@@ -450,7 +450,11 @@ class RecordingViewModel @JvmOverloads constructor(
             localPath = localPath,
             sizeBytes = sizeBytes,
             durationMillis = durationMillis,
-            deviceSerial = deviceSerial ?: existing?.deviceSerial
+            deviceSerial = deviceSerial ?: existing?.deviceSerial,
+            // This function only ever runs when fresh audio just landed, so a flag describing
+            // the old copy no longer applies — otherwise a clean re-sync after pruning a bad
+            // local file would leave the recording permanently skipped by auto-analysis.
+            analysisFailed = false
         ))
     }
 
@@ -782,6 +786,11 @@ class RecordingViewModel @JvmOverloads constructor(
                     repo.deletePartsOf(filename)
 
                     var created = 0
+                    // Distinguishes "part 1 threw" from "part 1 transcribed to nothing readable"
+                    // below — created==0 covers both, but only the latter is a genuine failure of
+                    // the audio. A transient exception (native OOM, IO error) must stay retryable,
+                    // matching the flag-free generic catch at the bottom of doAnalyzeExclusive.
+                    var abortedByError = false
                     val fullTranscript = StringBuilder()
                     for (i in 1..numParts) {
                         val startMs = (i - 1) * PART_DURATION_MS
@@ -805,6 +814,7 @@ class RecordingViewModel @JvmOverloads constructor(
                             // won't see a blank summary and re-split the whole recording.
                             Log.e("DaedalusAI", "Part $i failed; keeping the $created part(s) done so far", e)
                             _aiError.value = e.message ?: "Analysis failed part-way through"
+                            abortedByError = true
                             break
                         }
 
@@ -875,7 +885,9 @@ class RecordingViewModel @JvmOverloads constructor(
                             title = note.title
                                 .takeIf { it.isNotBlank() && !SPLIT_PLACEHOLDER_TITLE.matches(it) }
                                 ?: "Long Recording",
-                            shortSummary = if (created == 1) {
+                            shortSummary = if (abortedByError) {
+                                "Split into $created of $numParts parts — analysis was interrupted. Re-analyze to finish."
+                            } else if (created == 1) {
                                 "Split into 1 part. Tap to expand."
                             } else {
                                 "Split into $created parts of ~15 min each. Tap to expand."
@@ -891,7 +903,9 @@ class RecordingViewModel @JvmOverloads constructor(
                             }
                             embedder.embed(embText)?.let { repo.updateEmbedding(filename, it) }
                         }
-                    } else {
+                    } else if (!abortedByError) {
+                        // Genuinely nothing readable in the audio — the exception path above
+                        // already surfaced its own error and must not be overwritten or flagged.
                         reportNothingReadable(filename)
                     }
                     _currentNote.value = repo.get(filename)

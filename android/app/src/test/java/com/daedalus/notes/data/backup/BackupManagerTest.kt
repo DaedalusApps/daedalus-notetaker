@@ -403,6 +403,32 @@ class BackupManagerTest {
         db.close()
     }
 
+    // payloadFilenames (the parent-exists guard) used to be built in a pass BEFORE the per-entry
+    // filename validation regex ran, so a parent entry the main loop later skips as invalid still
+    // satisfied the guard. A crafted backup with a path-traversal "parent" plus a legitimately
+    // named part claiming it as parentFilename would import the part with a linkage to a row that
+    // was never actually created — exactly the invisible orphan the guard exists to prevent.
+    @Test
+    fun importWithInvalidParentFilename_dropsTheLinkageInsteadOfOrphaning() = runBlocking {
+        val db = newDb()
+        val json = JSONObject().apply {
+            put("backupVersion", 2)
+            put("recordings", JSONArray().apply {
+                put(JSONObject().apply { put("filename", "../evil") })
+                put(JSONObject().apply {
+                    put("filename", "REC1_p1.mp3")
+                    put("parentFilename", "../evil")
+                    put("partIndex", 1)
+                })
+            })
+        }
+        BackupManager(context, db).importFromJson(json)
+
+        val part = db.recordingDao().get("REC1_p1.mp3")
+        assertEquals(null, part?.parentFilename)
+        db.close()
+    }
+
     // The legitimate restore this must not break: parts absent locally (a fresh install, or after
     // Wipe Local Analysis removed the part rows) still import with their linkage.
     @Test

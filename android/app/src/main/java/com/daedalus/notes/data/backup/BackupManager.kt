@@ -121,10 +121,13 @@ class BackupManager(
         // A genuine export always carries a part's parent alongside it. A parentFilename naming
         // anything else would create a row that no screen can reach: every list query filters
         // parentFilename IS NULL, and getPartsOf() is only ever asked about a parent that exists.
-        // Ignore such a linkage rather than importing an invisible orphan.
+        // Ignore such a linkage rather than importing an invisible orphan. The parent must pass
+        // the same validation the main loop applies to `filename` below — otherwise a parent
+        // entry the main loop later skips as invalid still satisfies this guard.
         val payloadFilenames = buildSet {
             for (i in 0 until array.length()) {
-                array.optJSONObject(i)?.optString("filename", "")?.takeIf { it.isNotBlank() }?.let { add(it) }
+                array.optJSONObject(i)?.optString("filename", "")
+                    ?.takeIf { isValidBackupFilename(it) }?.let { add(it) }
             }
         }
 
@@ -133,7 +136,7 @@ class BackupManager(
             val filename = obj.optString("filename", "")
 
             // Security validation: prevent directory traversal via filename characters
-            if (filename.isBlank() || !filename.matches(Regex("[A-Za-z0-9._-]+")) || filename == "." || filename == "..") {
+            if (!isValidBackupFilename(filename)) {
                 Log.w("BackupManager", "Skipping invalid filename in backup: $filename")
                 continue
             }
@@ -227,6 +230,11 @@ class BackupManager(
 
         return importedCount
     }
+
+    /** Directory-traversal guard shared by the parent-exists check and the main import loop. */
+    private fun isValidBackupFilename(filename: String): Boolean =
+        filename.isNotBlank() && filename.matches(Regex("[A-Za-z0-9._-]+")) &&
+            filename != "." && filename != ".."
 
     private suspend fun importTodos(todosArr: JSONArray?) {
         if (todosArr == null) return

@@ -38,6 +38,13 @@ import kotlin.coroutines.resume
 // State definitions
 // ---------------------------------------------------------------------------
 
+/**
+ * Used until [android.bluetooth.BluetoothGattCallback.onMtuChanged] reports the real one.
+ * This must be the pessimistic BLE spec default (23, i.e. 20-byte payloads), not the
+ * value the FW920 grants on a successful negotiation (247).
+ */
+private const val FALLBACK_MTU = 23
+
 enum class ConnectionState { DISCONNECTED, SCANNING, CONNECTING, CONNECTED, ERROR }
 
 data class BleState(
@@ -285,6 +292,11 @@ class BleManager(private val context: Context) {
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             Log.i("BleManager", "MTU changed to $mtu (status=$status)")
+            // A failed negotiation can still report a candidate mtu; keep the last-known-good
+            // value instead so the BleAudit log line doesn't report a bogus mtu.
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                negotiatedMtu = mtu
+            }
             gatt.discoverServices()
         }
 
@@ -446,6 +458,10 @@ class BleManager(private val context: Context) {
      */
     @Volatile
     private var transferInProgress = false
+
+    /** Last MTU the device granted; 247 in practice. Used only for the BleAudit log line. */
+    @Volatile
+    private var negotiatedMtu = FALLBACK_MTU
 
     private fun startPoller() {
         stopPoller()
@@ -670,6 +686,10 @@ class BleManager(private val context: Context) {
         var totalBytes = 0L
         var chunkCount = 0
         val chunkSizes = mutableMapOf<Int, Int>()
+        // Ordering the histogram loses is what makes the block structure invisible in logs; this
+        // keeps the first 60 chunk sizes in arrival order so the structure can be confirmed
+        // directly, capped so the log line stays bounded regardless of file size.
+        val first60ChunkSizes = mutableListOf<Int>()
         val fos = FileOutputStream(localFile)
         transferInProgress = true
 
@@ -697,6 +717,11 @@ class BleManager(private val context: Context) {
 
 
                         fos.write(response.data)
+                        // The histogram these feed was previously logged from variables nothing
+                        // ever wrote to, so every transfer reported "0 chunks" and an empty map.
+                        chunkCount++
+                        chunkSizes[response.data.size] = (chunkSizes[response.data.size] ?: 0) + 1
+                        if (first60ChunkSizes.size < 60) first60ChunkSizes.add(response.data.size)
                         totalBytes += response.data.size
                         onProgress(totalBytes)
                         lastDataTime = System.currentTimeMillis()
@@ -734,9 +759,11 @@ class BleManager(private val context: Context) {
         // would mean the device frames its payloads and we are storing the framing as audio.
         Log.i(
             "BleAudit",
-            "transfer done: $chunkCount chunks, $totalBytes bytes, size histogram=" +
+            "transfer done: $chunkCount chunks, $totalBytes bytes, mtu=$negotiatedMtu, " +
+                "size histogram=" +
                 chunkSizes.entries.sortedByDescending { it.value }
-                    .joinToString(", ") { "${it.key}B x${it.value}" }
+                    .joinToString(", ") { "${it.key}B x${it.value}" } +
+                ", first60=" + first60ChunkSizes.joinToString(",")
         )
         return if (totalBytes > 0) localFile else null
     }
