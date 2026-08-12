@@ -710,4 +710,19 @@ class RecordingViewModelTest {
         coVerify(exactly = 0) { bleManager.downloadFile(any(), any()) }
         assertEquals("Recording no longer exists on device.", viewModel.aiError.value)
     }
+    @Test
+    fun loadNote_populatesCurrentScanResult() = runTest {
+        val audio = File.createTempFile("scan-test", ".mp3").also { it.deleteOnExit() }
+        val filename = "scan-test.mp3"
+        coEvery { repo.get(filename) } returns Recording(filename, localPath = audio.absolutePath)
+        
+        // Write a fake mp3 frame so scan doesn't return 0
+        audio.writeBytes(byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x64.toByte()))
+
+        viewModel.loadNote(filename)
+        advanceUntilIdle()
+        
+        val result = viewModel.currentScanResult.value
+        assertTrue(result != null)
+    }
 }
