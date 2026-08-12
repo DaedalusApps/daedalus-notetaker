@@ -1,33 +1,38 @@
 # Handoff Brief — Daedalus Notetaker
 
 ## Goal
-Fix BLE synchronization, audio integrity, chronological UI sorting, and release build distribution.
+Implement the 6-Pillar Feature Suite: Background Processing Service, Calendar Integration, Enhanced Audio Player, Speaker Formatting, Room FTS4 Search, and Storage Repair.
+
+## Active Plan
+- Detailed execution plan: [`plans/2026-08-12_FULL_FEATURE_SUITE_PLAN.md`](file:///C:/Users/franc/Projects/daedalus-notetaker/plans/2026-08-12_FULL_FEATURE_SUITE_PLAN.md)
+- Development constraint: **No ADB execution during code development**. Each feature pillar includes explicit ADB broadcast user stories for test automation.
 
 ## Status & Branches
 - **`main`**: Clean working tree, up-to-date with `origin/main`.
-- **Latest Commit**: `docs: sanitize HANDOFF.md notes` (`8154b01`).
+- **Latest Commit**: `docs: add 6-pillar feature suite execution plan` (`f10488f`).
 
-## Key Root Causes & Fixes Solved
-1. **Release Build Installation (`app-release.apk`):**
-   - Built and installed production Release APK on physical phone via `.\gradlew :app:installRelease`.
-   - Preserved all Room database entries and local recording files (`adb install -r`).
+## Key Feature Pillars & Architecture
+1. **Pillar 1: Background Processing Service (`AnalysisForegroundService.kt`)**
+   - Foreground notification with progress bar (*"Processing 18m recording… 45%"*).
+   - Keeps Whisper and Gemma AI running reliably with screen off.
 
-2. **Chronological Sorting by Filename Timestamp (`DateUtils.kt` & `RecordingViewModel.kt`):**
-   - Added `DateUtils.parseEpochMillisFromFilename` to extract exact recording timestamps from filenames (`YYYYMMDDHHMMSS`).
-   - Updated `saveSyncedRecording` and ViewModel `init` database healing to populate `createdAt` from filename timestamps so Room queries (`ORDER BY createdAt DESC`) sort recordings in exact chronological order.
+2. **Pillar 2: Action Items → Android Calendar Integration (`CalendarIntegration.kt`)**
+   - One-tap button on To-Dos to add events directly to native Android Calendar (defaults to 1-hour duration).
 
-3. **Audio Transfer & Content Integrity:**
-   - Verified raw audio content via speech recognition on device files: `20260812113220.mp3` (18m 48s, 4.5 MB) verified as primary long recording; `20260812102746.mp3` (2m 30s, 600 KB) verified as short meeting recording.
-   - Re-downloaded full audio over BLE and split long recording (>15 min) into 2 parts.
+3. **Pillar 3: Enhanced Audio Player (`AudioPlayerState.kt`)**
+   - Playback speed controls (`1.0x`, `1.25x`, `1.5x`, `2.0x`) and `-10s` / `+10s` skip buttons.
 
-4. **CRC Validation & Incomplete Download Fixes:**
-   - Removed strict hardware CRC dropping on `0xA0 0x0A` packets in `FW920Protocol.kt`.
-   - Updated BLE sync skip condition to require `isComplete = existing != null && existing.durationMillis > 0L`.
+4. **Pillar 4: Speaker Formatting (`SpeakerDiarizer.kt`)**
+   - Formats transcript text into clean paragraphs and turn-taking speaker tags (`Speaker 1:`, `Speaker 2:`).
+
+5. **Pillar 5: Room FTS4 Full-Text Search (`RecordingFtsEntity.kt`)**
+   - Instant search across titles, transcripts, summaries, topics, and mind-map nodes.
+
+6. **Pillar 6: Storage Repair & Audio Defragmentation (`AudioRepairEngine.kt`)**
+   - Auto-scans MP3 frame headers, trims truncated trailing bytes, rebuilds sync frames, and repairs duration headers.
 
 ## Verification Evidence
-1. **Release Build Deployed:**
-   - `.\gradlew :app:installRelease` succeeded (`BUILD SUCCESSFUL in 1m 5s`, `Installed on 1 device`).
-2. **Unit Tests:**
+1. **Unit Tests:**
    - `.\gradlew :app:testDebugUnitTest` passed cleanly.
-3. **Git Hygiene:**
+2. **Git Hygiene:**
    - All changes committed and pushed to `origin/main`.
