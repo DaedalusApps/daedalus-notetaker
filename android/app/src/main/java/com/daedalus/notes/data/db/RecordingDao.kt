@@ -67,6 +67,9 @@ interface RecordingDao {
     @Delete
     suspend fun delete(recording: Recording)
 
+    @Query("SELECT COUNT(*) FROM recordings WHERE localPath = :path AND filename != :filename AND (parentFilename IS NULL OR parentFilename != :filename)")
+    suspend fun countOtherSharingPath(path: String, filename: String): Int
+
     @Query("""UPDATE recordings SET transcript = '', summary = '', mindMap = '', title = '',
     shortSummary = '', topics = '', embedding = NULL, analysisFailed = 0""")
     suspend fun wipeAllAnalysis()

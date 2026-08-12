@@ -28,6 +28,8 @@ class RecordingRepository(private val dao: RecordingDao) {
 
     suspend fun delete(recording: Recording) = dao.delete(recording)
 
+    suspend fun countOtherSharingPath(path: String, filename: String): Int = dao.countOtherSharingPath(path, filename)
+
     suspend fun getPartsOf(filename: String): List<Recording> = dao.getPartsOf(filename)
 
     val parentsWithParts: Flow<List<String>> = dao.parentsWithPartsFlow()

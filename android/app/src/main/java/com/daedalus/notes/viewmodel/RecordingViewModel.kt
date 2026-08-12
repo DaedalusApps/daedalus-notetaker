@@ -663,6 +663,14 @@ class RecordingViewModel @JvmOverloads constructor(
                 return@launch
             }
 
+            val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
+            val deviceFiles = bleManager.bleState.value.files
+            if (deviceFiles.isNotEmpty() && deviceFiles.none { it.filename.equals(cleanName, ignoreCase = true) }) {
+                Log.w("DaedalusSync", "Re-download: '$cleanName' no longer on device")
+                _aiError.value = "Recording no longer exists on device."
+                return@launch
+            }
+
             // downloadFile() deletes the existing local copy before it starts streaming, so a
             // failed transfer would otherwise destroy the only copy — and for a split recording
             // leave the parent and every part pointing at a file that is gone. Keep a copy to
@@ -782,9 +790,6 @@ class RecordingViewModel @JvmOverloads constructor(
                     val numParts = ((durationMs + PART_DURATION_MS - 1) / PART_DURATION_MS).toInt()
                     Log.i("DaedalusAI", "Splitting ${filename} into $numParts parts (${durationMs}ms)")
 
-                    // Remove stale parts from a previous analysis run, if any.
-                    repo.deletePartsOf(filename)
-
                     var created = 0
                     // Distinguishes "part 1 threw" from "part 1 transcribed to nothing readable"
                     // below — created==0 covers both, but only the latter is a genuine failure of
@@ -792,6 +797,7 @@ class RecordingViewModel @JvmOverloads constructor(
                     // matching the flag-free generic catch at the bottom of doAnalyzeExclusive.
                     var abortedByError = false
                     val fullTranscript = StringBuilder()
+                    val createdParts = mutableListOf<Recording>()
                     for (i in 1..numParts) {
                         val startMs = (i - 1) * PART_DURATION_MS
                         val endMs = minOf(i * PART_DURATION_MS, durationMs)
@@ -838,26 +844,30 @@ class RecordingViewModel @JvmOverloads constructor(
                             parentFilename = filename,
                             partIndex = i
                         )
-                        repo.save(partRecording)
+                        createdParts.add(partRecording)
                         created++
                         if (fullTranscript.isNotEmpty()) fullTranscript.append("\n\n")
                         fullTranscript.append(transcript)
-
-                        try {
-                            analyzeTranscript(
-                                getApplication(), llm, embedder, repo,
-                                partFilename, transcript
-                            ) { _syncProgress.value = it }
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            Log.e("DaedalusAI", "Gemma analysis of part $i failed; transcript kept", e)
-                        }
                     }
 
                     // Mark the parent as split so it shows the part count in the UI. Use the
                     // parts actually created — trailing ranges can be skipped above.
                     if (created > 0) {
+                        repo.deletePartsOf(filename)
+                        createdParts.forEach { part ->
+                            repo.save(part)
+                            try {
+                                analyzeTranscript(
+                                    getApplication(), llm, embedder, repo,
+                                    part.filename, part.transcript
+                                ) { _syncProgress.value = it }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Log.e("DaedalusAI", "Gemma analysis of part ${part.partIndex} failed; transcript kept", e)
+                            }
+                        }
+
                         // Keep the joined transcript and a summary stitched from the parts on the
                         // parent: NoteDetail, export, backup, search, the knowledge graph and
                         // Ask all read the parent row and would otherwise see it as empty. A
@@ -972,9 +982,10 @@ class RecordingViewModel @JvmOverloads constructor(
         viewModelScope.launch {
             val recording = repo.get(filename) ?: return@launch
 
-            // A part is a DB-only row sharing the parent's audio file — never touch the file
-            // or the FW920, or we'd wipe the audio the parent and sibling parts still need.
-            if (recording.parentFilename != null) {
+            // A row must skip local file delete and hardware wipe iff some other row shares this
+            // localPath and is NOT one of this row's own parts (which are cascade-deleted below).
+            val otherSharesPath = repo.countOtherSharingPath(recording.localPath, recording.filename) > 0
+            if (otherSharesPath) {
                 repo.delete(recording)
                 return@launch
             }
@@ -1037,8 +1048,9 @@ class RecordingViewModel @JvmOverloads constructor(
                 count++
                 _syncProgress.value = "Deleting $count of $total..."
 
-                // Same reasoning as deleteRecording: parts are DB-only rows.
-                if (recording.parentFilename != null) {
+                // Same reasoning as deleteRecording: avoid deleting files used by other rows.
+                val otherSharesPath = repo.countOtherSharingPath(recording.localPath, recording.filename) > 0
+                if (otherSharesPath) {
                     repo.delete(recording)
                     continue
                 }
