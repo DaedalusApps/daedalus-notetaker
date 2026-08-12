@@ -36,6 +36,12 @@ interface RecordingDao {
     @Query("DELETE FROM recordings WHERE parentFilename = :parent")
     suspend fun deletePartsOf(parent: String)
 
+    /** Every live row, child parts included — the one query that must not filter parts out.
+     *  A backup built from [getAllFlow] loses each part's title/summary/mindMap/topics, which
+     *  is hours of on-device Gemma work that a restore cannot recover. */
+    @Query("SELECT * FROM recordings WHERE pendingDelete = 0 ORDER BY createdAt DESC")
+    suspend fun getAllForBackup(): List<Recording>
+
     @Query("SELECT * FROM recordings WHERE pendingDelete = 1")
     suspend fun getPendingDeletes(): List<Recording>
 

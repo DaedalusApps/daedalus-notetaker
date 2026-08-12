@@ -13,7 +13,6 @@ import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.data.model.TodoItem
 import com.daedalus.notes.ui.screens.TODO_LOOKBACK_HOURS_DEFAULT
 import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_DEFAULT
-import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -34,7 +33,8 @@ class BackupManager(
 
     /** Builds the v2 backup payload: recordings + todos + settings. */
     suspend fun buildBackupJson(): JSONObject {
-        val recordings = repo.allRecordings.first()
+        // Child parts included: their analysis is not derivable from the parent's rollup.
+        val recordings = repo.allForBackup()
         val todos = db.todoDao().getAll()
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -58,6 +58,8 @@ class BackupManager(
                     put("durationMillis", r.durationMillis)
                     put("isLocal", r.isLocal)
                     r.deviceSerial?.let { put("deviceSerial", it) }
+                    r.parentFilename?.let { put("parentFilename", it) }
+                    put("partIndex", r.partIndex)
 
                     val topicsArr = JSONArray()
                     r.topics.forEach { topicsArr.put(it) }
@@ -115,6 +117,16 @@ class BackupManager(
 
         val currentRecordingsDir = File(context.getExternalFilesDir(null), "Recordings")
 
+        // A genuine export always carries a part's parent alongside it. A parentFilename naming
+        // anything else would create a row that no screen can reach: every list query filters
+        // parentFilename IS NULL, and getPartsOf() is only ever asked about a parent that exists.
+        // Ignore such a linkage rather than importing an invisible orphan.
+        val payloadFilenames = buildSet {
+            for (i in 0 until array.length()) {
+                array.optJSONObject(i)?.optString("filename", "")?.takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+        }
+
         for (i in 0 until array.length()) {
             val obj = array.optJSONObject(i) ?: continue
             val filename = obj.optString("filename", "")
@@ -166,6 +178,19 @@ class BackupManager(
             }
 
             val existing = repo.get(filename)
+
+            // Parts are only ever created by the app's own split logic, never promoted from a
+            // standalone recording — so an import that re-parents a row already standing on its
+            // own came from a tampered file. Refuse it: deleteRecording() treats parentFilename
+            // as "DB-only row, shares the parent's audio", and would then drop the row while
+            // leaving the audio on disk and on the FW920, reporting success either way.
+            val importedParent = obj.optString("parentFilename", "").takeIf { claimed ->
+                claimed.isNotBlank() &&
+                    claimed != filename &&
+                    claimed in payloadFilenames &&
+                    (existing == null || existing.parentFilename != null)
+            }
+
             val recording = (existing ?: Recording(filename = filename)).copy(
                 localPath = resolvedLocalPath.ifBlank { existing?.localPath ?: "" },
                 sizeBytes = obj.optLong("sizeBytes", existing?.sizeBytes ?: 0L),
@@ -183,7 +208,12 @@ class BackupManager(
                 // Absent in older (pre-#83) backups — fall back to whatever is already there
                 // rather than wiping provenance on restore.
                 deviceSerial = if (obj.has("deviceSerial") && !obj.isNull("deviceSerial"))
-                    obj.getString("deviceSerial") else existing?.deviceSerial
+                    obj.getString("deviceSerial") else existing?.deviceSerial,
+                // Absent in pre-#91 backups. Falls back to the existing row rather than null:
+                // defaulting to null/0 would promote already-stored parts to standalone recordings,
+                // and they would then show up twice in the list — once nested, once at top level.
+                parentFilename = importedParent ?: existing?.parentFilename,
+                partIndex = obj.optInt("partIndex", existing?.partIndex ?: 0)
             )
 
             repo.save(recording)

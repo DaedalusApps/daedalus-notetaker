@@ -280,6 +280,152 @@ class BackupManagerTest {
         db.close()
     }
 
+    // A split recording's parts hold their own Gemma analysis, which the parent's rollup does
+    // not contain. Exporting parents only silently drops it from every backup.
+    @Test
+    fun splitRecording_partsAndTheirAnalysis_surviveExportAndRestore() = runBlocking {
+        val source = newDb()
+        source.recordingDao().upsert(
+            Recording(filename = "long1", title = "Long meeting", transcript = "p1 p2")
+        )
+        source.recordingDao().upsert(
+            Recording(
+                filename = "long1_p1", title = "Part one", shortSummary = "first half",
+                mindMap = "map1", topics = listOf("budget"),
+                parentFilename = "long1", partIndex = 1
+            )
+        )
+        source.recordingDao().upsert(
+            Recording(
+                filename = "long1_p2", title = "Part two", shortSummary = "second half",
+                mindMap = "map2", topics = listOf("hiring"),
+                parentFilename = "long1", partIndex = 2
+            )
+        )
+
+        val json = BackupManager(context, source).buildBackupJson()
+        assertEquals(3, json.getJSONArray("recordings").length())
+        source.close()
+
+        val target = newDb()
+        assertEquals(3, BackupManager(context, target).importFromJson(json))
+
+        // The parent alone appears at top level; parts stay nested under it.
+        val topLevel = target.recordingDao().getAllFlow().first()
+        assertEquals(listOf("long1"), topLevel.map { it.filename })
+
+        val parts = target.recordingDao().getPartsOf("long1")
+        assertEquals(listOf("long1_p1", "long1_p2"), parts.map { it.filename })
+        assertEquals(listOf(1, 2), parts.map { it.partIndex })
+        assertEquals("Part one", parts[0].title)
+        assertEquals("first half", parts[0].shortSummary)
+        assertEquals("map2", parts[1].mindMap)
+        assertEquals(listOf("hiring"), parts[1].topics)
+        target.close()
+    }
+
+    // Restoring a backup written before parts existed must not promote stored parts to
+    // standalone recordings — they would then show up twice, nested and at top level.
+    @Test
+    fun importWithoutPartKeys_leavesAnExistingRowsPartLinkageIntact() = runBlocking {
+        val db = newDb()
+        db.recordingDao().upsert(
+            Recording(filename = "long1", title = "Long meeting")
+        )
+        db.recordingDao().upsert(
+            Recording(filename = "long1_p1", title = "Part one", parentFilename = "long1", partIndex = 1)
+        )
+
+        val oldStyle = JSONObject().apply {
+            put("backupVersion", 2)
+            put("recordings", JSONArray().apply {
+                put(JSONObject().apply { put("filename", "long1_p1"); put("title", "Part one") })
+            })
+        }
+        BackupManager(context, db).importFromJson(oldStyle)
+
+        assertEquals(listOf("long1_p1"), db.recordingDao().getPartsOf("long1").map { it.filename })
+        assertEquals(listOf("long1"), db.recordingDao().getAllFlow().first().map { it.filename })
+        db.close()
+    }
+
+    // A part whose parent is absent from the payload can never be reached: every list query
+    // filters parentFilename IS NULL, and nothing would ever call getPartsOf() for that name.
+    @Test
+    fun importWithParentMissingFromPayload_dropsTheLinkageInsteadOfOrphaning() = runBlocking {
+        val db = newDb()
+        val json = JSONObject().apply {
+            put("backupVersion", 2)
+            put("recordings", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("filename", "stray")
+                    put("title", "Stray")
+                    put("parentFilename", "nosuchparent")
+                    put("partIndex", 1)
+                })
+            })
+        }
+        BackupManager(context, db).importFromJson(json)
+
+        val stray = db.recordingDao().get("stray")
+        assertEquals(null, stray?.parentFilename)
+        assertEquals(listOf("stray"), db.recordingDao().getAllFlow().first().map { it.filename })
+        db.close()
+    }
+
+    // deleteRecording() reads parentFilename as "DB-only row sharing the parent's audio" and skips
+    // both the file delete and the FW920 wipe. A tampered backup that re-parents a standalone
+    // recording would therefore make its later deletion a silent no-op — the row vanishes from the
+    // list while the audio survives on disk and on the device. A decoy entry is enough to satisfy
+    // the payload check, so the existing row's own state has to be the deciding factor.
+    @Test
+    fun importCannotReparentAnExistingStandaloneRecording() = runBlocking {
+        val db = newDb()
+        db.recordingDao().upsert(
+            Recording(filename = "victim", title = "Victim", localPath = "/audio/victim")
+        )
+
+        val tampered = JSONObject().apply {
+            put("backupVersion", 2)
+            put("recordings", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("filename", "victim")
+                    put("parentFilename", "decoy")
+                    put("partIndex", 1)
+                })
+                put(JSONObject().apply { put("filename", "decoy") })
+            })
+        }
+        BackupManager(context, db).importFromJson(tampered)
+
+        assertEquals(null, db.recordingDao().get("victim")?.parentFilename)
+        assertTrue(db.recordingDao().getAllFlow().first().any { it.filename == "victim" })
+        db.close()
+    }
+
+    // The legitimate restore this must not break: parts absent locally (a fresh install, or after
+    // Wipe Local Analysis removed the part rows) still import with their linkage.
+    @Test
+    fun importRestoresParts_whenTheyDoNotExistLocallyYet() = runBlocking {
+        val db = newDb()
+        db.recordingDao().upsert(Recording(filename = "long1", title = "Long meeting"))
+
+        val json = JSONObject().apply {
+            put("backupVersion", 2)
+            put("recordings", JSONArray().apply {
+                put(JSONObject().apply { put("filename", "long1"); put("title", "Long meeting") })
+                put(JSONObject().apply {
+                    put("filename", "long1_p1"); put("title", "Part one")
+                    put("parentFilename", "long1"); put("partIndex", 1)
+                })
+            })
+        }
+        BackupManager(context, db).importFromJson(json)
+
+        assertEquals(listOf("long1_p1"), db.recordingDao().getPartsOf("long1").map { it.filename })
+        db.close()
+    }
+
     @Test
     fun settingsRestore_appliesOnlyKeysPresent() = runBlocking {
         // Pre-existing value that must survive an import that omits its key.

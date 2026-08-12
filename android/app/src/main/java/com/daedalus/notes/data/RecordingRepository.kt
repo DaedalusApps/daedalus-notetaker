@@ -28,6 +28,8 @@ class RecordingRepository(private val dao: RecordingDao) {
 
     suspend fun deletePartsOf(filename: String) = dao.deletePartsOf(filename)
 
+    suspend fun allForBackup(): List<Recording> = dao.getAllForBackup()
+
     suspend fun getPendingDeletes(): List<Recording> = dao.getPendingDeletes()
 
     suspend fun markPendingDelete(filename: String) = dao.updatePendingDelete(filename, true)
