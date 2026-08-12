@@ -690,4 +690,24 @@ class RecordingViewModelTest {
             })
         }
     }
+
+    @Test
+    fun redownloadAndAnalyze_whenFileDeletedFromDevice_showsError() = runTest {
+        val filename = "deleted_recording.mp3"
+        coEvery { repo.get(filename) } returns Recording(filename, isLocal = false)
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "other_recording.mp3", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(
+                connectionState = ConnectionState.CONNECTED,
+                files = listOf(entry)
+            )
+        )
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { bleManager.downloadFile(any(), any()) }
+        assertEquals("Recording no longer exists on device.", viewModel.aiError.value)
+    }
 }

@@ -42,4 +42,35 @@ class RecordingDaoTest {
 
         assertEquals(listOf("after.mp3"), result.map { it.filename })
     }
+
+    @Test
+    fun countOtherSharingPath_parentAndChild_returnsCorrectCounts() = runBlocking {
+        val path = "/data/file.mp3"
+        dao.upsert(Recording(filename = "parent.mp3", localPath = path))
+        dao.upsert(Recording(filename = "child.mp3", localPath = path, parentFilename = "parent.mp3"))
+
+        // For child, parent shares it: returns 1
+        assertEquals(1, dao.countOtherSharingPath(path, "child.mp3"))
+
+        // For parent, child is excluded because its parentFilename == parent.mp3: returns 0
+        assertEquals(0, dao.countOtherSharingPath(path, "parent.mp3"))
+    }
+
+    @Test
+    fun countOtherSharingPath_twoStandalone_returnsOneForBoth() = runBlocking {
+        val path = "/data/standalone.mp3"
+        dao.upsert(Recording(filename = "file1.mp3", localPath = path))
+        dao.upsert(Recording(filename = "file2.mp3", localPath = path))
+
+        assertEquals(1, dao.countOtherSharingPath(path, "file1.mp3"))
+        assertEquals(1, dao.countOtherSharingPath(path, "file2.mp3"))
+    }
+
+    @Test
+    fun countOtherSharingPath_standaloneAlone_returnsZero() = runBlocking {
+        val path = "/data/alone.mp3"
+        dao.upsert(Recording(filename = "alone.mp3", localPath = path))
+
+        assertEquals(0, dao.countOtherSharingPath(path, "alone.mp3"))
+    }
 }

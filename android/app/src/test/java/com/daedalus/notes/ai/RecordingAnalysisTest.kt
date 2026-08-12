@@ -17,6 +17,14 @@ import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import com.daedalus.notes.data.model.Recording
+import com.daedalus.notes.viewmodel.RecordingViewModel
+import com.daedalus.notes.ai.TranscriptionService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.resetMain
+import java.io.File
 
 class RecordingAnalysisTest {
 
@@ -215,6 +223,61 @@ class RecordingAnalysisTest {
                 shortSummary = "",
                 topics = emptyList()
             )
+        }
+    }
+
+    @Test
+    fun multiPartAnalysis_abortsMidway_doesNotDeleteExistingParts() = runTest {
+        val transcriber = mockk<TranscriptionService>()
+        val db = mockk<com.daedalus.notes.data.db.AppDatabase>(relaxed = true)
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        
+        try {
+            // Parent recording > 15 mins
+            val parent = Recording(
+                filename = "long.mp3",
+                localPath = "/fake/long.mp3",
+                durationMillis = 20L * 60 * 1000 // 20 mins -> 2 parts
+            )
+            val fileMock = mockk<File>()
+            every { fileMock.exists() } returns true
+            every { fileMock.absolutePath } returns "/fake/long.mp3"
+            
+            every { repo.allRecordings } returns kotlinx.coroutines.flow.flowOf(emptyList())
+            every { repo.parentsWithParts } returns kotlinx.coroutines.flow.flowOf(emptyList())
+            coEvery { repo.get("long.mp3") } returns parent
+            coEvery { repo.countOtherSharingPath(any(), any()) } returns 0
+            
+            // First part succeeds
+            coEvery { transcriber.transcribeRange(any(), 0L, 15L * 60 * 1000) } returns "Part 1 transcript"
+            // Second part fails with CancellationException
+            coEvery { transcriber.transcribeRange(any(), 15L * 60 * 1000, 20L * 60 * 1000) } throws kotlinx.coroutines.CancellationException("Cancelled")
+            
+            val viewModel = RecordingViewModel(
+                application = application,
+                db = db,
+                repo = repo,
+                llm = llm,
+                transcriber = transcriber,
+                embedder = embedder,
+                ioDispatcher = dispatcher,
+                audioRecorderProvider = { mockk(relaxed = true) },
+                timerDispatcher = dispatcher
+            )
+            coEvery { transcriber.transcribeRange(any(), 15L * 60 * 1000, 20L * 60 * 1000) } throws kotlinx.coroutines.CancellationException("Cancelled")
+            
+            try {
+                viewModel.analyze("long.mp3")
+                testScheduler.advanceUntilIdle()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Expected
+            }
+            
+            // Verify deletePartsOf was never called
+            coVerify(exactly = 0) { repo.deletePartsOf("long.mp3") }
+        } finally {
+            Dispatchers.resetMain()
         }
     }
 }
