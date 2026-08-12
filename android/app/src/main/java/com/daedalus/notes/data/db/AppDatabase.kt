@@ -11,7 +11,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.data.model.TodoItem
 
-@Database(entities = [Recording::class, TodoItem::class], version = 11, exportSchema = true)
+@Database(entities = [Recording::class, TodoItem::class], version = 12, exportSchema = true)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
 
@@ -71,10 +71,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        internal val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE recordings ADD COLUMN analysisFailed INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         @VisibleForTesting
         internal fun buildDatabase(context: Context, name: String): AppDatabase {
             return Room.databaseBuilder(context, AppDatabase::class.java, name)
-                .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                .addMigrations(
+                    MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
+                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12
+                )
                 .build()
         }
 

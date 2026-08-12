@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Environment
 import android.util.Log
 import androidx.annotation.RequiresApi
+import androidx.annotation.VisibleForTesting
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
@@ -453,7 +454,8 @@ class RecordingViewModel @JvmOverloads constructor(
         ))
     }
 
-    private suspend fun autoAnalyzePending() {
+    @VisibleForTesting
+    internal suspend fun autoAnalyzePending() {
         val context = getApplication<Application>()
         val prefs = context.getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
         val autoProcess = prefs.getBoolean("auto_process", false)
@@ -463,7 +465,11 @@ class RecordingViewModel @JvmOverloads constructor(
         // Fetch current list from repo
         val recordings = repo.allRecordings.first()
         for (recording in recordings) {
-            if (recording.summary.isBlank() && recording.localPath.isNotBlank()) {
+            // analysisFailed skips the ones that already ran and produced nothing usable. Without
+            // it, audio that can never yield a transcript is re-attempted on every sync — and the
+            // costly failures are the ones that fail *after* a full Whisper pass, not the cheap
+            // ones. A re-fetch clears the flag, and manual analysis never consults it.
+            if (recording.summary.isBlank() && !recording.analysisFailed && recording.localPath.isNotBlank()) {
                 val file = File(recording.localPath)
                 if (file.exists()) {
                     _syncProgress.value = "Auto-analyzing ${recording.filename}…"
@@ -710,11 +716,30 @@ class RecordingViewModel @JvmOverloads constructor(
                     AudioUtils.getDurationMillis(downloaded.absolutePath)
                 },
                 transcript = "", summary = "", mindMap = "",
-                title = "", shortSummary = "", topics = emptyList(), embedding = null
+                title = "", shortSummary = "", topics = emptyList(), embedding = null,
+                // The flag described the old copy of the audio. This is a different file, and a
+                // re-fetch is exactly how a recording written off as unreadable gets rescued.
+                analysisFailed = false
             ))
 
             doAnalyze(filename)
         }
+    }
+
+    /**
+     * Both analysis paths — split and whole-file — end here when nothing readable came out.
+     * Only a content-level failure is remembered: a missing model is an environment problem the
+     * next sync may well find fixed, and flagging it would stop auto-analysis from ever retrying
+     * once the model is installed. See [Recording.analysisFailed].
+     */
+    private suspend fun reportNothingReadable(filename: String) {
+        val modelReady = isWhisperReady(getApplication())
+        _aiError.value = if (modelReady) {
+            "No speech or readable content detected in this recording."
+        } else {
+            "Transcription model not found. Please download it in Settings."
+        }
+        if (modelReady) repo.updateAnalysisFailed(filename, true)
     }
 
     /** Waits for any in-flight transfer or analysis; see [heavyWork]. */
@@ -854,7 +879,8 @@ class RecordingViewModel @JvmOverloads constructor(
                                 "Split into 1 part. Tap to expand."
                             } else {
                                 "Split into $created parts of ~15 min each. Tap to expand."
-                            }
+                            },
+                            analysisFailed = false
                         ))
 
                         // Embed the parts' own summaries, not the "Split into N parts" boilerplate.
@@ -866,11 +892,7 @@ class RecordingViewModel @JvmOverloads constructor(
                             embedder.embed(embText)?.let { repo.updateEmbedding(filename, it) }
                         }
                     } else {
-                        _aiError.value = if (isWhisperReady(getApplication())) {
-                            "No speech or readable content detected in this recording."
-                        } else {
-                            "Transcription model not found. Please download it in Settings."
-                        }
+                        reportNothingReadable(filename)
                     }
                     _currentNote.value = repo.get(filename)
                     return
@@ -895,12 +917,7 @@ class RecordingViewModel @JvmOverloads constructor(
                 repo.save(note.copy(transcript = transcript))
 
                 if (!isTranscriptReadable(transcript)) {
-                    val modelReady = isWhisperReady(getApplication())
-                    _aiError.value = if (modelReady) {
-                        "No speech or readable content detected in this recording."
-                    } else {
-                        "Transcription model not found. Please download it in Settings."
-                    }
+                    reportNothingReadable(filename)
                     return
                 }
 
@@ -909,6 +926,9 @@ class RecordingViewModel @JvmOverloads constructor(
                 analyzeTranscript(getApplication(), llm, embedder, repo, filename, transcript) {
                     _syncProgress.value = it
                 }
+                // The split path above clears the flag inside its own parent save rather than
+                // paying for a second write here.
+                repo.updateAnalysisFailed(filename, false)
 
                 _currentNote.value = repo.get(filename)
             } catch (e: CancellationException) {

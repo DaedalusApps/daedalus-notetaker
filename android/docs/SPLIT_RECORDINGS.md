@@ -8,7 +8,8 @@ The original audio file is preserved intact for full playback.
 ## Architecture
 
 ### Data Model
-Two columns added to `Recording` entity (DB version 11):
+Two columns added to `Recording` entity (DB version 11; the DB is now at 12, see
+*Unanalyzable recordings*):
 - `parentFilename: String?` — non-null marks this as a child part of a longer recording
 - `partIndex: Int` — 1-based part number (0 = standalone recording)
 
@@ -83,6 +84,21 @@ Decoding still *starts* at sample 0 for every part — there is no `MediaExtract
 recording of N parts decodes N(N+1)/2 windows' worth of audio. Adding the seek means re-deriving
 the absolute sample position from `extractor.sampleTime` after landing on a sync frame; get it
 wrong and part boundaries drift silently, so it wants its own verification pass.
+
+### Unanalyzable recordings
+`autoAnalyzePending()` selects on a blank summary, so a recording that can never produce a readable
+transcript — corrupt audio, no speech — was re-attempted on every sync forever. Cheap when it fails
+in 2s; expensive when it fails after a full Whisper pass, which is exactly what the costly cases do.
+`Recording.analysisFailed` (DB v12) records the attempt and is excluded from the selection.
+
+It is set only on *content-level* failure — an unreadable transcript, or a split that produced zero
+parts — and only when the Whisper model is actually installed. A missing model is an environment
+problem the next sync may find fixed, so it deliberately leaves the flag alone. The generic
+exception handler does not set it either: transient failures stay retryable.
+
+Cleared by a successful analysis, by `wipeAllAnalysis()`, and by `redownloadAndAnalyze()` — the
+re-fetch is how a recording written off as unreadable gets rescued, so it must earn a fresh attempt.
+Manual analysis never consults the flag, so the card's own Analyze action always runs.
 
 ### Backup
 `BackupManager` exports part rows alongside their parents via `RecordingDao.getAllForBackup()`

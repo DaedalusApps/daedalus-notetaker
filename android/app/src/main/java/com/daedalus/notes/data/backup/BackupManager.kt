@@ -60,6 +60,7 @@ class BackupManager(
                     r.deviceSerial?.let { put("deviceSerial", it) }
                     r.parentFilename?.let { put("parentFilename", it) }
                     put("partIndex", r.partIndex)
+                    put("analysisFailed", r.analysisFailed)
 
                     val topicsArr = JSONArray()
                     r.topics.forEach { topicsArr.put(it) }
@@ -213,7 +214,8 @@ class BackupManager(
                 // defaulting to null/0 would promote already-stored parts to standalone recordings,
                 // and they would then show up twice in the list — once nested, once at top level.
                 parentFilename = importedParent ?: existing?.parentFilename,
-                partIndex = obj.optInt("partIndex", existing?.partIndex ?: 0)
+                partIndex = obj.optInt("partIndex", existing?.partIndex ?: 0),
+                analysisFailed = obj.optBoolean("analysisFailed", existing?.analysisFailed ?: false)
             )
 
             repo.save(recording)

@@ -23,5 +23,9 @@ data class Recording(
     val pendingDelete: Boolean = false,
     val deviceSerial: String? = null,    // serial of the FW920 this was synced from; null for phone-local recordings
     val parentFilename: String? = null,  // non-null = this is a part of a longer recording
-    val partIndex: Int = 0               // 0 = standalone, 1+ = part number
+    val partIndex: Int = 0,              // 0 = standalone, 1+ = part number
+    // Analysis ran and produced nothing usable. Auto-analysis selects on a blank summary, so
+    // without this a recording that can never transcribe is re-attempted on every single sync.
+    // Cleared by a successful analysis and by a re-fetch; manual analysis ignores it entirely.
+    val analysisFailed: Boolean = false
 )

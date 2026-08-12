@@ -67,7 +67,8 @@ interface RecordingDao {
     @Delete
     suspend fun delete(recording: Recording)
 
-    @Query("UPDATE recordings SET transcript = '', summary = '', mindMap = '', title = '', shortSummary = '', topics = '', embedding = NULL")
+    @Query("""UPDATE recordings SET transcript = '', summary = '', mindMap = '', title = '',
+    shortSummary = '', topics = '', embedding = NULL, analysisFailed = 0""")
     suspend fun wipeAllAnalysis()
 }
 

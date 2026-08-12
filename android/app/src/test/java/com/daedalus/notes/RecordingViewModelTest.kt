@@ -28,6 +28,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import androidx.arch.core.executor.testing.InstantTaskExecutorRule
+import java.io.File
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class RecordingViewModelTest {
@@ -353,6 +354,31 @@ class RecordingViewModelTest {
         coVerify(exactly = 1) { repo.wipeAllAnalysis() }
         assertNull(errorMessage, errorMessage)
         assertEquals(true, successCalled)
+    }
+
+    // A recording that can never yield a readable transcript used to be re-attempted on every
+    // sync, forever — and the costly failures are the ones that fail after a full Whisper pass.
+    // analysisFailed records the attempt; doAnalyze's first act is repo.get(filename), so that
+    // call is the signal that an analysis was attempted at all.
+    @Test
+    fun autoAnalyzePending_skipsRecordingsAlreadyWrittenOffAsUnanalyzable() = runTest {
+        val audio = File.createTempFile("auto-analyze", ".mp3").also { it.deleteOnExit() }
+        val prefs = mockk<android.content.SharedPreferences>(relaxed = true)
+        every { application.getSharedPreferences(any(), any()) } returns prefs
+        every { prefs.getBoolean("auto_process", false) } returns true
+
+        every { repo.allRecordings } returns flowOf(
+            listOf(
+                Recording(filename = "fresh", localPath = audio.absolutePath),
+                Recording(filename = "written-off", localPath = audio.absolutePath, analysisFailed = true)
+            )
+        )
+
+        viewModel.autoAnalyzePending()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repo.get("fresh") }
+        coVerify(exactly = 0) { repo.get("written-off") }
     }
 
     @Test

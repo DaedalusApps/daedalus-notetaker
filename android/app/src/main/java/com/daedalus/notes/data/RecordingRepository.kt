@@ -15,6 +15,12 @@ class RecordingRepository(private val dao: RecordingDao) {
 
     suspend fun save(recording: Recording) = dao.upsert(recording)
 
+    /** Re-reads before writing: analysis writes to this row throughout a run. */
+    suspend fun updateAnalysisFailed(filename: String, failed: Boolean) {
+        val r = dao.get(filename) ?: return
+        if (r.analysisFailed != failed) dao.upsert(r.copy(analysisFailed = failed))
+    }
+
     suspend fun updateTranscript(filename: String, transcript: String) {
         val r = dao.get(filename) ?: Recording(filename = filename)
         dao.upsert(r.copy(transcript = transcript))
