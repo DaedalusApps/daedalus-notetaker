@@ -31,6 +31,8 @@ import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.backup.BackupManager
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.AudioUtils
+import com.daedalus.notes.data.model.Mp3FrameScan
+import com.daedalus.notes.data.model.Mp3ScanResult
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.recording.AudioRecorder
 import com.daedalus.notes.ui.mindmap.GlobalGraph
@@ -128,6 +130,9 @@ class RecordingViewModel @JvmOverloads constructor(
 
     private val _currentNote = MutableStateFlow<Recording?>(null)
     val currentNote: StateFlow<Recording?> = _currentNote
+
+    private val _currentScanResult = MutableStateFlow<Mp3ScanResult?>(null)
+    val currentScanResult: StateFlow<Mp3ScanResult?> = _currentScanResult
 
     private val _exportIntent = MutableStateFlow<Intent?>(null)
     val exportIntent: StateFlow<Intent?> = _exportIntent
@@ -614,7 +619,13 @@ class RecordingViewModel @JvmOverloads constructor(
 
     fun loadNote(filename: String) {
         viewModelScope.launch {
-            _currentNote.value = repo.get(filename)
+            _currentScanResult.value = null
+            val note = repo.get(filename)
+            _currentNote.value = note
+            _currentScanResult.value = withContext(ioDispatcher) {
+                val file = note?.localPath?.let { File(it) }?.takeIf { it.exists() }
+                file?.let { Mp3FrameScan.scan(it) }
+            }
         }
     }
 
@@ -735,6 +746,7 @@ class RecordingViewModel @JvmOverloads constructor(
             ))
 
             doAnalyze(filename)
+            loadNote(filename)
         }
     }
 

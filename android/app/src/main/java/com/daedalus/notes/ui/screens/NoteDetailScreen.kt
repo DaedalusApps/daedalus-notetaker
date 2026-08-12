@@ -73,6 +73,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import java.io.File
+import java.util.Locale
 import kotlinx.coroutines.delay
 import com.daedalus.notes.ui.components.DeviceStatusRow
 import com.daedalus.notes.ui.mindmap.MindMapCanvas
@@ -95,6 +96,7 @@ fun NoteDetailScreen(
     val aiError by recordingViewModel.aiError.collectAsState()
     val askAnswer by recordingViewModel.askAnswer.collectAsState()
     val exportIntent by recordingViewModel.exportIntent.collectAsState()
+    val scanResult by recordingViewModel.currentScanResult.collectAsState()
 
     // Launch share sheet when export intent is ready
     LaunchedEffect(exportIntent) {
@@ -287,10 +289,27 @@ fun NoteDetailScreen(
                                 val file = note?.localPath?.let { File(it) }
                                     ?: File(context.getExternalFilesDir(null), "Recordings/$filename")
                                 if (file.exists()) {
-                                    player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
+                                    val isPart = note?.parentFilename != null && (note?.partIndex ?: 0) > 0
+                                    val partDuration = note?.durationMillis ?: (15L * 60 * 1000)
+                                    val startMs = if (isPart) ((note?.partIndex ?: 1) - 1) * 15L * 60 * 1000 else 0L
+
+                                    val mediaItem = if (isPart) {
+                                        val clipping = MediaItem.ClippingConfiguration.Builder()
+                                            .setStartPositionMs(startMs)
+                                            .setEndPositionMs(startMs + partDuration)
+                                            .build()
+                                        MediaItem.Builder()
+                                            .setUri(Uri.fromFile(file))
+                                            .setClippingConfiguration(clipping)
+                                            .build()
+                                    } else {
+                                        MediaItem.fromUri(Uri.fromFile(file))
+                                    }
+
+                                    player.setMediaItem(mediaItem)
                                     player.prepare()
                                     player.play()
-                                    playbackDuration = note?.durationMillis ?: 0L
+                                    playbackDuration = if (isPart) partDuration else (note?.durationMillis ?: 0L)
                                     isPlaying = true
                                 } else {
                                     Log.e("Playback", "File not found: ${file.absolutePath}")
@@ -360,6 +379,30 @@ fun NoteDetailScreen(
                 onScan = { /* Detail screen usually doesn't trigger scan */ },
                 onCancelScan = { bleManager.disconnect() }
             )
+
+            if (scanResult != null && scanResult!!.gapCount > 0 && scanResult!!.gapBytes > 0) {
+                androidx.compose.material3.Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "⚠️ Detected ${scanResult!!.gapCount} data gap(s) (${String.format(Locale.US, "%.1f", scanResult!!.gapPercent)}% lost).",
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { recordingViewModel.redownloadAndAnalyze(filename, bleManager) },
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error,
+                                contentColor = MaterialTheme.colorScheme.onError
+                            )
+                        ) {
+                            Text("Re-fetch audio")
+                        }
+                    }
+                }
+            }
 
             TabRow(selectedTabIndex = selectedTab) {
                 listOf("Transcript", "Summary", "Mind Map", "Ask").forEachIndexed { index, title ->

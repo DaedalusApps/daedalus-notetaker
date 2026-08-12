@@ -136,7 +136,13 @@ class TranscriptionService(private val context: Context) {
             else (endSample - startSample).coerceIn(1L, Int.MAX_VALUE.toLong())
         var pcmBuffer = FloatArray(expectedSamples.toInt())
         var pcmSize = 0
-        var decodedSamples = 0L  // absolute position in the source, including skipped samples
+        if (startMs > 0) {
+            val startUs = startMs * 1000L
+            extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+        }
+        var decodedSamples = if (startMs > 0 && extractor.sampleTime >= 0) {
+            (extractor.sampleTime * TARGET_SAMPLE_RATE / 1_000_000L)
+        } else 0L
         val info = MediaCodec.BufferInfo()
         var inputDone = false
         var outputDone = false
