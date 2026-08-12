@@ -367,12 +367,12 @@ class RecordingViewModelTest {
         every { application.getSharedPreferences(any(), any()) } returns prefs
         every { prefs.getBoolean("auto_process", false) } returns true
 
-        every { repo.allRecordings } returns flowOf(
-            listOf(
-                Recording(filename = "fresh", localPath = audio.absolutePath),
-                Recording(filename = "written-off", localPath = audio.absolutePath, analysisFailed = true)
-            )
+        val testRecordings = listOf(
+            Recording(filename = "fresh", localPath = audio.absolutePath),
+            Recording(filename = "written-off", localPath = audio.absolutePath, analysisFailed = true)
         )
+        every { repo.allRecordings } returns flowOf(testRecordings)
+        coEvery { repo.getPendingRecordings() } returns testRecordings.filter { it.summary.isBlank() && !it.analysisFailed && it.parentFilename == null }
 
         viewModel.autoAnalyzePending()
         advanceUntilIdle()
