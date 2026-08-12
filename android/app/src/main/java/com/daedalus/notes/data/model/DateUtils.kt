@@ -15,6 +15,24 @@ object DateUtils {
     }
 
     /**
+     * Parses epoch millis from filenames like "20260812113220.mp3" or "20260812113220".
+     * Falls back to System.currentTimeMillis() if unparseable.
+     */
+    fun parseEpochMillisFromFilename(filename: String): Long {
+        val base = filename.substringBeforeLast(".")
+        val match = Regex("""(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})""").find(base) ?: return System.currentTimeMillis()
+        val (year, month, day, hour, min, sec) = match.destructured
+        return try {
+            val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+            cal.set(year.toInt(), month.toInt() - 1, day.toInt(), hour.toInt(), min.toInt(), sec.toInt())
+            cal.set(java.util.Calendar.MILLISECOND, 0)
+            cal.timeInMillis
+        } catch (e: Exception) {
+            System.currentTimeMillis()
+        }
+    }
+
+    /**
      * True for text-only conversation notes, which are the only files named
      * "conv_20260804080519.md" (or "conv_20260804080519.ended.md" once the session has ended).
      * Matches the whole name rather than just the "conv_" prefix so an imported audio file that

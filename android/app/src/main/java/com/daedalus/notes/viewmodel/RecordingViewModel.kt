@@ -31,6 +31,7 @@ import com.daedalus.notes.data.RecordingRepository
 import com.daedalus.notes.data.backup.BackupManager
 import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.AudioUtils
+import com.daedalus.notes.data.model.DateUtils
 import com.daedalus.notes.data.model.Mp3FrameScan
 import com.daedalus.notes.data.model.Mp3ScanResult
 import com.daedalus.notes.data.model.Recording
@@ -202,14 +203,19 @@ class RecordingViewModel @JvmOverloads constructor(
             .getSharedPreferences("daedalus_prefs", Context.MODE_PRIVATE)
             .getBoolean("use_bluetooth_mic", false)
 
-        // Heal missing durations for already synced files
+        // Heal missing durations and timestamps for already synced files
         viewModelScope.launch(Dispatchers.IO) {
             repo.allRecordings.first().forEach { recording ->
-                if (recording.durationMillis == 0L && recording.localPath.isNotBlank()) {
-                    val duration = AudioUtils.getDurationMillis(recording.localPath)
-                    if (duration > 0) {
-                        repo.save(recording.copy(durationMillis = duration))
-                    }
+                val dateMillis = DateUtils.parseEpochMillisFromFilename(recording.filename)
+                val duration = if (recording.durationMillis == 0L && recording.localPath.isNotBlank()) {
+                    AudioUtils.getDurationMillis(recording.localPath)
+                } else recording.durationMillis
+
+                if (duration != recording.durationMillis || recording.createdAt != dateMillis) {
+                    repo.save(recording.copy(
+                        durationMillis = duration,
+                        createdAt = dateMillis
+                    ))
                 }
             }
         }
@@ -450,11 +456,13 @@ class RecordingViewModel @JvmOverloads constructor(
         durationMillis: Long,
         deviceSerial: String?
     ) {
-        val recording = existing ?: Recording(filename = filename)
+        val calculatedCreatedAt = DateUtils.parseEpochMillisFromFilename(filename)
+        val recording = existing ?: Recording(filename = filename, createdAt = calculatedCreatedAt)
         repo.save(recording.copy(
             localPath = localPath,
             sizeBytes = sizeBytes,
             durationMillis = durationMillis,
+            createdAt = calculatedCreatedAt,
             deviceSerial = deviceSerial ?: existing?.deviceSerial,
             // This function only ever runs when fresh audio just landed, so a flag describing
             // the old copy no longer applies — otherwise a clean re-sync after pruning a bad
