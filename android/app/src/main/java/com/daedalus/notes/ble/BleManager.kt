@@ -15,6 +15,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.daedalus.notes.data.model.Mp3FrameScan
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -757,13 +758,25 @@ class BleManager(private val context: Context) {
         // A raw byte stream should be almost entirely one MTU-sized chunk repeated, with a
         // single odd-sized tail. Several distinct sizes, or a size that never matches the MTU,
         // would mean the device frames its payloads and we are storing the framing as audio.
+        var frameScanSuffix = ""
+        if (totalBytes > 0) {
+            try {
+                val scanResult = Mp3FrameScan.scan(localFile)
+                frameScanSuffix = ", frameScan=${scanResult.framesOk} frames, " +
+                    "${scanResult.gapCount} gaps, ${scanResult.gapBytes} bytes " +
+                    "(${String.format(java.util.Locale.US, "%.2f", scanResult.gapPercent)}%)"
+            } catch (e: Throwable) {
+                Log.w("BleAudit", "frameScan failed for '$cleanName': ${e.message}")
+            }
+        }
         Log.i(
             "BleAudit",
             "transfer done: $chunkCount chunks, $totalBytes bytes, mtu=$negotiatedMtu, " +
                 "size histogram=" +
                 chunkSizes.entries.sortedByDescending { it.value }
                     .joinToString(", ") { "${it.key}B x${it.value}" } +
-                ", first60=" + first60ChunkSizes.joinToString(",")
+                ", first60=" + first60ChunkSizes.joinToString(",") +
+                frameScanSuffix
         )
         return if (totalBytes > 0) localFile else null
     }
