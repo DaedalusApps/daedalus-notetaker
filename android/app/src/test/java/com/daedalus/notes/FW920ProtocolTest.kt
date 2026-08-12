@@ -41,6 +41,23 @@ class FW920ProtocolTest {
     }
 
     @Test
+    fun rawLogcatPacket0x0A_checkParsing() {
+        val raw0A = byteArrayOf(
+            0xA0.toByte(), 0x0A.toByte(), 0x01.toByte(), 0x0A.toByte(), 0x14.toByte(),
+            0x00.toByte(), 0x32.toByte(), 0x30.toByte(), 0x32.toByte(), 0x36.toByte(),
+            0x30.toByte(), 0x38.toByte(), 0x31.toByte(), 0x32.toByte(), 0x31.toByte(),
+            0x30.toByte(), 0x32.toByte(), 0x37.toByte(), 0x34.toByte(), 0x36.toByte(),
+            0x00.toByte(), 0x09.toByte(), 0x2B.toByte(), 0x72.toByte(), 0x01.toByte(),
+            0x10.toByte(), 0xB7.toByte()
+        )
+        val parsed = parseResponse(raw0A)
+        assertTrue("Expected FileList, got $parsed", parsed is ParsedResponse.FileList)
+        val entry = (parsed as ParsedResponse.FileList).entry
+        assertEquals("20260812102746", entry?.filename)
+        assertEquals(24259337L, entry?.sizeBytes)
+    }
+
+    @Test
     fun validControlPacket_parsedAsCommand() {
         val parsed = parseResponse(buildPacket(0x05, statusPayload(isRecording = true)))
         assertTrue(parsed is ParsedResponse.Status)
