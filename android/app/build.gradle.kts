@@ -172,6 +172,12 @@ val downloadSherpaOnnx by tasks.registering {
 
 tasks.named("preBuild") { dependsOn(downloadSherpaOnnx) }
 
+// Forward -Dmp3.fixtures to the test JVM (Gradle doesn't do this automatically) so the
+// real-file cross-check test in Mp3FrameScanTest can find local device recordings.
+tasks.withType<Test> {
+    systemProperty("mp3.fixtures", providers.systemProperty("mp3.fixtures").getOrElse(""))
+}
+
 // Reinstall the app after instrumented tests (test runner uninstalls it as cleanup)
 tasks.whenTaskAdded {
     if (name == "connectedDebugAndroidTest") {
