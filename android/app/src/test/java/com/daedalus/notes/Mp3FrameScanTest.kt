@@ -196,6 +196,53 @@ class Mp3FrameScanTest {
         assertTrue(result.gapCount > 0)
     }
 
+    // ---- #100 follow-up round 4, HIGH: total loss (zero decodable frames) must not read clean ----
+    //
+    // massiveTrailingZeroRun_afterFewFrames_IS_reportedAsGap above only proves the >=1-surviving-
+    // frame case (it uses stream(2)). Removing the homogeneous-run carve-out closed the
+    // partial-loss blind spot but left total loss untouched: when NO frame chains anywhere,
+    // scan() took an entirely separate early-return path that still reports Mp3ScanResult(0, 0,
+    // 0L, ...) — perfectly clean — for a file that is completely worthless. That is the one case
+    // where the FW920 copy is most likely still recoverable and the banner is most needed.
+
+    @Test
+    fun totalLoss_noFrameAnywhere_isReportedAsGapNotClean() {
+        // Pure junk with no 0xFF byte anywhere: zero frames found, same as a 920KB transfer of
+        // all-zero bytes or a shifted/garbled stream that never happens to sync.
+        val data = ByteArray(920_000) { 0x00 }
+        val result = Mp3FrameScan.scan(data)
+        assertEquals("nothing decoded, so framesOk must be 0", 0, result.framesOk)
+        assertTrue(
+            "total loss must be reported as a gap so NoteDetailScreen's banner (gapCount > 0 && " +
+                "gapBytes > 0) actually fires and offers a re-fetch",
+            result.gapCount > 0
+        )
+        assertTrue("gapBytes must be nonzero too — the banner gate requires both", result.gapBytes > 0)
+    }
+
+    // ---- #100 follow-up round 4, MEDIUM: a trailing gap must not overcharge its boundary frame ----
+    //
+    // The frame immediately before a genuinely unresyncable trailing span can be real,
+    // independently-decodable audio whose lookahead confirmation failed only because nothing
+    // valid follows it — the benign-trailer branch already excludes it from the loss count
+    // (framesOk++ at :256/:279), but the real-corruption branch two lines below charged it as
+    // lost bytes anyway, inflating the reported loss by a whole frame length on every trailing
+    // gap (~50x on a 10-frame + 3-byte fixture: 147 bytes reported lost instead of 3).
+
+    @Test
+    fun trailingGapAfterFewFrames_doesNotOverchargeTheBoundaryFrameAsLoss() {
+        val junk = byteArrayOf(0x12, 0x34, 0x56) // heterogeneous, no 0xFF, never resyncs
+        val data = stream(10) + junk
+        val result = Mp3FrameScan.scan(data)
+        assertEquals("the 10th frame is real, decodable audio, not part of the gap", 10, result.framesOk)
+        assertEquals(
+            "only the 3 genuinely unresyncable junk bytes should be charged as loss, not the " +
+                "144-byte real frame in front of them",
+            3L,
+            result.gapBytes
+        )
+    }
+
     // ---- #100 follow-up round 3, HIGH-2: tag recognition must be bounded to the tag itself ----
     //
     // An APEv2 footer's own size field must be used to verify the unresyncable span is EXACTLY
