@@ -44,7 +44,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -113,7 +112,15 @@ fun NoteDetailScreen(
     var actionsExpanded by remember { mutableStateOf(false) }
     var playbackPosition by remember { mutableLongStateOf(0L) }
     var playbackDuration by remember { mutableLongStateOf(0L) }
-    var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
+    // Owned by the ViewModel (not local state) so the debug-only ADB SET_SPEED trigger can
+    // change it from MainActivity via the same shared RecordingViewModel instance.
+    val playbackSpeed by recordingViewModel.playbackSpeed.collectAsState()
+
+    // Applies playback-speed changes made outside this screen's own toggle button — e.g. the
+    // ADB SET_SPEED debug trigger — onto the live player.
+    LaunchedEffect(playbackSpeed) {
+        player.setPlaybackSpeed(playbackSpeed)
+    }
 
     // Sync isPlaying when audio finishes naturally
     DisposableEffect(player) {
@@ -358,13 +365,14 @@ fun NoteDetailScreen(
                     // Speed Toggle Button
                     TextButton(
                         onClick = {
-                            playbackSpeed = when (playbackSpeed) {
-                                1.0f -> 1.25f
-                                1.25f -> 1.5f
-                                1.5f -> 2.0f
-                                else -> 1.0f
-                            }
-                            player.setPlaybackSpeed(playbackSpeed)
+                            recordingViewModel.setPlaybackSpeed(
+                                when (playbackSpeed) {
+                                    1.0f -> 1.25f
+                                    1.25f -> 1.5f
+                                    1.5f -> 2.0f
+                                    else -> 1.0f
+                                }
+                            )
                         }
                     ) {
                         Text("${playbackSpeed}x", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)

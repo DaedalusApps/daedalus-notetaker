@@ -21,6 +21,7 @@ import com.daedalus.notes.ai.expandWithTopicSiblings
 import com.daedalus.notes.ai.EmbeddingService
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.MarkdownExporter
+import com.daedalus.notes.ai.SpeakerDiarizer
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.isWhisperReady
 import com.daedalus.notes.ai.isTranscriptReadable
@@ -191,6 +192,14 @@ class RecordingViewModel @JvmOverloads constructor(
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery
+
+    // Shared playback speed for NoteDetailScreen's ExoPlayer — lets the debug-only
+    // com.daedalus.notes.SET_SPEED ADB trigger (MainActivity) drive the same player the UI's
+    // speed toggle controls, since both go through this single ViewModel instance.
+    private val _playbackSpeed = MutableStateFlow(1.0f)
+    val playbackSpeed: StateFlow<Float> = _playbackSpeed
+
+    fun setPlaybackSpeed(speed: Float) { _playbackSpeed.value = speed }
 
     val filteredRecordings: StateFlow<List<Recording>> = _searchQuery
         .flatMapLatest { q ->
@@ -649,6 +658,24 @@ class RecordingViewModel @JvmOverloads constructor(
 
     /** Returns all child parts for a recording that was split, empty if it wasn't split. */
     suspend fun getPartsOf(filename: String): List<Recording> = repo.getPartsOf(filename)
+
+    /**
+     * Debug ADB support for com.daedalus.notes.FORMAT_SPEAKER: runs [SpeakerDiarizer] over the
+     * stored transcript for [filename] and returns the formatted result, or null if the
+     * recording or its transcript doesn't exist.
+     */
+    suspend fun formatSpeakerPreview(filename: String): String? {
+        val transcript = repo.get(filename)?.transcript?.takeIf { it.isNotBlank() } ?: return null
+        return SpeakerDiarizer.formatTranscript(transcript)
+    }
+
+    /**
+     * Debug ADB support for com.daedalus.notes.SEARCH_FTS: runs [query] through the same
+     * search path the library screen's search bar uses (RecordingDao.searchFlow — a `LIKE`
+     * match, not a Room FTS4 index; the FTS4 pillar itself was never implemented) and returns
+     * the matching filenames.
+     */
+    suspend fun searchPreview(query: String): List<String> = repo.search(query).first().map { it.filename }
 
     fun analyze(filename: String) {
         viewModelScope.launch { doAnalyze(filename) }

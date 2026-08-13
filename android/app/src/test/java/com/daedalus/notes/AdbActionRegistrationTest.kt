@@ -14,16 +14,18 @@ import org.w3c.dom.Element
  * A third, separately-maintained action list on the manifest's `.AdbReceiver` declaration can
  * drift from both.
  *
- * This test does not hardcode the expected action sets — it parses them out of the actual
- * production source files (MainActivity.kt and AndroidManifest.xml) so a future handler added
- * without a matching registration fails this test for the right reason, instead of the test
- * only ever checking itself.
+ * [AdbActions] is the single source of truth both MainActivity and this test read from. This
+ * test does not just assert that object equals itself — it checks that MainActivity's `when`
+ * block actually has a branch referencing every [AdbActions.HANDLED] constant, that onCreate
+ * actually builds its IntentFilter from [AdbActions.REGISTERED] rather than a hand-typed list,
+ * and that AndroidManifest.xml (a separate file, parsed independently) lists exactly
+ * [AdbActions.REGISTERED]. A handler added without updating [AdbActions], or a manifest edited
+ * out of step with it, fails one of these for a real reason.
  *
  * The one intentional exception is `REPAIR_FILE`: AudioRepairEngine.repairMp3File destructively
  * truncates audio with no backup (see the #99 follow-up audit), so that handler must stay
- * reachable in source (for a future fix) but unreachable via the receiver — i.e. "quarantined"
- * rather than registered. [QUARANTINED_ACTIONS] names that exception explicitly so it can only
- * ever be this one action, on purpose, not an accident.
+ * reachable in source (for a future fix) but unreachable via the receiver — "quarantined" via
+ * [AdbActions.QUARANTINED] rather than silently dropped.
  */
 class AdbActionRegistrationTest {
 
@@ -31,84 +33,81 @@ class AdbActionRegistrationTest {
     private val mainActivitySource: String by lazy {
         File(moduleRoot, "src/main/java/com/daedalus/notes/MainActivity.kt").readText()
     }
+    private val receiverWhenBlock: String by lazy { extractReceiverWhenBlock(mainActivitySource) }
+    private val onCreateSource: String by lazy { mainActivitySource.substringAfter("override fun onCreate") }
 
-    /** Actions the dynamic receiver's `when (intent?.action)` block has a branch for. */
-    private val handledActions: Set<String> by lazy {
-        extractReceiverWhenBlock(mainActivitySource).let { whenBlock ->
-            WHEN_BRANCH_ACTION.findAll(whenBlock).map { it.groupValues[1] }.toSet()
-        }
-    }
-
-    /** Actions registered on the dynamic IntentFilter built in onCreate. */
-    private val registeredDynamicActions: Set<String> by lazy {
-        extractIntentFilterBlock(mainActivitySource).let { filterBlock ->
-            ADD_ACTION_CALL.findAll(filterBlock).map { it.groupValues[1] }.toSet()
-        }
-    }
-
-    /** Actions on the manifest's `.AdbReceiver` `<intent-filter>`. */
     private val registeredManifestActions: Set<String> by lazy {
         parseManifestAdbReceiverActions(File(moduleRoot, "src/main/AndroidManifest.xml"))
     }
 
-    /** The only action allowed to be handled but deliberately not registered. See class doc. */
-    private val quarantinedActions: Set<String> = setOf("com.daedalus.notes.REPAIR_FILE")
-
     @Test
-    fun `every handled action except the quarantined set is registered on the dynamic IntentFilter`() {
-        val expectedRegistered = handledActions - quarantinedActions
-        assertEquals(
-            "Handled actions minus the quarantined set must equal the dynamic IntentFilter's " +
-                "registered actions. A handler with no registration is unreachable (the #99 bug); " +
-                "an action registered without being handled is also a mismatch.",
-            expectedRegistered,
-            registeredDynamicActions
+    fun `every AdbActions HANDLED constant has a when branch in MainActivity`() {
+        val missingBranches = AdbActions.HANDLED.filterNot { action ->
+            receiverWhenBlock.contains("AdbActions.${constantNameOf(action)} ->")
+        }
+        assertTrue(
+            "MainActivity's adbReceiver when-block has no branch for: $missingBranches. " +
+                "Every action in AdbActions.HANDLED must be dispatched via its AdbActions " +
+                "constant so it stays covered by this check.",
+            missingBranches.isEmpty()
         )
     }
 
     @Test
-    fun `manifest AdbReceiver action set matches the dynamic receiver's registered set`() {
+    fun `when block has no stray branches outside AdbActions HANDLED`() {
+        val branchCount = Regex("""AdbActions\.[A-Z0-9_]+\s*->""").findAll(receiverWhenBlock).count()
         assertEquals(
-            "AndroidManifest.xml's .AdbReceiver <intent-filter> must list exactly the actions " +
-                "the dynamic receiver registers, or delivery via -n can silently diverge from " +
-                "what MainActivity actually handles.",
-            registeredDynamicActions,
+            "The when-block's branch count must match AdbActions.HANDLED.size exactly — a " +
+                "branch using a raw string literal instead of an AdbActions constant would be " +
+                "invisible to the previous check.",
+            AdbActions.HANDLED.size,
+            branchCount
+        )
+    }
+
+    @Test
+    fun `onCreate builds the dynamic IntentFilter from AdbActions REGISTERED`() {
+        assertTrue(
+            "onCreate must build the debug IntentFilter by iterating AdbActions.REGISTERED " +
+                "(the single source of truth) rather than a separately hand-typed action list.",
+            onCreateSource.contains("AdbActions.REGISTERED")
+        )
+    }
+
+    @Test
+    fun `manifest AdbReceiver action set matches AdbActions REGISTERED`() {
+        assertEquals(
+            "AndroidManifest.xml's .AdbReceiver <intent-filter> must list exactly " +
+                "AdbActions.REGISTERED, or delivery via -n can silently diverge from what " +
+                "MainActivity actually handles.",
+            AdbActions.REGISTERED.toSet(),
             registeredManifestActions
         )
     }
 
     @Test
     fun `REPAIR_FILE is quarantined and not registered anywhere`() {
+        assertTrue(AdbActions.REPAIR_FILE in AdbActions.QUARANTINED)
         assertTrue(
-            "com.daedalus.notes.REPAIR_FILE" in quarantinedActions
-        )
-        assertTrue(
-            "REPAIR_FILE must not be on the dynamic IntentFilter (AudioRepairEngine is unsafe; " +
+            "REPAIR_FILE must not be on AdbActions.REGISTERED (AudioRepairEngine is unsafe; " +
                 "see class doc)",
-            "com.daedalus.notes.REPAIR_FILE" !in registeredDynamicActions
+            AdbActions.REPAIR_FILE !in AdbActions.REGISTERED
         )
         assertTrue(
             "REPAIR_FILE must not be on the manifest's AdbReceiver intent-filter either",
-            "com.daedalus.notes.REPAIR_FILE" !in registeredManifestActions
+            AdbActions.REPAIR_FILE !in registeredManifestActions
         )
     }
 
     companion object {
-        private val WHEN_BRANCH_ACTION = Regex(""""(com\.daedalus\.notes\.[A-Z_]+)"\s*->""")
-        private val ADD_ACTION_CALL = Regex("""addAction\("(com\.daedalus\.notes\.[A-Z_]+)"\)""")
+        /** "com.daedalus.notes.SET_SPEED" -> "SET_SPEED", matching AdbActions' own naming. */
+        private fun constantNameOf(action: String): String = action.substringAfterLast('.')
 
         /** Slices out just the adbReceiver's `onReceive` `when` block, so a match can't
          *  accidentally pick up an unrelated `when` elsewhere in the file. */
         private fun extractReceiverWhenBlock(source: String): String {
             val start = source.indexOf("when (intent?.action)")
             require(start >= 0) { "Could not find 'when (intent?.action)' in MainActivity.kt" }
-            return balancedBraceBlock(source, source.indexOf('{', start))
-        }
-
-        /** Slices out just the `IntentFilter().apply { ... }` block built in onCreate. */
-        private fun extractIntentFilterBlock(source: String): String {
-            val start = source.indexOf("IntentFilter().apply")
-            require(start >= 0) { "Could not find 'IntentFilter().apply' in MainActivity.kt" }
             return balancedBraceBlock(source, source.indexOf('{', start))
         }
 

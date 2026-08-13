@@ -42,23 +42,23 @@ class MainActivity : ComponentActivity() {
     private val adbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                "com.daedalus.notes.SYNC" -> {
+                AdbActions.SYNC -> {
                     Log.i("DaedalusADB", "ADB BLE sync triggered")
                     recordingViewModel.syncAllBleFiles(deviceViewModel.bleManager)
                 }
-                "com.daedalus.notes.PROBE" -> {
+                AdbActions.PROBE -> {
                     Log.i("DaedalusADB", "BLE probe triggered")
                     lifecycleScope.launch {
                         deviceViewModel.bleManager.runProbe()
                     }
                 }
-                "com.daedalus.notes.PROBE2" -> {
+                AdbActions.PROBE2 -> {
                     Log.i("DaedalusADB", "Service probe triggered")
                     lifecycleScope.launch {
                         deviceViewModel.bleManager.runServiceProbe()
                     }
                 }
-                "com.daedalus.notes.PROBE_DELETE" -> {
+                AdbActions.PROBE_DELETE -> {
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Delete probe triggered for '$filename'")
                     if (filename.isNotBlank()) {
@@ -67,28 +67,28 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                "com.daedalus.notes.PROBE_UPLOAD" -> {
+                AdbActions.PROBE_UPLOAD -> {
                     Log.i("DaedalusADB", "Upload probe triggered")
                     lifecycleScope.launch {
                         deviceViewModel.bleManager.probeUploadCmds()
                     }
                 }
-                "com.daedalus.notes.START_RECORDING" -> {
+                AdbActions.START_RECORDING -> {
                     Log.i("DaedalusADB", "Device start-recording triggered")
                     lifecycleScope.launch { deviceViewModel.bleManager.startDeviceRecording() }
                 }
-                "com.daedalus.notes.STOP_RECORDING" -> {
+                AdbActions.STOP_RECORDING -> {
                     Log.i("DaedalusADB", "Device stop-recording triggered")
                     lifecycleScope.launch { deviceViewModel.bleManager.stopDeviceRecording() }
                 }
-                "com.daedalus.notes.ANALYZE" -> {
+                AdbActions.ANALYZE -> {
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Analyze triggered for '$filename'")
                     if (filename.isNotBlank()) {
                         lifecycleScope.launch { recordingViewModel.analyze(filename) }
                     }
                 }
-                "com.daedalus.notes.REDOWNLOAD" -> {
+                AdbActions.REDOWNLOAD -> {
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Re-download + analyze triggered for '$filename'")
                     if (filename.isNotBlank()) {
@@ -97,7 +97,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                "com.daedalus.notes.DELETE_FILE" -> {
+                AdbActions.DELETE_FILE -> {
                     // Invokes the same hardware delete the app's delete path uses
                     // (RecordingViewModel.deleteRecording -> BleManager.deleteFile), which
                     // two-phase-deletes over BLE then re-lists to confirm the file is gone.
@@ -110,19 +110,51 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                "com.daedalus.notes.ADD_CALENDAR" -> {
+                AdbActions.ADD_CALENDAR -> {
                     val title = intent?.getStringExtra("title") ?: "Action Item"
                     val note = intent?.getStringExtra("note") ?: ""
                     Log.i("DaedalusADB", "Add to calendar triggered for '$title'")
                     com.daedalus.notes.util.CalendarIntegration.addToCalendar(this@MainActivity, title, note)
                 }
-                "com.daedalus.notes.REPAIR_FILE" -> {
+                AdbActions.REPAIR_FILE -> {
+                    // Quarantined — see AdbActions.QUARANTINED. AudioRepairEngine.repairMp3File
+                    // currently truncates audio at the first gap with no backup, so this branch
+                    // is deliberately unreachable: it has no IntentFilter registration and never
+                    // will until that data-loss bug is fixed on its own branch.
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Repair file triggered for '$filename'")
                     if (filename.isNotBlank()) {
                         val file = File(getExternalFilesDir(null), "Recordings/$filename")
                         val ok = com.daedalus.notes.data.model.AudioRepairEngine.repairMp3File(file)
                         Log.i("DaedalusADB", "Audio repair result for '$filename': $ok")
+                    }
+                }
+                AdbActions.SET_SPEED -> {
+                    val speed = intent?.getFloatExtra("speed", -1f) ?: -1f
+                    Log.i("DaedalusADB", "Set speed triggered: $speed")
+                    if (speed > 0f) {
+                        recordingViewModel.setPlaybackSpeed(speed)
+                        Log.i("DaedalusADB", "Playback speed set to $speed")
+                    }
+                }
+                AdbActions.FORMAT_SPEAKER -> {
+                    val filename = intent?.getStringExtra("filename") ?: ""
+                    Log.i("DaedalusADB", "Format speaker triggered for '$filename'")
+                    if (filename.isNotBlank()) {
+                        lifecycleScope.launch {
+                            val formatted = recordingViewModel.formatSpeakerPreview(filename)
+                            Log.i("DaedalusADB", "Speaker format result for '$filename': ${formatted ?: "no transcript"}")
+                        }
+                    }
+                }
+                AdbActions.SEARCH_FTS -> {
+                    val query = intent?.getStringExtra("query") ?: ""
+                    Log.i("DaedalusADB", "Search triggered for '$query'")
+                    if (query.isNotBlank()) {
+                        lifecycleScope.launch {
+                            val results = recordingViewModel.searchPreview(query)
+                            Log.i("DaedalusADB", "Search result for '$query': ${results.size} match(es) -> $results")
+                        }
                     }
                 }
             }
@@ -139,17 +171,11 @@ class MainActivity : ComponentActivity() {
         requestRequiredPermissions()
 
         if (BuildConfig.DEBUG) {
+            // Built from AdbActions.REGISTERED — the single source of truth shared with the
+            // `when` block above and AndroidManifest.xml's .AdbReceiver — so a handler can't
+            // silently end up with no registration (see #99).
             val filter = IntentFilter().apply {
-                addAction("com.daedalus.notes.SYNC")
-                addAction("com.daedalus.notes.PROBE")
-                addAction("com.daedalus.notes.PROBE2")
-                addAction("com.daedalus.notes.PROBE_DELETE")
-                addAction("com.daedalus.notes.PROBE_UPLOAD")
-                addAction("com.daedalus.notes.START_RECORDING")
-                addAction("com.daedalus.notes.STOP_RECORDING")
-                addAction("com.daedalus.notes.ANALYZE")
-                addAction("com.daedalus.notes.REDOWNLOAD")
-                addAction("com.daedalus.notes.DELETE_FILE")
+                AdbActions.REGISTERED.forEach { addAction(it) }
             }
             // ADB shell (uid 2000) broadcasts are not delivered to RECEIVER_NOT_EXPORTED
             // receivers on Android 14+; this receiver is debug-only and exists solely so
