@@ -180,7 +180,13 @@ class RecordingViewModel @JvmOverloads constructor(
      * integrity check, so GATT notifications dropped while Whisper and Gemma saturate the CPU
      * become silently corrupt audio that nothing downstream can detect.
      *
-     * Acquire around one unit of work only — never hold this across a call that re-acquires it.
+     * Acquire around one unit of work only — never hold this across a call that re-acquires it
+     * (doAnalyze() and, transitively, analyze()/autoAnalyzePending() all acquire it themselves).
+     * redownloadAndAnalyze() is the one caller that holds it across more than just the transfer
+     * itself: backup creation, the BLE transfer, the #119 length guard, and the resulting
+     * restore-or-DB-write, all as one critical section — not several separate BLE transfers — so
+     * that a sync can't interleave a downloadFile() of the same filename into the middle of a
+     * re-download's restore/save. See the comment at its heavyWork.withLock call for the cost.
      */
     private val heavyWork = Mutex()
 
@@ -721,6 +727,25 @@ class RecordingViewModel @JvmOverloads constructor(
     }
 
     /**
+     * Filenames with a re-download currently in flight. Guards against two concurrent
+     * re-downloads of the same file: even with [heavyWork] now covering the whole critical
+     * section (see below), a second call would still read a stale `recording` snapshot from
+     * before the first call's `repo.save` — a fixed-name `.bak` collision is a symptom of the
+     * same underlying problem, not a separate one. Rejecting the second attempt with a visible
+     * error is preferred over uniquifying the backup name, which would let both proceed and
+     * leave that stale-overwrite race in place. Only ever touched from viewModelScope.launch,
+     * which runs on Dispatchers.Main — no separate lock needed for the set itself.
+     *
+     * The entry is removed as soon as the heavyWork-guarded critical section below ends (backup
+     * creation through the #119 length guard and the DB write) rather than after the trailing
+     * doAnalyze()/loadNote() calls. The stale-snapshot and `.bak`-collision problems this guards
+     * against are both fully resolved once that section completes, so holding the entry any
+     * longer only widens the window where the UI looks idle (_isProcessing already false) while
+     * re-fetch is still rejected.
+     */
+    private val inFlightRedownloads = mutableSetOf<String>()
+
+    /**
      * Pulls a fresh copy of the audio from the FW920 and re-runs analysis from scratch.
      * Ordinary sync skips any file that already exists locally, so a truncated or corrupt
      * download can never be repaired by syncing again — this is the way out of that.
@@ -763,100 +788,152 @@ class RecordingViewModel @JvmOverloads constructor(
                 return@launch
             }
 
-            // downloadFile() deletes the existing local copy before it starts streaming, so a
-            // failed transfer would otherwise destroy the only copy — and for a split recording
-            // leave the parent and every part pointing at a file that is gone. Keep a copy to
-            // put back if the transfer doesn't complete.
-            val current = File(recording.localPath).takeIf { it.exists() }
-            val backup = current?.let { src ->
-                withContext(ioDispatcher) {
-                    runCatching { src.copyTo(File(src.parentFile, src.name + ".bak"), overwrite = true) }
-                        .getOrNull()
-                }
+            if (!inFlightRedownloads.add(filename)) {
+                Log.w("DaedalusSync", "Re-download: '$filename' already has a re-download in flight")
+                _aiError.value = "Already re-downloading this recording — please wait for it to finish."
+                return@launch
             }
-            // Captured now, not re-read later: File.length() on a since-vanished backup silently
-            // returns 0, which would make a truncated download look longer than "no backup" and
-            // sail straight through the guard below (#119 could reproduce with the guard in
-            // place). Comparing against this captured Long instead closes that hole.
-            val backupLength = backup?.length()
-
             _isProcessing.value = true
             _aiError.value = null
+            // Started only once the in-flight check above has accepted this call — a rejected
+            // re-download (another one already running for this filename) should leave whatever
+            // notification that other one is showing alone, not stomp it with a fresh "starting"
+            // notification for a request that's about to be refused.
             AnalysisForegroundService.start(getApplication(), filename, "Re-downloading audio...")
             // downloadFile() throws on a full disk or a revoked permission, and by then it has
             // already deleted the original — an escaping exception would crash the app and
             // strand the only copy in an orphaned .bak, so treat a throw like a failed transfer.
-            val downloaded = try {
+            //
+            // heavyWork now covers the *entire* critical section below — backup creation,
+            // transfer, the #119 length guard, restore/delete, and deletePartsOf/save —
+            // not just the transfer. Outside that scope, syncAllBleFiles could previously
+            // start downloadFile() on this same filename while restoreBackup() was still
+            // copying into the same path, or save a DB row with a length read mid-rewrite.
+            // doAnalyze() below independently re-acquires heavyWork and Mutex is not
+            // reentrant, so it (and loadNote) must stay outside this block or every
+            // re-download deadlocks.
+            //
+            // Cost: heavyWork is a single global mutex, so this serializes re-download
+            // against sync for every recording, not just the contended one, for the
+            // duration of one transfer + DB write. Accepted here — re-download is
+            // user-initiated and rare, and syncAllBleFiles already serializes its entire
+            // file loop under this same lock, so this widens what the lock covers without
+            // changing the order of magnitude of contention.
+            try {
                 _syncProgress.value = "Waiting for current processing to finish…"
-                // Held only across the transfer; doAnalyze below re-acquires it.
                 heavyWork.withLock {
+                    // downloadFile() deletes the existing local copy before it starts
+                    // streaming, so a failed transfer would otherwise destroy the only copy
+                    // — and for a split recording leave the parent and every part pointing
+                    // at a file that is gone. Keep a copy to put back if the transfer
+                    // doesn't complete. Read live, under the lock, so it reflects whatever
+                    // the most recent sync or re-download actually left at this path.
+                    val current = File(recording.localPath).takeIf { it.exists() }
+                    val backup = current?.let { src ->
+                        withContext(ioDispatcher) {
+                            runCatching { src.copyTo(File(src.parentFile, src.name + ".bak"), overwrite = true) }
+                                .getOrNull()
+                        }
+                    }
+                    // Captured now, not re-read later: File.length() on a since-vanished
+                    // backup silently returns 0, which would make a truncated download look
+                    // longer than "no backup" and sail straight through the guard below
+                    // (#119 could reproduce with the guard in place). Comparing against this
+                    // captured Long instead closes that hole.
+                    val backupLength = backup?.length()
+
                     _syncProgress.value = "Re-downloading $filename…"
                     AnalysisForegroundService.start(getApplication(), filename, "Re-downloading $filename…")
                     Log.i("DaedalusSync", "Re-downloading $filename on request")
-                    bleManager.downloadFile(filename) { bytes ->
-                        val statusText = "Re-downloading $filename (${bytes / 1024} KB)…"
-                        _syncProgress.value = statusText
-                        AnalysisForegroundService.start(getApplication(), filename, statusText)
+                    // Below: several early `return@launch`es sit inside this withLock. withLock
+                    // is an inline function built on a plain try/finally around the lambda, so a
+                    // non-local return out of the lambda still runs that finally and releases
+                    // the mutex — it does not leak the lock the way it would if withLock were a
+                    // suspend function that scheduled unlock separately.
+                    val downloaded = try {
+                        bleManager.downloadFile(filename) { bytes ->
+                            val statusText = "Re-downloading $filename (${bytes / 1024} KB)…"
+                            _syncProgress.value = statusText
+                            AnalysisForegroundService.start(getApplication(), filename, statusText)
+                        }
+                    } catch (e: CancellationException) {
+                        withContext(NonCancellable) { restoreBackup(backup, recording.localPath) }
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e("DaedalusSync", "Re-download of $filename threw; restoring previous copy", e)
+                        restoreBackup(backup, recording.localPath)
+                        _aiError.value = e.message ?: "Re-download failed."
+                        return@launch
+                    }
+
+                    if (downloaded == null) {
+                        restoreBackup(backup, recording.localPath)
+                        Log.w("DaedalusSync", "Re-download of $filename failed; restored previous copy")
+                        _aiError.value = "Re-download failed. Keep the FW920 connected and try again."
+                        return@launch
+                    }
+
+                    // A non-null return only means the FW920 sent an EOF ack — it says
+                    // nothing about how many bytes actually arrived (#119: the same file
+                    // transferred as 337148 bytes on one attempt and 217412 on another, both
+                    // ack'd clean). The backup made above is the only completeness oracle
+                    // available today, so use it: a strictly shorter replacement is rejected
+                    // outright. Equal is the expected good case, and longer is legitimate too
+                    // — the previous local copy may itself have been the truncated one,
+                    // which is exactly the case this whole feature exists to fix — so only
+                    // "shorter" is treated as suspect, with no tolerance/threshold to tune.
+                    if (backupLength != null && downloaded.length() < backupLength) {
+                        Log.w("DaedalusSync", "Re-download of $filename came back shorter than the " +
+                            "backup (${downloaded.length()} < $backupLength bytes); restoring previous copy")
+                        // Not cancellable: a cancellation landing between the length check
+                        // and the restore completing must not leave localPath holding the
+                        // truncated download with no restore having run.
+                        withContext(NonCancellable) { restoreBackup(backup, recording.localPath) }
+                        _aiError.value = "Re-download came back shorter than the copy it replaced " +
+                            "(${downloaded.length()} vs $backupLength bytes). Keep the FW920 " +
+                            "connected and try again."
+                        return@launch
+                    }
+                    withContext(ioDispatcher + NonCancellable) { backup?.delete() }
+
+                    // Fresh audio: drop the parts and analysis derived from the old copy, and
+                    // commit the new file's metadata, as one non-cancellable unit. The good new
+                    // file is already at localPath at this point; without NonCancellable, a
+                    // cancellation landing after deletePartsOf/the duration read but before
+                    // repo.save would leave the DB row's sizeBytes/durationMillis/transcript
+                    // stale against that new file — not data loss, but a note that shows an old
+                    // transcript over new audio, with the backup already deleted above.
+                    withContext(NonCancellable) {
+                        repo.deletePartsOf(filename)
+                        repo.save(recording.copy(
+                            localPath = downloaded.absolutePath,
+                            sizeBytes = downloaded.length(),
+                            durationMillis = withContext(ioDispatcher) {
+                                AudioUtils.getDurationMillis(downloaded.absolutePath)
+                            },
+                            transcript = "", summary = "", mindMap = "",
+                            title = "", shortSummary = "", topics = emptyList(), embedding = null,
+                            // The flag described the old copy of the audio. This is a different
+                            // file, and a re-fetch is exactly how a recording written off as
+                            // unreadable gets rescued.
+                            analysisFailed = false
+                        ))
                     }
                 }
-            } catch (e: CancellationException) {
-                withContext(NonCancellable) { restoreBackup(backup, recording.localPath) }
-                throw e
-            } catch (e: Exception) {
-                Log.e("DaedalusSync", "Re-download of $filename threw; restoring previous copy", e)
-                restoreBackup(backup, recording.localPath)
-                _aiError.value = e.message ?: "Re-download failed."
-                return@launch
             } finally {
                 _isProcessing.value = false
                 _syncProgress.value = null
                 AnalysisForegroundService.stop(getApplication())
+                // Released here, at the end of the heavyWork-guarded critical section, rather
+                // than after doAnalyze()/loadNote() below — see the doc comment on
+                // [inFlightRedownloads] for why the guard's job is done by this point. Reached
+                // on every path out of the try above, including the early `return@launch`s
+                // inside heavyWork.withLock, since a non-local return still runs enclosing
+                // finally blocks.
+                inFlightRedownloads.remove(filename)
             }
 
-            if (downloaded == null) {
-                restoreBackup(backup, recording.localPath)
-                Log.w("DaedalusSync", "Re-download of $filename failed; restored previous copy")
-                _aiError.value = "Re-download failed. Keep the FW920 connected and try again."
-                return@launch
-            }
-
-            // A non-null return only means the FW920 sent an EOF ack — it says nothing about
-            // how many bytes actually arrived (#119: the same file transferred as 337148 bytes
-            // on one attempt and 217412 on another, both ack'd clean). The backup made above is
-            // the only completeness oracle available today, so use it: a strictly shorter
-            // replacement is rejected outright. Equal is the expected good case, and longer is
-            // legitimate too — the previous local copy may itself have been the truncated one,
-            // which is exactly the case this whole feature exists to fix — so only "shorter"
-            // is treated as suspect, with no tolerance/threshold to tune.
-            if (backupLength != null && downloaded.length() < backupLength) {
-                Log.w("DaedalusSync", "Re-download of $filename came back shorter than the " +
-                    "backup (${downloaded.length()} < $backupLength bytes); restoring previous copy")
-                // Not cancellable: a cancellation landing between the length check and the
-                // restore completing must not leave localPath holding the truncated download
-                // with no restore having run.
-                withContext(NonCancellable) { restoreBackup(backup, recording.localPath) }
-                _aiError.value = "Re-download came back shorter than the copy it replaced " +
-                    "(${downloaded.length()} vs $backupLength bytes). Keep the FW920 " +
-                    "connected and try again."
-                return@launch
-            }
-            withContext(ioDispatcher + NonCancellable) { backup?.delete() }
-
-            // Fresh audio: drop the parts and analysis derived from the old copy.
-            repo.deletePartsOf(filename)
-            repo.save(recording.copy(
-                localPath = downloaded.absolutePath,
-                sizeBytes = downloaded.length(),
-                durationMillis = withContext(ioDispatcher) {
-                    AudioUtils.getDurationMillis(downloaded.absolutePath)
-                },
-                transcript = "", summary = "", mindMap = "",
-                title = "", shortSummary = "", topics = emptyList(), embedding = null,
-                // The flag described the old copy of the audio. This is a different file, and a
-                // re-fetch is exactly how a recording written off as unreadable gets rescued.
-                analysisFailed = false
-            ))
-
+            // Outside heavyWork: doAnalyze() re-acquires it, and Mutex is not reentrant.
             doAnalyze(filename)
             loadNote(filename)
         }
