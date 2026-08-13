@@ -754,4 +754,17 @@ class RecordingViewModelTest {
         val result = viewModel.currentScanResult.value
         assertTrue(result != null)
     }
+
+    @Test
+    fun analyze_startsAndStopsForegroundServiceResetsStateOnFinish() = runTest {
+        val audio = File.createTempFile("fg-service", ".mp3").also { it.deleteOnExit() }
+        val filename = "fg-service.mp3"
+        coEvery { repo.get(filename) } returns Recording(filename, localPath = audio.absolutePath, durationMillis = 1000L)
+
+        viewModel.analyze(filename)
+        advanceUntilIdle()
+
+        assertEquals(false, viewModel.isProcessing.value)
+        assertEquals(null, viewModel.syncProgress.value)
+    }
 }

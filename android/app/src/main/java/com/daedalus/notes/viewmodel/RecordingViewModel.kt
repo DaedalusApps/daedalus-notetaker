@@ -13,6 +13,7 @@ import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.daedalus.notes.ai.AnalysisForegroundService
 import com.daedalus.notes.ai.analyzeTranscript
 import com.daedalus.notes.ai.aiTextBudget
 import com.daedalus.notes.ai.buildLibraryQuestionPrompt
@@ -423,8 +424,11 @@ class RecordingViewModel @JvmOverloads constructor(
                 Log.i("DaedalusSync", "file=${entry.filename} isComplete=$isComplete duration=${existing?.durationMillis} deviceSize=${entry.sizeBytes}")
                 if (isComplete) return@forEach
                 _syncProgress.value = "Downloading ${entry.filename} via BLE…"
+                AnalysisForegroundService.start(getApplication(), entry.filename, "Downloading via BLE…")
                 val file = bleManager.downloadFile(entry.filename) { bytes ->
-                    _syncProgress.value = "Downloading ${entry.filename} (${bytes / 1024} KB)…"
+                    val statusText = "Downloading ${entry.filename} (${bytes / 1024} KB)…"
+                    _syncProgress.value = statusText
+                    AnalysisForegroundService.start(getApplication(), entry.filename, statusText)
                 }
                 if (file != null) {
                     val duration = AudioUtils.getDurationMillis(file.absolutePath)
@@ -455,6 +459,8 @@ class RecordingViewModel @JvmOverloads constructor(
             } catch (e: CancellationException) {
                 _syncProgress.value = null
                 throw e
+            } finally {
+                AnalysisForegroundService.stop(getApplication())
             }
         }
     }
@@ -748,6 +754,7 @@ class RecordingViewModel @JvmOverloads constructor(
 
             _isProcessing.value = true
             _aiError.value = null
+            AnalysisForegroundService.start(getApplication(), filename, "Re-downloading audio...")
             // downloadFile() throws on a full disk or a revoked permission, and by then it has
             // already deleted the original — an escaping exception would crash the app and
             // strand the only copy in an orphaned .bak, so treat a throw like a failed transfer.
@@ -756,9 +763,12 @@ class RecordingViewModel @JvmOverloads constructor(
                 // Held only across the transfer; doAnalyze below re-acquires it.
                 heavyWork.withLock {
                     _syncProgress.value = "Re-downloading $filename…"
+                    AnalysisForegroundService.start(getApplication(), filename, "Re-downloading $filename…")
                     Log.i("DaedalusSync", "Re-downloading $filename on request")
                     bleManager.downloadFile(filename) { bytes ->
-                        _syncProgress.value = "Re-downloading $filename (${bytes / 1024} KB)…"
+                        val statusText = "Re-downloading $filename (${bytes / 1024} KB)…"
+                        _syncProgress.value = statusText
+                        AnalysisForegroundService.start(getApplication(), filename, statusText)
                     }
                 }
             } catch (e: CancellationException) {
@@ -772,6 +782,7 @@ class RecordingViewModel @JvmOverloads constructor(
             } finally {
                 _isProcessing.value = false
                 _syncProgress.value = null
+                AnalysisForegroundService.stop(getApplication())
             }
 
             if (downloaded == null) {
@@ -826,6 +837,7 @@ class RecordingViewModel @JvmOverloads constructor(
     private suspend fun doAnalyzeExclusive(filename: String) {
             _isProcessing.value = true
             _aiError.value = null
+            AnalysisForegroundService.start(getApplication(), filename, "Processing audio...")
             try {
                 var note = repo.get(filename) ?: run {
                     _aiError.value = "Recording not synced. Download it first."
@@ -873,6 +885,7 @@ class RecordingViewModel @JvmOverloads constructor(
                         val partDuration = endMs - startMs
 
                         _syncProgress.value = "Transcribing part $i of $numParts…"
+                        AnalysisForegroundService.start(getApplication(), filename, "Transcribing part $i of $numParts…")
                         Log.i("DaedalusAI", "Transcribing part $i: ${startMs}ms–${endMs}ms")
                         val transcript = try {
                             transcriber.transcribeRange(localFile, startMs, endMs)
@@ -924,7 +937,10 @@ class RecordingViewModel @JvmOverloads constructor(
                                 analyzeTranscript(
                                     getApplication(), llm, embedder, repo,
                                     part.filename, part.transcript
-                                ) { _syncProgress.value = it }
+                                ) {
+                                    _syncProgress.value = it
+                                    AnalysisForegroundService.start(getApplication(), part.filename, it)
+                                }
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
@@ -993,6 +1009,7 @@ class RecordingViewModel @JvmOverloads constructor(
                 if (note.parentFilename == null) repo.deletePartsOf(filename)
 
                 _syncProgress.value = "Transcribing audio…"
+                AnalysisForegroundService.start(getApplication(), filename, "Transcribing audio…")
                 Log.i("DaedalusAI", "Transcribing ${localFile.name}")
                 // Re-analyzing a single part must stay within that part's window — it shares the
                 // parent's audio file, so a plain transcribe() would pull in the whole recording.
@@ -1013,6 +1030,7 @@ class RecordingViewModel @JvmOverloads constructor(
                 // ConversationViewModel.endSession, which already has a transcript in hand).
                 analyzeTranscript(getApplication(), llm, embedder, repo, filename, transcript) {
                     _syncProgress.value = it
+                    AnalysisForegroundService.start(getApplication(), filename, it)
                 }
                 // The split path above clears the flag inside its own parent save rather than
                 // paying for a second write here.
@@ -1030,6 +1048,7 @@ class RecordingViewModel @JvmOverloads constructor(
             } finally {
                 _isProcessing.value = false
                 _syncProgress.value = null
+                AnalysisForegroundService.stop(getApplication())
             }
     }
 
