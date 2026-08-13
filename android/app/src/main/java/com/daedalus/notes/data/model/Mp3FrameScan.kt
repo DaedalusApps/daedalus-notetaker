@@ -134,27 +134,49 @@ object Mp3FrameScan {
             data[tagStart + 2] == 'G'.code.toByte()
     }
 
-    private fun matchesAsciiSuffix(data: ByteArray, end: Int, marker: String): Boolean {
-        val start = end - marker.length
-        if (start < 0) return false
+    private fun matchesAsciiAt(data: ByteArray, pos: Int, marker: String): Boolean {
+        if (pos < 0 || pos + marker.length > data.size) return false
         for (i in marker.indices) {
-            if (data[start + i] != marker[i].code.toByte()) return false
+            if (data[pos + i] != marker[i].code.toByte()) return false
         }
         return true
     }
 
+    private fun readInt32LE(data: ByteArray, pos: Int): Long {
+        val b0 = data[pos].toLong() and 0xFF
+        val b1 = data[pos + 1].toLong() and 0xFF
+        val b2 = data[pos + 2].toLong() and 0xFF
+        val b3 = data[pos + 3].toLong() and 0xFF
+        return b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24)
+    }
+
+    /**
+     * True only if `[start, regionEnd)` is EXACTLY a well-formed, footer-only APEv2 tag —
+     * verified against the footer's own size field, not merely "the last 32 bytes spell
+     * APETAGEX". The size field is a 32-bit LE integer giving the tag's total on-disk size
+     * including the footer itself; requiring `regionEnd - tagSize == start` means the tag must
+     * account for the *entire* unresynced span, so real corruption can't hide behind a
+     * legitimate-looking footer by sitting in front of it.
+     */
+    private fun isBoundedApeV2Footer(data: ByteArray, start: Int, regionEnd: Int): Boolean {
+        val footerStart = regionEnd - 32
+        if (footerStart < start) return false
+        if (!matchesAsciiAt(data, footerStart, "APETAGEX")) return false
+        val tagSize = readInt32LE(data, footerStart + 12)
+        if (tagSize < 32) return false // must at least cover the footer itself
+        val tagStart = regionEnd - tagSize
+        return tagStart == start.toLong()
+    }
+
     /**
      * A trailing span that never resyncs to a valid frame before [regionEnd] is either real,
-     * unrecoverable damage (a dropped BLE chunk, a truncated transfer) or a harmless non-audio
-     * trailer this scanner doesn't otherwise recognize (a flash sector's zero-padded unused
-     * tail, an APEv2/Lyrics3 tag written by other tooling). Byte content alone can't always
-     * tell those apart, so this errs conservative: a span is only treated as real damage if it
-     * carries actual information. A recognized tag footer, or a span where every byte is the
-     * same value (the universal shape of both flash padding and simple zero/erase-fill), is
-     * never flagged — those bytes have no audio content to lose either way, so treating them as
-     * benign costs nothing in preserved audio while avoiding a false "corrupted" signal (the
-     * NoteDetailScreen banner's "Re-fetch audio" action deletes the local file first, against a
-     * device copy that is frequently already gone).
+     * unrecoverable damage (a dropped BLE chunk, a truncated transfer) or a recognized non-audio
+     * trailer (an APEv2 tag written by other tooling). MP3 audio — including digital silence —
+     * is never a constant byte run, so a span is treated as benign only when it is *exactly* a
+     * verifiably-bounded tag; a same-value byte run gets no special treatment; a tag format
+     * whose size field can't be checked against the actual span isn't special-cased at all. A
+     * false "corrupted" signal costs the user a re-fetch; a false "clean" signal hides the loss
+     * entirely.
      */
     private fun isBenignTrailer(data: ByteArray, brokenPos: Int, regionEnd: Int): Boolean {
         if (brokenPos >= regionEnd) return true
@@ -166,17 +188,7 @@ object Mp3FrameScan {
         val start = brokenPos + boundaryFrameLen
         if (start >= regionEnd) return true
 
-        // APEv2 footer: a fixed 32-byte structure whose "APETAGEX" preamble is its FIRST 8
-        // bytes, i.e. 32 bytes back from EOF — not anchored at the very end like Lyrics3v2's.
-        if (matchesAsciiSuffix(data, regionEnd - 24, "APETAGEX") || matchesAsciiSuffix(data, regionEnd, "LYRICS200")) {
-            return true
-        }
-
-        val first = data[start]
-        for (i in start until regionEnd) {
-            if (data[i] != first) return false
-        }
-        return true
+        return isBoundedApeV2Footer(data, start, regionEnd)
     }
 
     fun scan(bytes: ByteArray): Mp3ScanResult {
@@ -204,14 +216,12 @@ object Mp3FrameScan {
         var gapCount = 0
         var gapBytesTotal = 0L
         var firstGapOffset: Long? = null
-        val gapRanges = mutableListOf<LongRange>()
 
         // Bytes skipped to reach the first accepted frame are leading loss.
         if (startPos > audioStart) {
             gapCount++
             gapBytesTotal += (startPos - audioStart).toLong()
             firstGapOffset = audioStart.toLong()
-            gapRanges.add(audioStart.toLong() until startPos.toLong())
         }
 
         fun resyncFrom(brokenPos: Int): Int? {
@@ -230,7 +240,6 @@ object Mp3FrameScan {
             val gapEnd = resyncPos ?: audioEnd
             gapBytesTotal += (gapEnd - brokenPos).toLong()
             if (firstGapOffset == null) firstGapOffset = brokenPos.toLong()
-            gapRanges.add(brokenPos.toLong() until gapEnd.toLong())
         }
 
         var pos = startPos
@@ -278,7 +287,7 @@ object Mp3FrameScan {
             }
         }
 
-        return Mp3ScanResult(framesOk, gapCount, gapBytesTotal, firstGapOffset, size.toLong(), gapRanges)
+        return Mp3ScanResult(framesOk, gapCount, gapBytesTotal, firstGapOffset, size.toLong())
     }
 
     /** Returns an all-zero result for a missing or empty file rather than throwing. */
@@ -296,8 +305,6 @@ data class Mp3ScanResult(
     val gapBytes: Long,
     val firstGapOffset: Long?,
     val totalSize: Long,
-    /** Byte ranges (end-exclusive) of corrupted/unresynced spans, in ascending, non-overlapping order. */
-    val gapRanges: List<LongRange> = emptyList(),
 ) {
     val gapPercent: Double
         get() = if (totalSize == 0L) 0.0 else gapBytes.toDouble() / totalSize.toDouble() * 100.0
