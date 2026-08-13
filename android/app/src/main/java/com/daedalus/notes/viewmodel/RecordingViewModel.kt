@@ -665,10 +665,22 @@ class RecordingViewModel @JvmOverloads constructor(
     /** Puts the pre-download copy back after a transfer that deleted it and then failed. */
     private suspend fun restoreBackup(backup: File?, localPath: String) {
         val bak = backup ?: return
-        withContext(Dispatchers.IO) {
+        withContext(ioDispatcher) {
+            if (!bak.exists()) {
+                Log.e("DaedalusSync", "Cannot restore $localPath: backup ${bak.absolutePath} " +
+                    "is gone")
+                return@withContext
+            }
+            // copyTo(overwrite = true) deletes localPath first, then streams from bak. If the
+            // copy throws partway (full disk, permission revoked, media unmounted), localPath is
+            // now empty or partial and bak is the ONLY remaining good copy — it must NOT be
+            // deleted in that case, or the user loses the recording entirely.
             runCatching { bak.copyTo(File(localPath), overwrite = true) }
-                .onFailure { Log.e("DaedalusSync", "Could not restore $localPath", it) }
-            bak.delete()
+                .onSuccess { bak.delete() }
+                .onFailure {
+                    Log.e("DaedalusSync", "Could not restore $localPath from backup; keeping " +
+                        "${bak.absolutePath} for manual recovery", it)
+                }
         }
     }
 
@@ -746,11 +758,16 @@ class RecordingViewModel @JvmOverloads constructor(
             // put back if the transfer doesn't complete.
             val current = File(recording.localPath).takeIf { it.exists() }
             val backup = current?.let { src ->
-                withContext(Dispatchers.IO) {
+                withContext(ioDispatcher) {
                     runCatching { src.copyTo(File(src.parentFile, src.name + ".bak"), overwrite = true) }
                         .getOrNull()
                 }
             }
+            // Captured now, not re-read later: File.length() on a since-vanished backup silently
+            // returns 0, which would make a truncated download look longer than "no backup" and
+            // sail straight through the guard below (#119 could reproduce with the guard in
+            // place). Comparing against this captured Long instead closes that hole.
+            val backupLength = backup?.length()
 
             _isProcessing.value = true
             _aiError.value = null
@@ -791,14 +808,35 @@ class RecordingViewModel @JvmOverloads constructor(
                 _aiError.value = "Re-download failed. Keep the FW920 connected and try again."
                 return@launch
             }
-            withContext(Dispatchers.IO) { backup?.delete() }
+
+            // A non-null return only means the FW920 sent an EOF ack — it says nothing about
+            // how many bytes actually arrived (#119: the same file transferred as 337148 bytes
+            // on one attempt and 217412 on another, both ack'd clean). The backup made above is
+            // the only completeness oracle available today, so use it: a strictly shorter
+            // replacement is rejected outright. Equal is the expected good case, and longer is
+            // legitimate too — the previous local copy may itself have been the truncated one,
+            // which is exactly the case this whole feature exists to fix — so only "shorter"
+            // is treated as suspect, with no tolerance/threshold to tune.
+            if (backupLength != null && downloaded.length() < backupLength) {
+                Log.w("DaedalusSync", "Re-download of $filename came back shorter than the " +
+                    "backup (${downloaded.length()} < $backupLength bytes); restoring previous copy")
+                // Not cancellable: a cancellation landing between the length check and the
+                // restore completing must not leave localPath holding the truncated download
+                // with no restore having run.
+                withContext(NonCancellable) { restoreBackup(backup, recording.localPath) }
+                _aiError.value = "Re-download came back shorter than the copy it replaced " +
+                    "(${downloaded.length()} vs $backupLength bytes). Keep the FW920 " +
+                    "connected and try again."
+                return@launch
+            }
+            withContext(ioDispatcher + NonCancellable) { backup?.delete() }
 
             // Fresh audio: drop the parts and analysis derived from the old copy.
             repo.deletePartsOf(filename)
             repo.save(recording.copy(
                 localPath = downloaded.absolutePath,
                 sizeBytes = downloaded.length(),
-                durationMillis = withContext(Dispatchers.IO) {
+                durationMillis = withContext(ioDispatcher) {
                     AudioUtils.getDurationMillis(downloaded.absolutePath)
                 },
                 transcript = "", summary = "", mindMap = "",
