@@ -6,18 +6,19 @@ Written 2026-08-12 (session 5). Replaces the previous version. Read this whole f
 
 ## Current state
 
-- **`main`** = `1756492`, clean working tree, in sync with `origin/main`.
+- **`main`** = `9dd6936`, clean working tree, in sync with `origin/main`.
 - **`.\gradlew :app:testDebugUnitTest` → 414 tests / 0 failures / 43 suites.**
 - **Phone** (Galaxy S26 Ultra, `R3GL503MXPX`) is on the **release** build, **versionCode 294**.
-- **Physical FW920 Unit Verified:** Tested live over BLE against physical FW920 unit (`fwName=xink_test`, battery=100%). Confirmed clean enumeration of all 16 hardware files (in 270ms) and streaming audio transfers. Replaced fixed 5s list deadline with per-item 3s idle timeout in `BleManager.kt`.
+- **Physical FW920 Unit Verified:** Tested live over BLE against physical FW920 unit (`fwName=xink_test`, battery=100%). Confirmed clean enumeration of all 16 hardware files (in 270ms) and streaming audio transfers over `B0B4`. Replaced fixed 5s list deadline with per-item 3s idle timeout in `BleManager.kt`.
 - **Data integrity verified:** All 21 recordings (57,896,028 bytes) snapshotted before device testing and verified 100% MD5 byte-identical post-install.
 
 **Merged this session (Session 5):**
 
-| PR | Issue | What |
+| PR / Commit | Issue | What |
 |---|---|---|
 | #111 | #108 | Refresh device file list before re-download check; ignore non-FileList packets during enumeration |
 | #112 | #102 | Wired `AnalysisForegroundService` lifecycle and status updates across BLE sync, re-download, and AI analysis |
+| `1756492` | #108 | Replaced fixed 5s file list deadline with 3s per-item idle timeout in `BleManager.kt` after live hardware test discovery |
 
 ---
 
@@ -34,11 +35,11 @@ Written 2026-08-12 (session 5). Replaces the previous version. Read this whole f
 
 ---
 
-## Open issues
+## Open issues & next session starting point
 
 | # | Title | Note |
 |---|---|---|
-| #103 | `SpeakerDiarizer` not wired to pipeline or UI | Design decision needed: store diarized text vs render-time formatting |
+| **#103** | `SpeakerDiarizer` not wired to pipeline or UI | **Start here tomorrow.** Wire speaker badges in `NoteDetailScreen.kt` and integrate diarization into pipeline |
 | #101 | FTS4 never implemented | Lowest priority at 21 recordings; `LIKE` search active |
 | #104 | Exported `AdbReceiver` lets any app trigger hardware deletion | Debug builds only; release unaffected |
 | #106 | Corruption detection has no real-data coverage | `realFileCrossCheck` skips silently when fixtures missing |
