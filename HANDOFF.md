@@ -7,10 +7,11 @@ this whole file before starting.
 
 ## Current state
 
-- **`main`** = `8f28a68`, clean working tree, in sync with `origin/main`.
-- **`.\gradlew :app:testDebugUnitTest` → 449 tests / 0 failures / 1 skipped.** The skip is
-  `Mp3FrameScanTest.realFileCrossCheck` and it is **by design**. A skip there is correct; a *pass*
-  would mean something regressed.
+- **`main`** = `050d729`, clean working tree, in sync with `origin/main`.
+- **`.\gradlew :app:testDebugUnitTest` → 463 tests / 0 failures / 1 skipped.**
+  The skip is `Mp3FrameScanTest.realFileCrossCheck` and it is **by design**. A skip there is
+  correct; a *pass* would mean something regressed.
+- **`:app:assembleRelease` builds clean** (`lintVitalRelease` passes) at versionCode 334.
 - **Phone** (Galaxy S26 Ultra, `R3GL503MXPX`) is on the **release** build, **versionCode 313**,
   installed with `adb install -r`. `versionCode = gitCommitCount` (`app/build.gradle.kts:41`); `main`
   is now well ahead of that.
@@ -58,7 +59,11 @@ this whole file before starting.
 | #127 | **#101 closed** | FTS4 search, schema 12→13 with back-fill; hand-written sync triggers removed in favour of Room's |
 | #128 | — | Removed stray scratch files swept into #127 by a broad `git add -A` |
 
-**#104, #117 and #101 are closed. #106 was closed by the owner.** #119 stays open — its guard
+| #130 | #125 | `@Upsert` for rowid stability (issue re-scoped — see below) |
+| #131 | **#126 closed** | 13→12 downgrade migration, so an older APK opens instead of throwing |
+| #132 | **#122 closed** | `heavyWork` widened to the whole re-download critical section |
+
+**#104, #117, #101, #126 and #122 are closed. #106 was closed by the owner.** #119 stays open — its guard
 shipped, but the root cause of the short transfer is unexplained and needs hardware. **#103 was
 deliberately NOT built** — see below.
 
@@ -100,11 +105,39 @@ reason that matters*. Same shape as D30's cadence detector.
 | # | Title | Note |
 |---|---|---|
 | **#119** | Root cause: why a transfer after an interrupted one comes back short | **Start here.** The guard shipped; the cause is unexplained. Needs a clean-start hardware repro |
-| #125 | `upsert`'s REPLACE orphans FTS index entries; `integrity-check` reports malformed | No false hits, but unbounded index growth. Fixing it changes a core DAO write path |
+| #125 | **Re-scoped.** Its stated mechanism does not exist — see below | Needs a device read of the live write-connection pragma and trigger list |
 | #116 | Delete/download packets omit the 14-byte filename clamp | Needs a throwaway-file hardware delete to verify |
-| #122 | Backup creation and post-transfer DB writes sit outside `heavyWork` | Structural; widening the lock alone does not fix it |
-| #126 | Downgrade to a pre-FTS APK throws until a newer APK is reinstalled | Low. **Do NOT "fix" with a destructive downgrade fallback** |
 | #103 | `SpeakerDiarizer` | **Product decision, not code.** See above |
+
+### #125 was filed on a mechanism that does not exist — read before acting on it
+
+I filed #125 claiming `INSERT OR REPLACE` orphaned FTS entries because `recursive_triggers`
+defaults off, so the implicit delete fired no sync trigger. **That is wrong.**
+`androidx.room:room-runtime:2.6.1`'s `InvalidationTracker.internalInit` unconditionally executes
+
+```
+PRAGMA temp_store = MEMORY;
+PRAGMA recursive_triggers='ON';
+```
+
+on **every** database open, on **every** platform, before any DAO method is reachable. The literal
+string is in `InvalidationTracker.class`; I verified it directly. The raw SQLite default *is* 0 on
+both Robolectric and Android — Room forces it to 1 on both. **There is no platform divergence.**
+
+With the pragma ON, REPLACE's implicit delete fires the sync trigger and the index does not orphan.
+`integrity-check` passes at 1 and fails at 0. The test that appeared to prove corruption only did so
+because it pinned `recursive_triggers=0` in `setUp`, undoing what Room does — that pin is gone.
+
+`@Upsert` still shipped (PR #130), justified honestly: stable rowid, roughly half the write cost, and
+index integrity no longer contingent on an undocumented Room detail that the 2.7/KMP rewrite could
+change. **Not** a fix for observed corruption.
+
+I also had the severity backwards. #125 said "rowids are never reused" — false, there is no
+`AUTOINCREMENT`, so rowid is `max+1` over current rows and deleting the top row frees it. A reviewer
+reproduced one recording's transcript surfacing under another recording's name.
+
+**PR #127's merged commit message repeats the same "defaults off" error.** History was not rewritten;
+the correction lives here, on #125, and in D38/D39.
 
 **#101 and #103 need an owner priority call before building.** They are new feature work, not
 verification. Do not silently absorb them.
