@@ -4,12 +4,42 @@ import com.daedalus.notes.data.db.Converters
 import com.daedalus.notes.data.db.RecordingDao
 import com.daedalus.notes.data.model.Recording
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 
 class RecordingRepository(private val dao: RecordingDao) {
 
     val allRecordings: Flow<List<Recording>> = dao.getAllFlow()
 
-    fun search(query: String): Flow<List<Recording>> = dao.searchFlow(query)
+    fun search(query: String): Flow<List<Recording>> {
+        val ftsQuery = buildFtsMatchQuery(query) ?: return flowOf(emptyList())
+        return dao.searchFtsFlow(ftsQuery)
+    }
+
+    companion object {
+        // #101: FTS4's MATCH treats `"`, `*`, `-`, `^` and the words AND/OR/NEAR as query
+        // syntax, and its default tokenizer is whole-token/prefix, not substring, based (unlike
+        // the old `LIKE '%q%'` scan). To make every possible user-typed query safe AND to keep
+        // as much of the old search feel as practical, we extract only the alphanumeric "words"
+        // from the raw input and rebuild the MATCH string ourselves -- nothing the user types can
+        // reach FTS as an operator.
+        //
+        // Behaviour changes versus the old LIKE scan (documented per #101, not silently shipped):
+        //  - Each word becomes a *prefix* match (`word*`): "init" still finds "initiative"
+        //    (whole-word prefix preserved), but a mid-word fragment like "native" no longer
+        //    finds "alternative" -- FTS4 has no substring index, only tokens/prefixes. This is
+        //    an accepted, intentional narrowing; there is no FTS4 way to fully preserve it.
+        //  - Multiple words are ANDed as separate tokens (all must appear, in any order, in the
+        //    combined filename+transcript+summary text) rather than required as one contiguous
+        //    substring -- a relaxation, not a regression.
+        //  - A query with no alphanumeric characters (blank, or punctuation only) has no tokens
+        //    to search for; it short-circuits to an empty result without hitting the DB, instead
+        //    of the old behaviour of an empty/near-empty LIKE pattern matching everything.
+        internal fun buildFtsMatchQuery(query: String): String? {
+            val tokens = Regex("[\\p{L}\\p{N}]+").findAll(query).map { it.value }.toList()
+            if (tokens.isEmpty()) return null
+            return tokens.joinToString(" ") { "$it*" }
+        }
+    }
 
     suspend fun get(filename: String): Recording? = dao.get(filename)
 
