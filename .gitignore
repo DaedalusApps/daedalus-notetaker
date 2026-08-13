@@ -10,6 +10,8 @@ build/
 venv/
 *.wav
 *.mp3
+# Structure-only MP3 fixtures (payload bytes zeroed, no intelligible audio) — see #106.
+!android/app/src/test/resources/mp3/*.mp3
 notetaker-exports/
 
 # Android

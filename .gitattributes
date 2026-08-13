@@ -1,0 +1,9 @@
+# MP3 fixtures are binary and must never be line-ending translated. Development
+# happens on Windows with core.autocrlf=true while CI runs on ubuntu-latest, so a
+# file misclassified as text would be corrupted on checkout and fail only in CI.
+#
+# Git's content heuristic already classifies the structure-only fixtures added for
+# #106 as binary, because zeroing the audio payload puts NUL bytes near the start.
+# That is incidental, not guaranteed: a future fixture without an early NUL could
+# be sniffed as text. Pin it rather than rely on the heuristic.
+*.mp3 binary
