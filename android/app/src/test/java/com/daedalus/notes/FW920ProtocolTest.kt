@@ -63,6 +63,54 @@ class FW920ProtocolTest {
         assertTrue(parsed is ParsedResponse.Status)
     }
 
+    // --- #96: audio chunks beginning A0 0A must not parse as control -------------------------
+
+    /**
+     * A 244-byte raw-MP3 audio notification whose bytes happen to satisfy the old length
+     * heuristic (byte[4] == 237 -> 5 + 237 + 2 == 244) must still be treated as audio when it
+     * arrives on the audio channel, not misparsed as a CMD 0x0B control packet.
+     */
+    @Test
+    fun audioChunkOnAudioChannel_matchingAckHeuristic_parsedAsAudioChunk() {
+        val data = ByteArray(244) { 0x00 }
+        data[0] = 0xA0.toByte()
+        data[1] = 0x0A.toByte()
+        data[2] = 0x01
+        data[3] = 0x0B          // looks like CMD 0x0B (download ack)
+        data[4] = 237.toByte()  // 5 + 237 + 2 == 244 -> satisfies the old length heuristic
+
+        val parsed = parseResponse(data, isAudioChannel = true)
+        assertTrue("Expected AudioChunk, got $parsed", parsed is ParsedResponse.AudioChunk)
+    }
+
+    /** The same bytes, received on the control channel while idle, are still a control packet. */
+    @Test
+    fun sameBytesOnControlChannel_parsedAsControl() {
+        val data = ByteArray(244) { 0x00 }
+        data[0] = 0xA0.toByte()
+        data[1] = 0x0A.toByte()
+        data[2] = 0x01
+        data[3] = 0x0B
+        data[4] = 237.toByte()
+
+        val parsed = parseResponse(data, isAudioChannel = false)
+        assertTrue("Expected Ack, got $parsed", parsed is ParsedResponse.Ack)
+        assertEquals(0x0B, (parsed as ParsedResponse.Ack).cmd)
+    }
+
+    /**
+     * The end-of-file Ack(0x0B) — sent on the control channel — must still parse as a control
+     * Ack even while a transfer is in progress. This is the regression that would hurt most:
+     * misrouting this packet would make downloadFile() hang until timeout.
+     */
+    @Test
+    fun eofAck_onControlChannel_stillParsedDuringTransfer() {
+        val eofAck = buildPacket(0x0B)
+        val parsed = parseResponse(eofAck, isAudioChannel = false)
+        assertTrue("Expected Ack, got $parsed", parsed is ParsedResponse.Ack)
+        assertEquals(0x0B, (parsed as ParsedResponse.Ack).cmd)
+    }
+
     // --- File list parsing tests ---
 
     /** Legacy 14-char filename (e.g. "20260806130549") parses correctly. */
