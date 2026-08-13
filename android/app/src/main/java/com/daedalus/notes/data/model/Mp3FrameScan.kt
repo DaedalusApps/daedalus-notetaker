@@ -134,6 +134,51 @@ object Mp3FrameScan {
             data[tagStart + 2] == 'G'.code.toByte()
     }
 
+    private fun matchesAsciiSuffix(data: ByteArray, end: Int, marker: String): Boolean {
+        val start = end - marker.length
+        if (start < 0) return false
+        for (i in marker.indices) {
+            if (data[start + i] != marker[i].code.toByte()) return false
+        }
+        return true
+    }
+
+    /**
+     * A trailing span that never resyncs to a valid frame before [regionEnd] is either real,
+     * unrecoverable damage (a dropped BLE chunk, a truncated transfer) or a harmless non-audio
+     * trailer this scanner doesn't otherwise recognize (a flash sector's zero-padded unused
+     * tail, an APEv2/Lyrics3 tag written by other tooling). Byte content alone can't always
+     * tell those apart, so this errs conservative: a span is only treated as real damage if it
+     * carries actual information. A recognized tag footer, or a span where every byte is the
+     * same value (the universal shape of both flash padding and simple zero/erase-fill), is
+     * never flagged — those bytes have no audio content to lose either way, so treating them as
+     * benign costs nothing in preserved audio while avoiding a false "corrupted" signal (the
+     * NoteDetailScreen banner's "Re-fetch audio" action deletes the local file first, against a
+     * device copy that is frequently already gone).
+     */
+    private fun isBenignTrailer(data: ByteArray, brokenPos: Int, regionEnd: Int): Boolean {
+        if (brokenPos >= regionEnd) return true
+
+        // A single frame right at the boundary can fail chain confirmation only because its
+        // successor isn't a frame at all (not because the frame itself is damaged) — judge the
+        // trailer that actually follows it, not the last real frame.
+        val boundaryFrameLen = parseHeader(data, brokenPos)?.frameLen?.takeIf { brokenPos + it <= regionEnd } ?: 0
+        val start = brokenPos + boundaryFrameLen
+        if (start >= regionEnd) return true
+
+        // APEv2 footer: a fixed 32-byte structure whose "APETAGEX" preamble is its FIRST 8
+        // bytes, i.e. 32 bytes back from EOF — not anchored at the very end like Lyrics3v2's.
+        if (matchesAsciiSuffix(data, regionEnd - 24, "APETAGEX") || matchesAsciiSuffix(data, regionEnd, "LYRICS200")) {
+            return true
+        }
+
+        val first = data[start]
+        for (i in start until regionEnd) {
+            if (data[i] != first) return false
+        }
+        return true
+    }
+
     fun scan(bytes: ByteArray): Mp3ScanResult {
         val size = bytes.size
         val (id3Present, id3Size) = parseId3(bytes)
@@ -194,6 +239,14 @@ object Mp3FrameScan {
             if (h == null) {
                 // Defensive: shouldn't happen since pos was validated to chain already.
                 val resyncPos = resyncFrom(pos)
+                if (resyncPos == null && isBenignTrailer(bytes, pos, audioEnd)) {
+                    // Not corruption: if pos is itself a real, independently-parseable frame
+                    // (only its lookahead confirmation failed, because what follows is benign
+                    // trailer rather than another frame), count it — this is just a truncated
+                    // tail with trailer bytes after it, not lost audio.
+                    if (parseHeader(bytes, pos) != null) framesOk++
+                    break
+                }
                 recordGap(pos, resyncPos)
                 if (resyncPos != null) {
                     pos = resyncPos
@@ -213,6 +266,10 @@ object Mp3FrameScan {
             }
 
             val resyncPos = resyncFrom(nextPos)
+            if (resyncPos == null && isBenignTrailer(bytes, nextPos, audioEnd)) {
+                if (parseHeader(bytes, nextPos) != null) framesOk++
+                break
+            }
             recordGap(nextPos, resyncPos)
             if (resyncPos != null) {
                 pos = resyncPos
