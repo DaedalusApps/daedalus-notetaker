@@ -739,6 +739,304 @@ class RecordingViewModelTest {
 
         coVerify(exactly = 1) { bleManager.listFiles() }
     }
+
+    // #119: downloadFile() returns a non-null File whenever the FW920 sent an EOF ack,
+    // regardless of how many bytes actually arrived. A silently short replacement must be
+    // rejected using the pre-download .bak copy as the completeness oracle, restoring it and
+    // leaving the DB row/derived analysis untouched, instead of overwriting a good copy with a
+    // truncated one and wiping the analysis derived from it.
+    @Test
+    fun redownloadAndAnalyze_shorterReplacement_rejectsAndRestoresBackup() = runTest {
+        val filename = "short_replace.mp3"
+        val originalContent = ByteArray(1000) { it.toByte() }
+        val original = File.createTempFile("short_replace_orig", ".mp3").apply {
+            writeBytes(originalContent)
+            deleteOnExit()
+        }
+        val recording = Recording(
+            filename, isLocal = false, localPath = original.absolutePath,
+            transcript = "orig transcript", summary = "orig summary", mindMap = "orig map",
+            title = "Orig Title", shortSummary = "orig short", topics = listOf("t1"),
+            sizeBytes = originalContent.size.toLong()
+        )
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "short_replace", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        // Mirrors real BleManager.downloadFile(): deletes the existing local file first, then
+        // writes a shorter replacement in its place — the same path, less content — that still
+        // ends with a normal EOF ack. This makes the restore assertion below meaningful: without
+        // the deletion, the original content would still be sitting untouched at that path and
+        // the "restored" assertion would pass trivially even with no fix in place.
+        coEvery { bleManager.downloadFile(eq(filename), any()) } coAnswers {
+            original.delete()
+            File(original.absolutePath).apply {
+                writeBytes(ByteArray(500) { it.toByte() })
+            }
+        }
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        val restored = File(original.absolutePath)
+        assertEquals(1000, restored.length().toInt())
+        assertTrue(restored.readBytes().contentEquals(originalContent))
+
+        coVerify(exactly = 0) { repo.save(any()) }
+        coVerify(exactly = 0) { repo.deletePartsOf(any()) }
+        assertTrue(
+            "expected aiError to mention the short re-download, was: ${viewModel.aiError.value}",
+            viewModel.aiError.value?.contains("shorter", ignoreCase = true) == true
+        )
+    }
+
+    // Equal length is the ordinary successful case: the guard must not interfere with it. This
+    // and the two tests below aren't regression tests for the byte-length guard itself — none of
+    // them ever trigger a rejection, so they'd pass just as well without the guard's code. What
+    // they cover is the ioDispatcher fix a few lines up (Dispatchers.IO -> ioDispatcher): before
+    // that, mixing a real dispatcher with the StandardTestDispatcher in the same suspend chain
+    // made these flaky, not the guard's accept/reject logic.
+    @Test
+    fun redownloadAndAnalyze_equalLengthReplacement_proceedsNormally() = runTest {
+        val filename = "equal_replace.mp3"
+        val original = File.createTempFile("equal_replace_orig", ".mp3").apply {
+            writeBytes(ByteArray(500) { it.toByte() })
+            deleteOnExit()
+        }
+        val recording = Recording(
+            filename, isLocal = false, localPath = original.absolutePath,
+            transcript = "orig transcript", sizeBytes = 500L
+        )
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "equal_replace", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        val equalLength = File.createTempFile("equal_replace_downloaded", ".mp3").apply {
+            writeBytes(ByteArray(500) { (it + 1).toByte() })
+            deleteOnExit()
+        }
+        coEvery { bleManager.downloadFile(eq(filename), any()) } returns equalLength
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        val bak = File(original.parentFile, original.name + ".bak")
+        assertTrue("expected .bak to be cleaned up", !bak.exists())
+        coVerify(exactly = 1) { repo.deletePartsOf(filename) }
+        coVerify(exactly = 1) { repo.save(match { it.filename == filename && it.transcript == "" }) }
+    }
+
+    // Longer is legitimate: the previous local copy may itself have been truncated, which is
+    // exactly the case this feature exists to fix, so a longer replacement must be accepted.
+    @Test
+    fun redownloadAndAnalyze_longerReplacement_isAccepted() = runTest {
+        val filename = "longer_replace.mp3"
+        val original = File.createTempFile("longer_replace_orig", ".mp3").apply {
+            writeBytes(ByteArray(500) { it.toByte() })
+            deleteOnExit()
+        }
+        val recording = Recording(
+            filename, isLocal = false, localPath = original.absolutePath,
+            transcript = "orig transcript", sizeBytes = 500L
+        )
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "longer_replace", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        val longer = File.createTempFile("longer_replace_downloaded", ".mp3").apply {
+            writeBytes(ByteArray(1500) { it.toByte() })
+            deleteOnExit()
+        }
+        coEvery { bleManager.downloadFile(eq(filename), any()) } returns longer
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        val bak = File(original.parentFile, original.name + ".bak")
+        assertTrue("expected .bak to be cleaned up", !bak.exists())
+        coVerify(exactly = 1) { repo.deletePartsOf(filename) }
+        coVerify(exactly = 1) { repo.save(match { it.filename == filename && it.transcript == "" }) }
+    }
+
+    // No prior local copy means there's nothing to compare against — a fresh fetch must always
+    // be accepted regardless of size.
+    @Test
+    fun redownloadAndAnalyze_noPriorLocalCopy_isAccepted() = runTest {
+        val filename = "fresh_fetch.mp3"
+        val missingLocalPath = File.createTempFile("fresh_fetch_missing", ".mp3").let {
+            it.delete() // ensure it does not exist
+            it.absolutePath
+        }
+        val recording = Recording(filename, isLocal = false, localPath = missingLocalPath)
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "fresh_fetch", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        val downloaded = File.createTempFile("fresh_fetch_downloaded", ".mp3").apply {
+            writeBytes(ByteArray(10) { it.toByte() })
+            deleteOnExit()
+        }
+        coEvery { bleManager.downloadFile(eq(filename), any()) } returns downloaded
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repo.deletePartsOf(filename) }
+        coVerify(exactly = 1) { repo.save(match { it.filename == filename && it.transcript == "" }) }
+    }
+
+    // Regression for HIGH-1: restoreBackup() must not delete the .bak when the restore copy
+    // itself fails. copyTo(overwrite = true) deletes the destination before it writes, so if the
+    // copy throws partway through, the .bak is the only remaining good copy and must survive.
+    // Forces a failure by making the download replace the local path with a directory (real,
+    // deterministic on every platform) before triggering the downloaded == null restore path.
+    @Test
+    fun restoreBackup_copyFailurePreservesBackup() = runTest {
+        val filename = "restore_fail.mp3"
+        val originalContent = ByteArray(1000) { it.toByte() }
+        val original = File.createTempFile("restore_fail_orig", ".mp3").apply {
+            writeBytes(originalContent)
+            deleteOnExit()
+        }
+        val recording = Recording(
+            filename, isLocal = false, localPath = original.absolutePath,
+            sizeBytes = originalContent.size.toLong()
+        )
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "restore_fail", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        // Simulates a transfer that deletes the original and then fails so badly that the local
+        // path can no longer be written back to (e.g. media unmounted mid-transfer): downloadFile
+        // returns null (a failed transfer), and copyTo(localPath) will throw because localPath
+        // now resolves to a non-empty directory instead of a file — copyTo's overwrite path
+        // calls target.delete() first, which fails (returns false, doesn't throw) for a
+        // non-empty directory, so copyTo throws FileAlreadyExistsException rather than silently
+        // succeeding the way it would against an empty directory.
+        coEvery { bleManager.downloadFile(eq(filename), any()) } coAnswers {
+            original.delete()
+            File(original.absolutePath).mkdirs()
+            File(original.absolutePath, "lock.txt").writeText("occupied")
+            null
+        }
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        val bak = File(original.parentFile, original.name + ".bak")
+        assertTrue("expected .bak to survive a failed restore", bak.exists())
+        assertEquals(1000, bak.length().toInt())
+        coVerify(exactly = 0) { repo.save(any()) }
+    }
+
+    // Regression for HIGH-2a: the guard must compare against the length captured at backup
+    // creation time, not a live re-read of the .bak file. File.length() on a missing file
+    // silently returns 0, which would make any truncated download look "not shorter" and let it
+    // straight through if the guard re-read the file instead of using a captured value.
+    @Test
+    fun redownloadAndAnalyze_vanishedBackup_stillRejectsShortReplacement() = runTest {
+        val filename = "vanished_bak.mp3"
+        val originalContent = ByteArray(1000) { it.toByte() }
+        val original = File.createTempFile("vanished_bak_orig", ".mp3").apply {
+            writeBytes(originalContent)
+            deleteOnExit()
+        }
+        val recording = Recording(
+            filename, isLocal = false, localPath = original.absolutePath,
+            sizeBytes = originalContent.size.toLong()
+        )
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "vanished_bak", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        // Deletes the .bak the guard would otherwise have to re-read live, then writes a shorter
+        // replacement at the local path.
+        coEvery { bleManager.downloadFile(eq(filename), any()) } coAnswers {
+            val bak = File(original.parentFile, original.name + ".bak")
+            assertTrue("expected .bak to exist before the test deletes it", bak.exists())
+            bak.delete()
+            original.delete()
+            File(original.absolutePath).apply { writeBytes(ByteArray(500) { it.toByte() }) }
+        }
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { repo.save(any()) }
+        coVerify(exactly = 0) { repo.deletePartsOf(any()) }
+        assertTrue(
+            "expected aiError to mention the short re-download, was: ${viewModel.aiError.value}",
+            viewModel.aiError.value?.contains("shorter", ignoreCase = true) == true
+        )
+    }
+
+    // Re-download requested from a part must resolve to the parent's filename for both the BLE
+    // fetch and the guard's completeness check (the part itself has no file on the device).
+    @Test
+    fun redownloadAndAnalyze_requestedFromPart_resolvesParentAndAppliesGuard() = runTest {
+        val parentFilename = "part_parent.mp3"
+        val partFilename = "part_parent_part1.mp3"
+        val originalContent = ByteArray(1000) { it.toByte() }
+        val original = File.createTempFile("part_parent_orig", ".mp3").apply {
+            writeBytes(originalContent)
+            deleteOnExit()
+        }
+        val parentRecording = Recording(
+            parentFilename, isLocal = false, localPath = original.absolutePath,
+            sizeBytes = originalContent.size.toLong()
+        )
+        val partRecording = Recording(
+            partFilename, isLocal = false, parentFilename = parentFilename, partIndex = 1
+        )
+        coEvery { repo.get(partFilename) } returns partRecording
+        coEvery { repo.get(parentFilename) } returns parentRecording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "part_parent", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        coEvery { bleManager.downloadFile(eq(parentFilename), any()) } coAnswers {
+            original.delete()
+            File(original.absolutePath).apply { writeBytes(ByteArray(500) { it.toByte() }) }
+        }
+
+        viewModel.redownloadAndAnalyze(partFilename, bleManager)
+        advanceUntilIdle()
+
+        val restored = File(original.absolutePath)
+        assertEquals(1000, restored.length().toInt())
+        assertTrue(restored.readBytes().contentEquals(originalContent))
+        coVerify(exactly = 0) { repo.save(any()) }
+        coVerify(exactly = 1) { bleManager.downloadFile(eq(parentFilename), any()) }
+        coVerify(exactly = 0) { bleManager.downloadFile(eq(partFilename), any()) }
+    }
+
     @Test
     fun loadNote_populatesCurrentScanResult() = runTest {
         val audio = File.createTempFile("scan-test", ".mp3").also { it.deleteOnExit() }

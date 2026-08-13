@@ -444,6 +444,7 @@ fun NoteDetailScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(
                             onClick = { recordingViewModel.redownloadAndAnalyze(filename, bleManager) },
+                            enabled = !isProcessing,
                             colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.error,
                                 contentColor = MaterialTheme.colorScheme.onError
