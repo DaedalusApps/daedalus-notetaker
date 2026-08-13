@@ -75,6 +75,20 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            // Gradle's default console output prints only "AssertionError at Foo.kt:840" for a
+            // failing test — no assertion message, no cause. That is fine locally, where the HTML
+            // report is right there, but in CI the report is not uploaded, so a failure that does
+            // not reproduce on the developer's machine is undiagnosable from the log alone. This
+            // happened on #119: a test passed 3x on Windows and failed on ubuntu-latest with no
+            // message to work from.
+            all {
+                it.testLogging {
+                    exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+                    events("failed", "skipped")
+                    showStackTraces = true
+                    showCauses = true
+                }
+            }
         }
     }
 
