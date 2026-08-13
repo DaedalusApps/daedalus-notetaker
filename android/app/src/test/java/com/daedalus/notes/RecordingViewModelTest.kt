@@ -830,8 +830,19 @@ class RecordingViewModelTest {
 
         val bak = File(original.parentFile, original.name + ".bak")
         assertTrue("expected .bak to be cleaned up", !bak.exists())
-        coVerify(exactly = 1) { repo.deletePartsOf(filename) }
-        coVerify(exactly = 1) { repo.save(match { it.filename == filename && it.transcript == "" }) }
+        // deletePartsOf is also called independently by the doAnalyze() this triggers, so its
+        // count here can be 1 or 2 depending on coroutine scheduling — assert it happened at
+        // least once rather than pinning an ambiguous exact count.
+        coVerify(atLeast = 1) { repo.deletePartsOf(filename) }
+        // Pin the re-download's own save specifically: its localPath/sizeBytes are the
+        // downloaded file's, which distinguishes it from doAnalyze()'s later save of the same
+        // filename (which reads back the original recording's path/size via the mocked repo).
+        coVerify(exactly = 1) {
+            repo.save(match {
+                it.filename == filename && it.transcript == "" &&
+                    it.localPath == equalLength.absolutePath && it.sizeBytes == 500L
+            })
+        }
     }
 
     // Longer is legitimate: the previous local copy may itself have been truncated, which is
@@ -866,8 +877,19 @@ class RecordingViewModelTest {
 
         val bak = File(original.parentFile, original.name + ".bak")
         assertTrue("expected .bak to be cleaned up", !bak.exists())
-        coVerify(exactly = 1) { repo.deletePartsOf(filename) }
-        coVerify(exactly = 1) { repo.save(match { it.filename == filename && it.transcript == "" }) }
+        // deletePartsOf is also called independently by the doAnalyze() this triggers, so its
+        // count here can be 1 or 2 depending on coroutine scheduling — assert it happened at
+        // least once rather than pinning an ambiguous exact count.
+        coVerify(atLeast = 1) { repo.deletePartsOf(filename) }
+        // Pin the re-download's own save specifically: its localPath/sizeBytes are the
+        // downloaded file's, which distinguishes it from doAnalyze()'s later save of the same
+        // filename (which reads back the original recording's path/size via the mocked repo).
+        coVerify(exactly = 1) {
+            repo.save(match {
+                it.filename == filename && it.transcript == "" &&
+                    it.localPath == longer.absolutePath && it.sizeBytes == 1500L
+            })
+        }
     }
 
     // No prior local copy means there's nothing to compare against — a fresh fetch must always
