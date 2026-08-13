@@ -7,15 +7,33 @@ this whole file before starting.
 
 ## Current state
 
-- **`main`** = `ec9b13f`, clean working tree, in sync with `origin/main`.
-- **`.\gradlew :app:testDebugUnitTest` → 425 tests / 0 failures / 1 skipped.** The skip is
+- **`main`** = `8f28a68`, clean working tree, in sync with `origin/main`.
+- **`.\gradlew :app:testDebugUnitTest` → 449 tests / 0 failures / 1 skipped.** The skip is
   `Mp3FrameScanTest.realFileCrossCheck` and it is **by design**. A skip there is correct; a *pass*
   would mean something regressed.
 - **Phone** (Galaxy S26 Ultra, `R3GL503MXPX`) is on the **release** build, **versionCode 313**,
-  installed with `adb install -r`. `versionCode = gitCommitCount` (`app/build.gradle.kts:41`), so
-  `main` reads higher than the phone by however many commits landed after that install — all of
-  them test-fixture and documentation commits with **no app-behaviour change**. The phone is
-  functionally current for `main` as of this handoff. Check with `git rev-list --count HEAD`.
+  installed with `adb install -r`. `versionCode = gitCommitCount` (`app/build.gradle.kts:41`); `main`
+  is now well ahead of that.
+
+> **⚠ THE NEXT INSTALL MIGRATES THE DATABASE. This is the one irreversible thing waiting.**
+> #101 took the schema from **12 to 13**, adding an FTS4 index. `MIGRATION_12_13` runs once, on
+> first launch after install, against the owner's real database. It has been exercised only against
+> a synthetic v12 DB via `MigrationTestHelper`, **never against the actual 39-row database.**
+>
+> Why it should be safe, and what to check anyway:
+> - Android wraps `onUpgrade` in a transaction, so a failure rolls back to v12 with data intact.
+> - The migration's `CREATE VIRTUAL TABLE` was verified byte-identical to Room's generated schema,
+>   so Room's identity check cannot throw on open (that failure mode would make the app unopenable).
+> - The back-fill is a pure `INSERT … SELECT`; no row crosses into the JVM heap, so no OOM.
+>
+> **After the next install: open the app, confirm it launches, and search for a word you know is in
+> an old transcript.** If search returns nothing for pre-existing recordings, the back-fill did not
+> run — that is the failure this needs watching for. Pull the db first, per the protocol below.
+
+- **Data verified: 22 recordings, 58,658,554 bytes, MD5 byte-identical at seven checkpoints** —
+  before any work, after each of five installs, and after every interrupted transfer. Baseline was
+  pulled with `adb pull` and proven identical to the device with per-file MD5 comparison.
+  The db, `-wal` and `-shm` were also pulled byte-exact via `adb exec-out`.
 - **Data verified: 22 recordings, 58,658,554 bytes, MD5 byte-identical at seven checkpoints** —
   before any work, after each of five installs, and after every interrupted transfer. Baseline was
   pulled with `adb pull` and proven identical to the device with per-file MD5 comparison.
@@ -35,8 +53,32 @@ this whole file before starting.
 | #118 | **#104 closed** | `.AdbReceiver` gated on `android.permission.DUMP`; `SafeFilename` guards on all three destructive ADB handlers; dot-only names rejected centrally |
 | #120 | #106 | Real interrupted-BLE-transfer fixtures (structure-only, audio zeroed), pinned against ffmpeg ground truth |
 
-**#104 is closed and device-verified. #106 was closed by the owner** — note PR #120 documents a
-residual the issue's own plan cannot reach (see below). #101 and #103 remain untouched.
+| #123 | #119 | Re-download that comes back shorter than the copy it replaced is rejected and the backup restored; two latent data-loss defects in `restoreBackup` fixed |
+| #124 | **#117 closed** | Zero-byte transfer no longer leaves a 0-byte file; failed downloads are logged, counted and surfaced |
+| #127 | **#101 closed** | FTS4 search, schema 12→13 with back-fill; hand-written sync triggers removed in favour of Room's |
+| #128 | — | Removed stray scratch files swept into #127 by a broad `git add -A` |
+
+**#104, #117 and #101 are closed. #106 was closed by the owner.** #119 stays open — its guard
+shipped, but the root cause of the short transfer is unexplained and needs hardware. **#103 was
+deliberately NOT built** — see below.
+
+### #103 was re-scoped, not implemented — read before picking it up
+
+`SpeakerDiarizer.formatTranscript` does not detect speakers. It splits on sentence boundaries and
+flips between "Speaker 1" and "Speaker 2" **every three sentences, unconditionally** — there is no
+audio analysis, no embedding, no turn-taking signal, and the function never sees the audio at all,
+only the transcript string. On a solo memo it invents a second participant; on a four-person meeting
+it collapses everyone into two; wherever a real speaker change happens it is right only by
+coincidence.
+
+Wiring it into `NoteDetailScreen` as speaker badges would present fabricated attribution as fact in
+the owner's own meeting notes. The owner's decision was **do not wire it**; the issue now carries
+three honest options (drop the speaker claim and ship it as paragraph formatting; do real
+audio-based diarization; or delete it as #100 did with `AudioRepairEngine`). **This is a product
+call, not a wiring task.**
+
+Its unit tests pass and always did — they pin the formatting mechanics and *cannot fail for the
+reason that matters*. Same shape as D30's cadence detector.
 
 ---
 
@@ -57,11 +99,12 @@ residual the issue's own plan cannot reach (see below). #101 and #103 remain unt
 
 | # | Title | Note |
 |---|---|---|
-| **#119** | A transfer after an interrupted one can complete with a valid EOF ack but truncated data | **Start here.** Silent data loss on the recovery path. See below |
-| #117 | Zero-byte transfer leaves a 0-byte file, no DB row, retries forever | Small robustness fix; no integrity check on a completed transfer |
+| **#119** | Root cause: why a transfer after an interrupted one comes back short | **Start here.** The guard shipped; the cause is unexplained. Needs a clean-start hardware repro |
+| #125 | `upsert`'s REPLACE orphans FTS index entries; `integrity-check` reports malformed | No false hits, but unbounded index growth. Fixing it changes a core DAO write path |
 | #116 | Delete/download packets omit the 14-byte filename clamp | Needs a throwaway-file hardware delete to verify |
-| #103 | `SpeakerDiarizer` not wired to pipeline or UI | Feature work. Needs a device to verify |
-| #101 | FTS4 never implemented | Lowest priority at 22 recordings; `LIKE` search active |
+| #122 | Backup creation and post-transfer DB writes sit outside `heavyWork` | Structural; widening the lock alone does not fix it |
+| #126 | Downgrade to a pre-FTS APK throws until a newer APK is reinstalled | Low. **Do NOT "fix" with a destructive downgrade fallback** |
+| #103 | `SpeakerDiarizer` | **Product decision, not code.** See above |
 
 **#101 and #103 need an owner priority call before building.** They are new feature work, not
 verification. Do not silently absorb them.
@@ -324,3 +367,32 @@ still worth testing: ruling it out produced the evidence that found the real cau
 **Check what a trigger does before firing it.** `SYNC` reads as innocuous and executes hardware
 deletions. Reading `syncAllBleFiles` first cost one minute; firing it blind with a non-empty
 pending-delete queue would have destroyed recordings off the FW920.
+
+**A fix can make a latent bug into the common path.** #119's guard was correct, but it routed
+traffic onto `restoreBackup`, which deleted the `.bak` *outside* its `runCatching` — so a copy that
+threw partway left the user with a partial file and no backup. Rare before, routine after. **When
+adding a guard, review the code the guard newly depends on**, not just the code you wrote.
+
+**Two greens after a red is not a fix.** A test failed on Linux CI and passed on re-run. Two
+hypotheses (test ordering, a real media API in the coroutine) were both wrong. What actually found
+it was making CI *print assertion messages* — the failure then named itself in one run:
+`doAnalyze` independently calls `deletePartsOf`/`save`, so `coVerify(exactly = 1)` was
+scheduling-dependent. **Fix your ability to see the failure before theorising about it.** CI now
+prints full exception output; that change was worth more than either hypothesis.
+
+**Room owns FTS trigger synchronisation — do not hand-write them.** #101 originally created three
+sync triggers. Room's `onPostMigrate` generates its own `room_fts_content_sync_*` triggers, and
+`DBUtil.dropFtsSyncTriggers` only ever removes triggers with **that** prefix — so hand-written ones
+would have been welded into the owner's database forever, diverging from every clean install. They
+were also semantically wrong (`DELETE FROM fts WHERE docid` on a `content=` table re-reads the
+content table, so AFTER-triggers un-index the wrong terms; that is why Room uses BEFORE). In
+production the symptom was masked by Room's triggers firing first. **Correctness by accident of
+ordering is not a property to ship.**
+
+**`MigrationTestHelper` does not run `onPostMigrate`.** A migration test therefore exercises a
+trigger topology that exists on **no real device**, and will happily pass on a database that returns
+stale search hits. Live-topology behaviour needs a real `Room.inMemoryDatabaseBuilder` test.
+
+**A migration test that only asserts rows survived proves almost nothing.** Assert the *derived*
+state too — for #101 that meant querying through FTS after migrating, because an empty index would
+leave every existing recording unsearchable while the row-survival assertions stayed green.
