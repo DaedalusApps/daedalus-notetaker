@@ -16,6 +16,7 @@ import com.daedalus.notes.viewmodel.RecordingViewModel
 import io.mockk.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
@@ -403,6 +404,64 @@ class RecordingViewModelTest {
         coVerify(exactly = 1) {
             repo.save(match { it.filename == "flagged.mp3" && !it.analysisFailed })
         }
+    }
+
+    // --- #117: a failed download must be visible, not silently swallowed ---------------------
+
+    @Test
+    fun syncAllBleFiles_failedDownload_isLoggedNotSavedAndSurfacedAsError() = runTest {
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "broken.mp3", sizeBytes = 100L)
+        coEvery { repo.getPendingDeletes() } returns emptyList()
+        coEvery { bleManager.listFiles() } returns Unit
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { repo.get("broken.mp3") } returns null
+        // downloadFile returning null is the documented failure signal (BleManager deletes the
+        // 0-byte file itself and returns null; see BleManagerTest for that half of the fix).
+        coEvery { bleManager.downloadFile(eq("broken.mp3"), any()) } returns null
+
+        viewModel.syncAllBleFiles(bleManager)
+        advanceUntilIdle()
+
+        // No DB row is ever created for a file whose download failed.
+        coVerify(exactly = 0) { repo.save(match { it.filename == "broken.mp3" }) }
+        verify(exactly = 1) {
+            Log.w("DaedalusSync", match<String> { it.contains("broken.mp3") })
+        }
+        assertEquals(
+            "1 file(s) could not be downloaded from the device and will be retried on the next sync.",
+            viewModel.aiError.value
+        )
+    }
+
+    @Test
+    fun syncAllBleFiles_successfulDownload_summaryReportsSyncedCountAndNoError() = runTest {
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "ok.mp3", sizeBytes = 100L)
+        coEvery { repo.getPendingDeletes() } returns emptyList()
+        coEvery { bleManager.listFiles() } returns Unit
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { repo.get("ok.mp3") } returns null
+        val tempFile = File.createTempFile("ok-file", ".mp3").apply { deleteOnExit() }
+        coEvery { bleManager.downloadFile(eq("ok.mp3"), any()) } returns tempFile
+
+        val progressValues = mutableListOf<String?>()
+        val collectJob = launch { viewModel.syncProgress.collect { progressValues.add(it) } }
+
+        viewModel.syncAllBleFiles(bleManager)
+        advanceUntilIdle()
+        collectJob.cancel()
+
+        coVerify(exactly = 1) {
+            repo.save(match { it.filename == "ok.mp3" && it.localPath == tempFile.absolutePath })
+        }
+        assertTrue(
+            "expected a 'Synced 1 file(s)' progress message, saw: $progressValues",
+            progressValues.contains("Synced 1 file(s)")
+        )
+        assertNull(viewModel.aiError.value)
     }
 
     // The generic catch around transcribeRange in the split loop breaks rather than aborting the

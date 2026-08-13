@@ -406,6 +406,7 @@ class RecordingViewModel @JvmOverloads constructor(
             }
             _aiError.value = null
             var synced = 0
+            var failed = 0
             val newFilenames = mutableListOf<String>()
 
             // One transfer at a time, and never while an analysis is running — dropped GATT
@@ -442,11 +443,22 @@ class RecordingViewModel @JvmOverloads constructor(
                     )
                     newFilenames.add(entry.filename)
                     synced++
+                } else {
+                    Log.w("DaedalusSync", "Failed to download ${entry.filename} via BLE — will retry next sync")
+                    failed++
                 }
             }
             }
 
-            _syncProgress.value = if (synced > 0) "Synced $synced file(s)" else "All files already synced"
+            _syncProgress.value = when {
+                failed > 0 && synced > 0 -> "Synced $synced file(s), $failed failed"
+                failed > 0 -> "$failed file(s) failed to download"
+                synced > 0 -> "Synced $synced file(s)"
+                else -> "All files already synced"
+            }
+            if (failed > 0) {
+                _aiError.value = "$failed file(s) could not be downloaded from the device and will be retried on the next sync."
+            }
             delay(1000)
             _syncProgress.value = null
             // Deliberately not part of syncJob: analysis of a long recording runs for many
