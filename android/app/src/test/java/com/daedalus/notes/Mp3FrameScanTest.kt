@@ -151,7 +151,12 @@ class Mp3FrameScanTest {
         tag[2] = 'G'.code.toByte()
         val data = clean + tag
         val result = Mp3FrameScan.scan(data)
-        assertEquals(49, result.framesOk)
+        // All 50 frames are valid audio preceding the tag. Previously this asserted 49: the
+        // scanner used to under-count the very last frame before a trailing tag because its
+        // chain-confirmation lookahead ran into the tag bytes instead of true EOF. The trailing
+        // ID3v1 tag is now excluded from the scanned region (mirrors the leading ID3v2 handling
+        // above), so the last real frame is correctly confirmed instead of penalized.
+        assertEquals(50, result.framesOk)
         assertEquals(0, result.gapCount)
     }
 

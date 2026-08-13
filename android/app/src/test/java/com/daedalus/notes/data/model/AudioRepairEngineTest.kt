@@ -1,6 +1,7 @@
 package com.daedalus.notes.data.model
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -25,7 +26,7 @@ class AudioRepairEngineTest {
         private val MPEG2_HEADER = byteArrayOf(0xFF.toByte(), 0xF3.toByte(), 0x48.toByte(), 0x00)
         private const val MPEG2_FRAME_LEN = 144
 
-        private fun mpeg2Frame(fill: Byte = 0x11): ByteArray =
+        private fun mpeg2Frame(fill: Byte): ByteArray =
             ByteArray(MPEG2_FRAME_LEN) { fill }.also { System.arraycopy(MPEG2_HEADER, 0, it, 0, 4) }
 
         // fill varies per stream so two streams from different calls are never byte-identical
@@ -39,6 +40,8 @@ class AudioRepairEngineTest {
         }
     }
 
+    // ---- Legacy MPEG1 case: kept, now asserting on bytes instead of a boolean ----
+
     @Test
     fun repairMp3File_mpeg1_cleanFile_isByteIdentical() {
         val testFile = tempFolder.newFile("test_recording.mp3")
@@ -47,51 +50,73 @@ class AudioRepairEngineTest {
         val fullData = frame1 + frame2
         testFile.writeBytes(fullData)
 
-        val repaired = AudioRepairEngine.repairMp3File(testFile)
+        val result = AudioRepairEngine.repairMp3File(testFile)
 
-        assertTrue("clean chained stream should report success", repaired)
+        assertTrue(
+            "clean chained stream should be reported Clean, got $result",
+            result is AudioRepairEngine.RepairResult.Clean
+        )
         assertArrayEquals("clean file bytes must be untouched", fullData, testFile.readBytes())
     }
 
+    @Test
+    fun repairMp3File_mpeg2_cleanStream_isByteIdentical() {
+        val testFile = tempFolder.newFile("clean_mpeg2.mp3")
+        val fullData = mpeg2Stream(20)
+        testFile.writeBytes(fullData)
+
+        val result = AudioRepairEngine.repairMp3File(testFile)
+
+        assertTrue(
+            "clean MPEG2 stream should be reported Clean, got $result",
+            result is AudioRepairEngine.RepairResult.Clean
+        )
+        assertArrayEquals("clean file bytes must be untouched, not even a single byte", fullData, testFile.readBytes())
+    }
+
     // ---- CATASTROPHIC BUG: interior gap must not discard audio after it ----
-    //
-    // NOTE ON TEST STRATEGY: this JVM's java.io.File.renameTo() silently fails to overwrite
-    // an *existing* destination on Windows/NTFS (a well-known java.io.File cross-platform
-    // wart — Windows MoveFileEx here is not called with MOVEFILE_REPLACE_EXISTING). That
-    // means on this host the buggy engine's final `tempFile.renameTo(inputFile)` step never
-    // actually lands, and the original file is left untouched no matter what cleanBytes
-    // contained — masking the truncation bug if we only inspect the final file. The engine
-    // unconditionally writes its computed "clean" bytes to `<name>.tmp` BEFORE attempting
-    // that rename, so we inspect the .tmp file directly to observe the actual (buggy) byte
-    // computation independent of this platform rename quirk. (On real Android/Linux devices,
-    // POSIX rename() overwrites atomically and the final file itself would show the same
-    // truncation — this is confirmed later via the real-device cross-check.)
+
     @Test
     fun repairMp3File_mpeg2_interiorGap_audioAfterGapSurvives() {
         val testFile = tempFolder.newFile("interior_gap.mp3")
 
+        // 10 clean frames, a corrupted span in the middle, then 10 MORE clean frames. Distinct
+        // fill bytes so "before" and "after" are never byte-identical to each other.
         val before = mpeg2Stream(10, fill = 0x11)
         val junk = ByteArray(50) { 0x00 } // never 0xFF, no accidental resync
         val after = mpeg2Stream(10, fill = 0x22)
         val fullData = before + junk + after
         testFile.writeBytes(fullData)
 
-        AudioRepairEngine.repairMp3File(testFile)
-        val tempOutput = File(testFile.parentFile, "${testFile.name}.tmp")
-        val resultBytes = if (tempOutput.exists()) tempOutput.readBytes() else testFile.readBytes()
+        val result = AudioRepairEngine.repairMp3File(testFile)
 
-        val afterFramesPresent = indexOfSubArray(resultBytes, after) >= 0
-        assertTrue(
-            "audio after the interior gap was discarded (catastrophic data loss) — " +
-                "repaired output is ${resultBytes.size} bytes, original was ${fullData.size}",
-            afterFramesPresent
+        // Mp3FrameScan's chain validation confirms a frame only once its *successor* also
+        // parses (see Mp3FrameScan docstring / Mp3FrameScanTest's "within one frame length"
+        // tolerance) — so the single frame immediately preceding an unconfirmable successor is
+        // folded into the gap along with the 50 junk bytes. This is a pre-existing, documented
+        // characteristic of the scanner (not something this fix changes), so the expected
+        // excised span is deterministic: 50 junk bytes + 1 frame length.
+        val expectedRemoved = 50 + MPEG2_FRAME_LEN
+        assertEquals(
+            "expected the junk span (plus the one unconfirmable boundary frame) to be excised, got $result",
+            AudioRepairEngine.RepairResult.Repaired(expectedRemoved),
+            result
         )
-        assertTrue("audio before the gap was discarded", indexOfSubArray(resultBytes, before) >= 0)
+        val resultBytes = testFile.readBytes()
+
+        // The critical assertion: the 10 frames of audio AFTER the gap must still be present.
+        // The buggy implementation truncates to the first gap and this trailing audio is lost.
+        val expectedBytes = before.copyOfRange(0, before.size - MPEG2_FRAME_LEN) + after
+        assertArrayEquals(
+            "repaired file must retain all audio frames after the gap, with only the corrupt " +
+                "span (plus its one unconfirmable boundary frame) excised",
+            expectedBytes,
+            resultBytes
+        )
     }
 
     // ---- CATASTROPHIC BUG: leading gap with no ID3 tag must not zero the file ----
-    // See NOTE above: inspects the .tmp file the engine writes before its rename step, to
-    // observe the buggy byte computation independent of this host's renameTo quirk.
+
     @Test
     fun repairMp3File_mpeg2_leadingGapNoId3_fileNotReducedToZero() {
         val testFile = tempFolder.newFile("leading_gap.mp3")
@@ -101,43 +126,48 @@ class AudioRepairEngineTest {
         val fullData = junk + audio
         testFile.writeBytes(fullData)
 
-        AudioRepairEngine.repairMp3File(testFile)
-        val tempOutput = File(testFile.parentFile, "${testFile.name}.tmp")
-        val resultBytes = if (tempOutput.exists()) tempOutput.readBytes() else testFile.readBytes()
+        val result = AudioRepairEngine.repairMp3File(testFile)
 
-        assertTrue(
-            "repaired output must not be empty — entire recording was deleted " +
-                "(size=${resultBytes.size}, original was ${fullData.size})",
-            resultBytes.isNotEmpty()
+        assertEquals(
+            "expected exactly the 30 leading junk bytes to be excised, got $result",
+            AudioRepairEngine.RepairResult.Repaired(30),
+            result
         )
-        assertTrue(
-            "repaired output must retain the audio frames that followed the leading junk",
-            indexOfSubArray(resultBytes, audio) >= 0
+        val resultBytes = testFile.readBytes()
+
+        assertTrue("repaired file must not be empty", resultBytes.isNotEmpty())
+        assertArrayEquals(
+            "repaired file should be exactly the audio stream with leading junk excised",
+            audio,
+            resultBytes
         )
     }
 
     // ---- CRITICAL: backup must exist before the original is overwritten ----
+
     @Test
     fun repairMp3File_repair_leavesRecoverableBackupOfOriginal() {
         val testFile = tempFolder.newFile("needs_backup.mp3")
-        val before = mpeg2Stream(5)
+        val before = mpeg2Stream(5, fill = 0x11)
         val junk = ByteArray(20) { 0x00 }
-        val after = mpeg2Stream(5)
+        val after = mpeg2Stream(5, fill = 0x22)
         val fullData = before + junk + after
         testFile.writeBytes(fullData)
 
-        AudioRepairEngine.repairMp3File(testFile)
+        val result = AudioRepairEngine.repairMp3File(testFile)
+        assertTrue("expected a Repaired result, got $result", result is AudioRepairEngine.RepairResult.Repaired)
 
         val backupFile = File(testFile.parentFile, "${testFile.name}.bak")
         assertTrue("expected a backup file preserving the pre-repair bytes", backupFile.exists())
         assertArrayEquals(
             "backup must contain the exact original bytes, including the audio the repair excised",
             fullData,
-            if (backupFile.exists()) backupFile.readBytes() else ByteArray(0)
+            backupFile.readBytes()
         )
     }
 
     // ---- HIGH: unresyncable trailing corruption must be detected, not reported clean ----
+
     @Test
     fun repairMp3File_mpeg2_unresyncableTrailingCorruption_isDetectedNotClean() {
         val testFile = tempFolder.newFile("trailing_corrupt.mp3")
@@ -153,40 +183,50 @@ class AudioRepairEngineTest {
             "unresyncable trailing corruption must be counted as a gap by the scanner, was reported clean (gapCount=0)",
             scan.gapCount > 0
         )
+
+        val result = AudioRepairEngine.repairMp3File(testFile)
+        assertTrue(
+            "engine must not report Clean when trailing bytes are corrupt and unresyncable, got $result",
+            result !is AudioRepairEngine.RepairResult.Clean
+        )
+        // The 60 bytes of trailing junk can never be decoded by any player; excising them is
+        // safe (never discards audio). As with the interior-gap case, the scanner's chain
+        // validation folds the one frame immediately preceding the unresyncable span into the
+        // gap too (see comment in repairMp3File_mpeg2_interiorGap_audioAfterGapSurvives) — a
+        // pre-existing, documented scanner characteristic, not introduced by this fix.
+        assertEquals(AudioRepairEngine.RepairResult.Repaired(60 + MPEG2_FRAME_LEN), result)
+        assertArrayEquals(clean.copyOfRange(0, clean.size - MPEG2_FRAME_LEN), testFile.readBytes())
     }
 
-    // ---- Boolean-return regression: renameTo failure must not be reported as success ----
+    // ---- Boolean-return regression: renameTo/move failure must not be reported as success ----
+
     @Test
-    fun repairMp3File_whenRenameFails_doesNotReportSuccess() {
+    fun repairMp3File_whenOverwriteFails_reportsFailureNotSuccess() {
         val testFile = tempFolder.newFile("locked_target.mp3")
-        val before = mpeg2Stream(5)
+        val before = mpeg2Stream(5, fill = 0x11)
         val junk = ByteArray(20) { 0x00 }
-        val after = mpeg2Stream(5)
+        val after = mpeg2Stream(5, fill = 0x22)
         val fullData = before + junk + after
         testFile.writeBytes(fullData)
 
-        // Make the destination un-replaceable: File.renameTo fails on Windows/NTFS when the
-        // target is read-only, so the engine's rename silently fails while still returning true.
+        // Make the destination un-replaceable: a read-only target prevents the final atomic
+        // move from landing, on Windows/NTFS as well as POSIX filesystems.
         testFile.setWritable(false)
         try {
-            val repaired = AudioRepairEngine.repairMp3File(testFile)
+            val result = AudioRepairEngine.repairMp3File(testFile)
             assertTrue(
-                "rename/overwrite failure must not be reported as a successful repair",
-                !repaired
+                "overwrite failure must surface as Failed, not silently report success, got $result",
+                result is AudioRepairEngine.RepairResult.Failed
+            )
+            // And the original bytes must still be intact — a failed repair must not corrupt
+            // or partially write over the only copy of the recording.
+            assertArrayEquals(
+                "original file must be untouched when the overwrite step fails",
+                fullData,
+                testFile.readBytes()
             )
         } finally {
             testFile.setWritable(true)
         }
-    }
-
-    private fun indexOfSubArray(haystack: ByteArray, needle: ByteArray): Int {
-        if (needle.isEmpty()) return 0
-        outer@ for (i in 0..(haystack.size - needle.size)) {
-            for (j in needle.indices) {
-                if (haystack[i + j] != needle[j]) continue@outer
-            }
-            return i
-        }
-        return -1
     }
 }

@@ -112,25 +112,42 @@ object Mp3FrameScan {
     /**
      * Returns the accepted header at [pos], or null. A header is accepted if a header
      * also parses at pos+frameLen and agrees on version/layer/srIdx, or if pos+frameLen
-     * runs to/past EOF (truncated tail, accepted without a successor).
+     * runs to/past [limit] (truncated tail or start of a recognized trailer, accepted
+     * without a successor). [limit] defaults to the end of [data] but is passed as the
+     * start of a recognized trailing tag when one is present, so the last real audio
+     * frame isn't penalized for being followed by non-audio metadata instead of EOF.
      */
-    private fun chains(data: ByteArray, pos: Int): Header? {
+    private fun chains(data: ByteArray, pos: Int, limit: Int = data.size): Header? {
         val h = parseHeader(data, pos) ?: return null
         val nextPos = pos + h.frameLen
-        if (nextPos >= data.size) return h
+        if (nextPos >= limit) return h
         val h2 = parseHeader(data, nextPos) ?: return null
         return if (headersAgree(h, h2)) h else null
+    }
+
+    /** True if a 128-byte ID3v1 tag ("TAG" + 125 bytes) occupies the last 128 bytes of [data]. */
+    private fun hasTrailingId3v1(data: ByteArray): Boolean {
+        if (data.size < 128) return false
+        val tagStart = data.size - 128
+        return data[tagStart] == 'T'.code.toByte() &&
+            data[tagStart + 1] == 'A'.code.toByte() &&
+            data[tagStart + 2] == 'G'.code.toByte()
     }
 
     fun scan(bytes: ByteArray): Mp3ScanResult {
         val size = bytes.size
         val (id3Present, id3Size) = parseId3(bytes)
         val audioStart = if (id3Present) id3Size else 0
+        // A trailing ID3v1 tag is legitimate metadata, not corruption: exclude it from the
+        // scanned region entirely (symmetric with the leading ID3v2 header above) so the last
+        // real audio frame isn't flagged as an unresyncable gap merely for being followed by
+        // "TAG..." bytes instead of true EOF.
+        val audioEnd = if (hasTrailingId3v1(bytes)) size - 128 else size
 
         var startPos = -1
         var p = audioStart
-        while (p + 4 <= size) {
-            if (chains(bytes, p) != null) { startPos = p; break }
+        while (p + 4 <= audioEnd) {
+            if (chains(bytes, p, audioEnd) != null) { startPos = p; break }
             p++
         }
 
@@ -142,38 +159,43 @@ object Mp3FrameScan {
         var gapCount = 0
         var gapBytesTotal = 0L
         var firstGapOffset: Long? = null
+        val gapRanges = mutableListOf<LongRange>()
 
         // Bytes skipped to reach the first accepted frame are leading loss.
         if (startPos > audioStart) {
             gapCount++
             gapBytesTotal += (startPos - audioStart).toLong()
             firstGapOffset = audioStart.toLong()
+            gapRanges.add(audioStart.toLong() until startPos.toLong())
         }
 
         fun resyncFrom(brokenPos: Int): Int? {
             var scanP = brokenPos + 1
-            while (scanP + 4 <= size) {
-                if (chains(bytes, scanP) != null) return scanP
+            while (scanP + 4 <= audioEnd) {
+                if (chains(bytes, scanP, audioEnd) != null) return scanP
                 scanP++
             }
             return null
         }
 
+        // resyncPos == null means corruption ran unresynced all the way to audioEnd: the gap
+        // covers [brokenPos, audioEnd) and is not a normal truncated tail.
         fun recordGap(brokenPos: Int, resyncPos: Int?) {
             gapCount++
-            val gapLen = ((resyncPos ?: size) - brokenPos).toLong()
-            gapBytesTotal += gapLen
+            val gapEnd = resyncPos ?: audioEnd
+            gapBytesTotal += (gapEnd - brokenPos).toLong()
             if (firstGapOffset == null) firstGapOffset = brokenPos.toLong()
+            gapRanges.add(brokenPos.toLong() until gapEnd.toLong())
         }
 
         var pos = startPos
         while (true) {
-            val h = chains(bytes, pos)
+            val h = chains(bytes, pos, audioEnd)
             if (h == null) {
                 // Defensive: shouldn't happen since pos was validated to chain already.
                 val resyncPos = resyncFrom(pos)
+                recordGap(pos, resyncPos)
                 if (resyncPos != null) {
-                    recordGap(pos, resyncPos)
                     pos = resyncPos
                     continue
                 } else {
@@ -183,23 +205,23 @@ object Mp3FrameScan {
 
             framesOk++
             val nextPos = pos + h.frameLen
-            if (nextPos >= size) break // truncated tail, done
+            if (nextPos >= audioEnd) break // truncated tail (or recognized trailer), done
 
-            if (chains(bytes, nextPos) != null) {
+            if (chains(bytes, nextPos, audioEnd) != null) {
                 pos = nextPos
                 continue
             }
 
             val resyncPos = resyncFrom(nextPos)
+            recordGap(nextPos, resyncPos)
             if (resyncPos != null) {
-                recordGap(nextPos, resyncPos)
                 pos = resyncPos
             } else {
                 break
             }
         }
 
-        return Mp3ScanResult(framesOk, gapCount, gapBytesTotal, firstGapOffset, size.toLong())
+        return Mp3ScanResult(framesOk, gapCount, gapBytesTotal, firstGapOffset, size.toLong(), gapRanges)
     }
 
     /** Returns an all-zero result for a missing or empty file rather than throwing. */
@@ -217,6 +239,8 @@ data class Mp3ScanResult(
     val gapBytes: Long,
     val firstGapOffset: Long?,
     val totalSize: Long,
+    /** Byte ranges (end-exclusive) of corrupted/unresynced spans, in ascending, non-overlapping order. */
+    val gapRanges: List<LongRange> = emptyList(),
 ) {
     val gapPercent: Double
         get() = if (totalSize == 0L) 0.0 else gapBytes.toDouble() / totalSize.toDouble() * 100.0
