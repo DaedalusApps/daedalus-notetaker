@@ -119,12 +119,32 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        // #126: downgrade path so an older APK opening a v13 database (e.g. after a rollback)
+        // degrades gracefully instead of hitting Room's "migration not found" crash on every
+        // launch. This takes the schema back to exactly what v12 looked like: the FTS index and
+        // its sync triggers are removed, search is lost, but `recordings` and `todos` -- and
+        // every row in them -- are left completely untouched.
+        //
+        // Do NOT replace this with fallbackToDestructiveMigrationOnDowngrade (or any destructive
+        // fallback): that drops and recreates every table, deleting every recording, transcript,
+        // summary, mind map, and todo -- on a device where the recording is often the only copy.
+        internal val MIGRATION_13_12 = object : Migration(13, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS recordings_fts")
+                db.execSQL("DROP TRIGGER IF EXISTS room_fts_content_sync_recordings_fts_BEFORE_UPDATE")
+                db.execSQL("DROP TRIGGER IF EXISTS room_fts_content_sync_recordings_fts_BEFORE_DELETE")
+                db.execSQL("DROP TRIGGER IF EXISTS room_fts_content_sync_recordings_fts_AFTER_UPDATE")
+                db.execSQL("DROP TRIGGER IF EXISTS room_fts_content_sync_recordings_fts_AFTER_INSERT")
+            }
+        }
+
         @VisibleForTesting
         internal fun buildDatabase(context: Context, name: String): AppDatabase {
             return Room.databaseBuilder(context, AppDatabase::class.java, name)
                 .addMigrations(
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13
+                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13,
+                    MIGRATION_13_12
                 )
                 .build()
         }
