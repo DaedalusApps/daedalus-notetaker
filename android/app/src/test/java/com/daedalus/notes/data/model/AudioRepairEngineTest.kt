@@ -275,6 +275,14 @@ class AudioRepairEngineTest {
     }
 
     // ---- Boolean-return regression: renameTo/move failure must not be reported as success ----
+    //
+    // #100 follow-up H2: this used to force the failure via testFile.setWritable(false), which
+    // relies on File.renameTo/Files.move refusing to overwrite a read-only *target file*. That's
+    // Windows/NTFS-specific behavior — POSIX rename(2) only cares about the containing
+    // directory's write permission, not the target file's mode — so on CI's ubuntu-latest
+    // runner the move quietly succeeded, both assertions below failed, and this test provided
+    // no coverage at all for the platform the app actually ships on. The final atomic-replace
+    // step is now injectable so the failure is forced deterministically on any platform.
 
     @Test
     fun repairMp3File_whenOverwriteFails_reportsFailureNotSuccess() {
@@ -285,24 +293,26 @@ class AudioRepairEngineTest {
         val fullData = before + junk + after
         testFile.writeBytes(fullData)
 
-        // Make the destination un-replaceable: a read-only target prevents the final atomic
-        // move from landing, on Windows/NTFS as well as POSIX filesystems.
-        testFile.setWritable(false)
-        try {
-            val result = AudioRepairEngine.repairMp3File(testFile)
-            assertTrue(
-                "overwrite failure must surface as Failed, not silently report success, got $result",
-                result is AudioRepairEngine.RepairResult.Failed
-            )
-            // And the original bytes must still be intact — a failed repair must not corrupt
-            // or partially write over the only copy of the recording.
-            assertArrayEquals(
-                "original file must be untouched when the overwrite step fails",
-                fullData,
-                testFile.readBytes()
-            )
-        } finally {
-            testFile.setWritable(true)
+        var atomicReplaceInvoked = false
+        val result = AudioRepairEngine.repairMp3File(testFile) { _, _ ->
+            atomicReplaceInvoked = true
+            throw java.io.IOException("simulated overwrite failure")
         }
+
+        assertTrue(
+            "the injected failure must actually be exercised, not skipped for another reason",
+            atomicReplaceInvoked
+        )
+        assertTrue(
+            "overwrite failure must surface as Failed, not silently report success, got $result",
+            result is AudioRepairEngine.RepairResult.Failed
+        )
+        // And the original bytes must still be intact — a failed repair must not corrupt
+        // or partially write over the only copy of the recording.
+        assertArrayEquals(
+            "original file must be untouched when the overwrite step fails",
+            fullData,
+            testFile.readBytes()
+        )
     }
 }
