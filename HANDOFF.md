@@ -1,24 +1,36 @@
 # Handoff Brief — Daedalus Notetaker
 
-Written 2026-08-12 (session 5). Replaces the previous version. Read this whole file before starting.
+Written 2026-08-13 (session 6). Replaces the previous version. Read this whole file before starting.
 
 ---
 
 ## Current state
 
-- **`main`** = `9dd6936`, clean working tree, in sync with `origin/main`.
-- **`.\gradlew :app:testDebugUnitTest` → 414 tests / 0 failures / 43 suites.**
-- **Phone** (Galaxy S26 Ultra, `R3GL503MXPX`) is on the **release** build, **versionCode 294**.
-- **Physical FW920 Unit Verified:** Tested live over BLE against physical FW920 unit (`fwName=xink_test`, battery=100%). Confirmed clean enumeration of all 16 hardware files (in 270ms) and streaming audio transfers over `B0B4`. Replaced fixed 5s list deadline with per-item 3s idle timeout in `BleManager.kt`.
-- **Data integrity verified:** All 21 recordings (57,896,028 bytes) snapshotted before device testing and verified 100% MD5 byte-identical post-install.
+- **`main`** = `5a60965`, clean working tree, in sync with `origin/main`.
+- **`.\gradlew :app:testDebugUnitTest` → 419 tests / 0 failures / 1 skipped.** The skip is
+  `Mp3FrameScanTest.realFileCrossCheck` and it is **by design** — see #106 below. A skip here is
+  correct; a *pass* would mean something regressed.
+- **`:app:assembleRelease` builds clean** (`lintVitalRelease` passes).
 
-**Merged this session (Session 5):**
+> **⚠ THE PHONE IS STALE. No device work happened this session — no device was attached
+> (`adb devices` empty), and the owner scoped the session to work that needs no ADB.** The phone is
+> still on the **session-5 release build, versionCode 294**. Everything merged in session 6 is on
+> `main` and **not on the phone**. The next session that touches hardware must install first.
+>
+> The last recorded device state, from session 5, was: Galaxy S26 Ultra `R3GL503MXPX`, 21 recordings
+> / 57,896,028 bytes, MD5-verified byte-identical. **That baseline is from a previous session — do
+> not trust it. Re-pull your own before touching anything** (see the data-integrity protocol below).
 
-| PR / Commit | Issue | What |
+**Merged this session (Session 6):**
+
+| PR | Issue | What |
 |---|---|---|
-| #111 | #108 | Refresh device file list before re-download check; ignore non-FileList packets during enumeration |
-| #112 | #102 | Wired `AnalysisForegroundService` lifecycle and status updates across BLE sync, re-download, and AI analysis |
-| `1756492` | #108 | Replaced fixed 5s file list deadline with 3s per-item idle timeout in `BleManager.kt` after live hardware test discovery |
+| #113 | #104 | Removed the `.AdbReceiver` `<intent-filter>` and switched MainActivity's dynamic receiver to `RECEIVER_NOT_EXPORTED`, closing both *implicit*-broadcast paths into the debug ADB harness |
+| #114 | #106 | `realFileCrossCheck` now reports SKIPPED instead of a false pass; incomplete fixture dirs hard-fail; `expectedResults.size` pinned so the list cannot be silently emptied |
+
+**Both PRs used `Refs`, not `Closes`. #104 and #106 are still OPEN on purpose** — each has an
+acceptance criterion that is device-blocked. What shipped is narrower than either issue title, and
+both PR bodies say so explicitly. Do not read "merged" as "done".
 
 ---
 
@@ -39,13 +51,52 @@ Written 2026-08-12 (session 5). Replaces the previous version. Read this whole f
 
 | # | Title | Note |
 |---|---|---|
-| **#103** | `SpeakerDiarizer` not wired to pipeline or UI | **Start here tomorrow.** Wire speaker badges in `NoteDetailScreen.kt` and integrate diarization into pipeline |
+| **#103** | `SpeakerDiarizer` not wired to pipeline or UI | **Start here.** Wire speaker badges in `NoteDetailScreen.kt` and integrate diarization into the pipeline. Needs a device to verify |
+| #104 | Exported `AdbReceiver` — **residual only** | Implicit paths closed in #113. Remaining: an explicit-component broadcast still reaches it on debug builds. Needs the phone |
+| #106 | Corruption detection — **residual only** | Silent-skip fixed in #114. Remaining: the trailing-span paths still have no real-data coverage. Needs captured damaged transfers |
 | #101 | FTS4 never implemented | Lowest priority at 21 recordings; `LIKE` search active |
-| #104 | Exported `AdbReceiver` lets any app trigger hardware deletion | Debug builds only; release unaffected |
-| #106 | Corruption detection has no real-data coverage | `realFileCrossCheck` skips silently when fixtures missing |
 
-**#101, #102, #103 need an owner priority call before building.** They are new feature work, not
+**#101 and #103 need an owner priority call before building.** They are new feature work, not
 verification. Do not silently absorb them.
+
+### What is actually left on #104 and #106
+
+Both are one device session away from closing. Neither needs new design work.
+
+**#104 residual.** `.AdbReceiver` must stay `android:exported="true"` for adb shell (uid 2000), so a
+third-party app on a *debug* build can still deliver an explicit-component broadcast:
+
+```kotlin
+sendBroadcast(Intent("com.daedalus.notes.DELETE_FILE")
+    .setComponent(ComponentName("com.daedalus.notes", "com.daedalus.notes.AdbReceiver"))
+    .putExtra("filename", "20260812113220"))
+```
+
+`RECEIVER_NOT_EXPORTED` does not block it — the attacker goes *through* `AdbReceiver`, and our own
+forward code sets `_forwarded=true`. Two independent reviews confirmed this is now the **only**
+remaining path. The candidate fix is `android:permission` naming a permission the shell uid holds
+but a normal app cannot obtain; **whether adb can still reach the receiver under it is exactly what
+needs testing on the phone.** Scope in the unsanitized `filename` at the same time: it reaches
+`BleManager.deleteFile` (`BleManager.kt:688`) with no `SafeFilename` call, though `SafeFilename.kt:5`
+names `am broadcast` extras as attacker-influenced.
+
+*Mitigator:* the dynamic receiver only exists while `MainActivity` is alive (`onCreate` registers,
+`onDestroy` unregisters at `MainActivity.kt:252`). The manifest receiver cold-starts the process but
+the forward then lands on nothing, so the attack needs the app already running.
+
+**#106 residual.** `recordGap`-on-unresyncable-EOF, `isBenignTrailer` and `isBoundedApeV2Footer` are
+exercised **only** by synthetic fixtures authored alongside the parser. No file in the real corpus
+takes those paths. Closing it needs genuinely damaged real captures — deliberately interrupted BLE
+downloads, with ffmpeg ground truth.
+
+**Constraint to solve first: this repo is PUBLIC and the corpus is real meeting audio, so fixtures
+can never be committed here.** The option recorded for that session is **structure-only fixtures** —
+keep the MP3 frame headers, zero the audio payload. The structural damage the scanner reasons about
+survives; nothing intelligible leaks. Unlike synthetic fixtures, the structure comes from a real
+damaged transfer rather than from the parser's own model.
+
+**Do not "fix" #106 by adding synthetic fixtures.** That was considered and rejected by the owner —
+see D35 and the reasoning under *Judgment lessons*.
 
 ---
 
@@ -103,8 +154,20 @@ The scratchpad holding it is session-scoped and is gone — re-pull your own bas
 **ffmpeg decode errors across the device corpus:** 0, 0, 0, 0, 6, 523. Only `20260804141258.mp3` is
 badly damaged. Ground truth: `ffmpeg -v error -i FILE -f null -`.
 
+**⚠ FIRST THING TO CHECK IF THE ADB HARNESS STOPS RESPONDING AFTER THE NEXT DEBUG INSTALL.**
+PR #113 switched MainActivity's dynamic receiver to `RECEIVER_NOT_EXPORTED`. `reverse/WIFI_DISCOVERY.md`
+previously recorded that constant as having been *tried and abandoned* because the harness broke. The
+security review established that note misattributed its own cause: at `0c58f51` the in-package
+forwarder already existed, and the real blocker was the manifest receiver being `exported="false"` at
+the time, which flipped to `"true"` later in `7a13697`. Each leg of the current path is exercised on
+hardware; **the exact combination (manifest `exported="true"` + dynamic `RECEIVER_NOT_EXPORTED`) has
+never been run on the phone.** If triggers go silent, revert that one constant first and report it —
+it is the highest-prior suspect and the whole harness depends on it.
+
 **ADB triggers** (debug build only; app must be foregrounded). Single source of truth is
-`AdbActions.kt`; a test enforces that handlers and the dynamic `IntentFilter` agree.
+`AdbActions.kt`; a test enforces that handlers and the dynamic `IntentFilter` agree. **Every
+invocation must use the explicit `-n com.daedalus.notes/.AdbReceiver` form** — the manifest
+intent-filter is gone as of #113, so a bare `-a ACTION` broadcast now reaches nothing.
 ```
 adb shell am broadcast -a com.daedalus.notes.SYNC -n com.daedalus.notes/.AdbReceiver
 adb shell am broadcast -a com.daedalus.notes.ANALYZE --es filename "20260812113220" -n com.daedalus.notes/.AdbReceiver
@@ -129,16 +192,19 @@ fresh equal-or-better reviewer on every diff; three gates (`/simplify` → `/sec
 `prd/DECISIONS.md` **the same session**. `prd/` is gitignored — read `DECISIONS.md` D22–D33 for the
 full reasoning behind everything above.
 
-**Budget warning.** This session cost **$113 for three PRs**; ~20 subagents, 94% of usage from
-subagent fan-out, Sonnet reviewers alone $69. The owner's weekly limit hit 98%. Three levers the
-owner asked to be applied to the skill:
-1. **Cap review rounds at two** before surfacing to the owner. One branch here went four rounds and
-   ended in the feature being deleted — rounds 2–4 were largely waste.
-2. **Route mechanical checks to Haiku** (orphan imports, deletion completeness, stale comments).
-   Reserve the top tier for adversarial passes on data-loss and security paths, where it genuinely
-   earned its cost — it caught the repair engine and a test guard that a *comment* could satisfy.
-3. **Skip the 4-agent simplify fan-out on small diffs**; use one combined cheap pass. Security and
-   code review always run at full strength.
+**Budget.** Session 5's three levers are now baked into the installed `apply-working-process` skill
+itself (verified identical to `~/projects/fable-quality-library` HEAD at session-6 start), so they no
+longer need restating each session — load the skill and follow it.
+
+Session 6 applied them and cost roughly **a third of session 5 for two PRs**: 8 subagents total
+across both, one Haiku simplify pass per diff instead of a 4-agent fan-out, and exactly **one fix
+round per PR** — the cap was never approached. The top tier was spent once, on #104's adversarial
+security pass, and it earned it: it was the agent that caught the misattributed
+`RECEIVER_EXPORTED` history by walking `git log -p` instead of accepting the narrative. Sonnet
+handled both reviews on #106, correctly — that diff touches no data path.
+
+**The routing rule that mattered:** tier by what the check is *verifying*, not by the fact that it is
+a review. #106 is test infrastructure; a top-tier adversarial pass on it would have bought nothing.
 
 ---
 
@@ -155,3 +221,32 @@ connected to anything.
 **Deleting a feature is a legitimate engineering answer.** The repair engine failed two adversarial
 reviews and, even working correctly, destroyed ~52 s of valid audio on the worst file. `redownload`
 already covered the real need non-destructively.
+
+**An issue's stated scope is a hypothesis about the bug, not a boundary on it.** #104 described one
+hole: the manifest `<intent-filter>`. There were two, and the undocumented one was worse — the
+dynamic receiver was registered `RECEIVER_EXPORTED` over all 14 actions, so any app could reach
+hardware deletion with `setPackage("com.daedalus.notes")` plus a spoofed `_forwarded=true`, never
+touching `.AdbReceiver` at all. Fixing only what the issue described would have closed the issue
+while leaving the data-loss path open. Read the surrounding code before accepting the framing.
+
+**Check the history before building on a claim about it.** The stated rationale for #104 — that the
+`RECEIVER_EXPORTED` note predated the #99 forwarder — was wrong, and it was the entire justification
+for the change. `git log -p` on the manifest disproved it in one command. This is the second session
+running where a confident causal story about this codebase did not survive contact with the actual
+history. Cheap check, high yield.
+
+**Half a fix reads exactly like a whole one.** #106's first cut made a silently-skipped test report
+SKIPPED — but emptying `expectedResults` would still have made it *pass* having validated nothing:
+`missingFiles` vacuously empty, loop runs zero times, `checked == 0 == expectedResults.size`. A fix
+for "this test can lie about having run" that still lets the test lie about having run. When you fix
+a class of bug, enumerate the other routes into it before calling it closed.
+
+**Prose is part of the diff, and it outlives the code.** Code review's sharpest finding on #113 was
+not a code defect: the new tests and comments were written as though the security hole were fully
+closed, when it was deliberately only narrowed. Three tests would have sat there pinning an
+incomplete fix behind confident language. **Tests pin behaviour; comments pin what the next person
+believes.** Both were narrowed to the true claim.
+
+**Ship with the issue open when the issue isn't done.** Both PRs used `Refs`, not `Closes`, and
+named their unmet acceptance criteria. Given D33 — six pillars reported delivered, three of which
+did not exist — a PR that states what it does *not* do is the cheapest defence available.
