@@ -375,15 +375,73 @@ class Mp3FrameScanTest {
     }
 
     // ---- Known coverage gap (#106) -------------------------------------------------------
-    // The trailing-span branches exercised only above by synthetic fixtures — recordGap on an
-    // unresyncable EOF, isBenignTrailer, and isBoundedApeV2Footer — are NOT exercised by any file
-    // in the real device corpus below. realFileCrossCheck's six recordings never take those paths.
-    // This is a known, deliberate non-exercise gap, not an oversight: a fixture authored from the
-    // same mental model as the parser can agree with it and both be wrong (this project already
-    // lost a cadence-based loss detector that passed 10 red-first tests and two reviews while
-    // being completely wrong about the hardware). Closing this gap needs genuinely damaged real
-    // captures (e.g. a deliberately interrupted BLE transfer), not more synthetic fixtures.
-    // Tracked in #106.
+    // realDamagedEarly/realDamagedMid below load two files derived from an ACTUAL interrupted BLE
+    // transfer captured from an FW920 (recording force-stopped mid-download; ffmpeg/ffprobe on the
+    // originals confirmed genuine decode errors — 66 and 158 decode errors respectively, not
+    // synthetic). Measuring the real, unmodified `Mp3FrameScan` (via a throwaway instrumented copy,
+    // never landed in this file or in Mp3FrameScan.kt) against those originals showed both take the
+    // `recordGap` mid-stream-resync path (28 and 70 times respectively) — real data now exercises
+    // `recordGap` with a non-null resync position, previously only exercised by the synthetic
+    // `oneLostBleNotification_isDetected` above.
+    //
+    // What real data still does NOT exercise: neither capture ever reaches an unresyncable EOF —
+    // both end in an ordinary truncated tail (the last accepted frame simply runs past audioEnd,
+    // the ordinary "truncated tail" path already covered by `truncatedTail_isNotReportedAsLoss`).
+    // So `recordGap` on an unresyncable EOF, `isBenignTrailer`, and `isBoundedApeV2Footer` remain
+    // exercised only by synthetic fixtures — real device captures of an interrupted transfer end in
+    // a clean truncated tail, not in unrecoverable trailing garbage, so they cannot exercise those
+    // branches. Closing that specific remaining gap would need a capture that is corrupted mid-file
+    // *and* whose damage runs all the way to EOF without ever resyncing (or a real trailer-bearing
+    // file), which is a different failure mode than a mid-transfer interruption. Tracked in #106.
+
+    // ---- Real damaged-capture fixtures (#106) ---------------------------------------------
+    // Structure-only derivatives of a real, hardware-captured, force-stopped BLE transfer: every
+    // MPEG frame header and the exact gap/resync byte structure is preserved byte-for-byte; only
+    // the audio payload bytes inside frames the scanner itself validated as real, decodable audio
+    // are zeroed, so no intelligible audio survives. Verified (during fixture creation) to make
+    // `Mp3FrameScan` report IDENTICAL gapCount/gapBytes/firstGapOffset to the real, unmodified
+    // capture before any truncation; `real_damaged_early_structure_only.mp3` was then truncated to
+    // the smallest prefix (cutting only after the last resync point) that still reproduces those
+    // same numbers, to keep the committed fixture small. These run unconditionally in CI — no
+    // -Dmp3.fixtures gate — unlike realFileCrossCheck below.
+    //
+    // Ground truth on the ORIGINAL (pre-structure-only, pre-truncation) captures, from ffmpeg/
+    // ffprobe (independent of this scanner):
+    //   damaged_early.mp3: 46080 bytes, 66 ffmpeg decode errors, ffprobe duration 11.520s
+    //   damaged_mid.mp3:   169232 bytes, 158 ffmpeg decode errors, ffprobe duration 42.308s
+
+    private fun loadTestResource(name: String): File {
+        val classLoader = requireNotNull(javaClass.classLoader) { "No classloader available" }
+        val resourceUrl = requireNotNull(classLoader.getResource(name)) {
+            "Test resource not found on classpath: $name"
+        }
+        return File(resourceUrl.toURI())
+    }
+
+    @Test
+    fun realDamagedEarly_matchesRealCaptureNumbers() {
+        // Truncated to 16672 bytes (from the original capture's 46080) after verifying truncation
+        // doesn't change gapCount/gapBytes/firstGapOffset; framesOk differs from the original
+        // (279) because trailing frames were cut, which is expected and doesn't affect coverage.
+        val file = loadTestResource("mp3/real_damaged_early_structure_only.mp3")
+        val result = Mp3FrameScan.scan(file)
+        assertEquals(75, result.framesOk)
+        assertEquals(28, result.gapCount)
+        assertEquals(5948L, result.gapBytes)
+        assertEquals(6336L, result.firstGapOffset)
+    }
+
+    @Test
+    fun realDamagedMid_matchesRealCaptureNumbers() {
+        // Not truncated: the last resync point sits only ~180 bytes from EOF, so truncating would
+        // save negligible space.
+        val file = loadTestResource("mp3/real_damaged_mid_structure_only.mp3")
+        val result = Mp3FrameScan.scan(file)
+        assertEquals(1068, result.framesOk)
+        assertEquals(70, result.gapCount)
+        assertEquals(15405L, result.gapBytes)
+        assertEquals(134352L, result.firstGapOffset)
+    }
 
     // ---- Real-file cross-check ---------------------------------------------------
     // Gated on -Dmp3.fixtures=<dir>. Reports SKIPPED (via Assume.assumeTrue, never a bare
