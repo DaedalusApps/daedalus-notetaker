@@ -80,7 +80,7 @@ object AudioRepairEngine {
         }
 
         val tempFile = File(inputFile.parentFile, "${inputFile.name}.tmp")
-        val backupFile = File(inputFile.parentFile, "${inputFile.name}.bak")
+        val backupFile = backupFileFor(inputFile)
 
         try {
             FileOutputStream(tempFile).use { out -> out.write(cleanBytes) }
@@ -112,4 +112,10 @@ object AudioRepairEngine {
 
         return RepairResult.Repaired(bytes.size - cleanBytes.size)
     }
+
+    /**
+     * TEMPORARY (red-first): still the colliding sibling path. RecordingViewModel.kt:700 uses
+     * this exact path for its own pre-re-download backup — see #100 follow-up C1.
+     */
+    internal fun backupFileFor(inputFile: File): File = File(inputFile.parentFile, "${inputFile.name}.bak")
 }

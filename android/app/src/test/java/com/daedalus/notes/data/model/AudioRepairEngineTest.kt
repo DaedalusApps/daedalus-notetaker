@@ -157,12 +157,58 @@ class AudioRepairEngineTest {
         val result = AudioRepairEngine.repairMp3File(testFile)
         assertTrue("expected a Repaired result, got $result", result is AudioRepairEngine.RepairResult.Repaired)
 
-        val backupFile = File(testFile.parentFile, "${testFile.name}.bak")
+        val backupFile = AudioRepairEngine.backupFileFor(testFile)
         assertTrue("expected a backup file preserving the pre-repair bytes", backupFile.exists())
         assertArrayEquals(
             "backup must contain the exact original bytes, including the audio the repair excised",
             fullData,
             backupFile.readBytes()
+        )
+    }
+
+    // ---- #100 follow-up C1: repair backup must never collide with the re-download backup ----
+    //
+    // RecordingViewModel.redownloadAndAnalyze uses File(parent, name + ".bak") — the identical
+    // sibling path — as its pre-re-download backup (RecordingViewModel.kt:700), with
+    // overwrite=true and no existence check on both sides. If AudioRepairEngine ever wrote to
+    // that same path, whichever backup landed second would silently destroy the other's only
+    // recovery copy. This test fails if the two mechanisms can ever resolve to the same path,
+    // for any filename — not just the one this test happens to construct.
+
+    @Test
+    fun repairBackupPath_neverCollidesWithRedownloadBackupPath() {
+        val names = listOf(
+            "needs_backup.mp3", "20260812102746.mp3", "a.mp3.bak.mp3", "weird name with spaces.mp3",
+        )
+        for (name in names) {
+            val original = File(tempFolder.newFolder(), name)
+            // This mirrors RecordingViewModel.kt:700's exact construction:
+            // `src.copyTo(File(src.parentFile, src.name + ".bak"), overwrite = true)`.
+            val redownloadBackupPath = File(original.parentFile, original.name + ".bak")
+            val repairBackupPath = AudioRepairEngine.backupFileFor(original)
+            assertTrue(
+                "AudioRepairEngine's backup path for '$name' collides with " +
+                    "RecordingViewModel's re-download backup path ($redownloadBackupPath)",
+                repairBackupPath.canonicalPath != redownloadBackupPath.canonicalPath
+            )
+        }
+    }
+
+    @Test
+    fun repair_doesNotWriteToTheRedownloadBackupPath() {
+        val testFile = tempFolder.newFile("needs_backup2.mp3")
+        val before = mpeg2Stream(5, fill = 0x11)
+        val junk = ByteArray(20) { 0x00 }
+        val after = mpeg2Stream(5, fill = 0x22)
+        testFile.writeBytes(before + junk + after)
+
+        AudioRepairEngine.repairMp3File(testFile)
+
+        val redownloadBackupPath = File(testFile.parentFile, "${testFile.name}.bak")
+        assertTrue(
+            "AudioRepairEngine must never write to the path RecordingViewModel uses for its " +
+                "re-download backup (RecordingViewModel.kt:700) — see #100 follow-up C1",
+            !redownloadBackupPath.exists()
         )
     }
 
