@@ -719,6 +719,13 @@ class RecordingViewModel @JvmOverloads constructor(
                 return@launch
             }
 
+            // Refresh device file list over BLE before checking existence
+            try {
+                bleManager.listFiles()
+            } catch (e: Exception) {
+                Log.w("DaedalusSync", "Re-download: failed to refresh device file list", e)
+            }
+
             val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
             val deviceFiles = bleManager.bleState.value.files
             if (deviceFiles.isNotEmpty() && deviceFiles.none { it.filename.equals(cleanName, ignoreCase = true) }) {

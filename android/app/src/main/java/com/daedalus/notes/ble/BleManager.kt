@@ -913,7 +913,12 @@ class BleManager(private val context: Context) {
                     Log.i("BleManager", "collectFileList: entry=${response.entry.filename} ${response.entry.sizeBytes}B")
                     collected.add(response.entry)
                 }
-                else -> break
+                is ParsedResponse.Ack -> {
+                    Log.d("BleManager", "collectFileList: received Ack for cmd=${response.cmd}, continuing enumeration")
+                }
+                else -> {
+                    Log.d("BleManager", "collectFileList: received non-FileList response $response during enumeration, continuing")
+                }
             }
         }
 
