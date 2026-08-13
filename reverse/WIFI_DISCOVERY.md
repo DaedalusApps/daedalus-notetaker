@@ -220,18 +220,14 @@ adb devices
 # Install APK
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 
-# NOTE: use a bare `-a <action>` broadcast (no -p/-n) — on Android 14+, adb shell
-# broadcasts targeting a specific package/component aren't delivered to the
-# dynamically-registered AdbReceiver.
-
 # Trigger sync (USB OTG)
-adb shell am broadcast -a com.daedalus.notes.SYNC
+adb shell am broadcast -a com.daedalus.notes.SYNC -n com.daedalus.notes/.AdbReceiver
 
 # Trigger BLE probe (logs all GATT services + probes CMD bytes)
-adb shell am broadcast -a com.daedalus.notes.PROBE
+adb shell am broadcast -a com.daedalus.notes.PROBE -n com.daedalus.notes/.AdbReceiver
 
 # Trigger BLE service probe (FFD0/C0C0/E49A)
-adb shell am broadcast -a com.daedalus.notes.PROBE2
+adb shell am broadcast -a com.daedalus.notes.PROBE2 -n com.daedalus.notes/.AdbReceiver
 
 # Watch relevant logs
 adb logcat -s DaedalusBLE DaedalusSync DaedalusAI DaedalusADB FW920_PROBE R2.a
@@ -273,16 +269,13 @@ end-marker, then calls `listFiles()` to see if `UPLOADTEST01` appears. Trigger o
 device:
 
 ```powershell
-adb shell am broadcast -a com.daedalus.notes.PROBE_UPLOAD
+adb shell am broadcast -a com.daedalus.notes.PROBE_UPLOAD -n com.daedalus.notes/.AdbReceiver
 adb logcat -s UploadProbe
 ```
 
-Note: use a bare `-a <action>` broadcast (no `-n`/`-p`) — on Android 14+, `adb shell` (uid 2000)
-broadcasts targeting a specific component/package are not delivered to a dynamically-registered
-receiver unless it's `RECEIVER_EXPORTED`. `AdbReceiver`'s registration was changed from
-`RECEIVER_NOT_EXPORTED` to `RECEIVER_EXPORTED` (still `BuildConfig.DEBUG`-gated) to make the whole
-family of ADB debug hooks (`SYNC`, `PROBE`, `PROBE2`, `PROBE_DELETE`, `PROBE_UPLOAD`, `ANALYZE`)
-work at all on this OS version.
+Note: use the explicit `-n com.daedalus.notes/.AdbReceiver` component form — on Android 14+,
+`adb shell` (uid 2000) broadcasts are delivered to `AdbReceiver`'s manifest declaration, which is
+`android:exported="true"` and forwards in-package to MainActivity's dynamic receiver.
 
 **Go/no-go gate:**
 - **GO** — an opcode acks *and* `UPLOADTEST01` shows up in the file list → implement

@@ -32,7 +32,7 @@ def main():
     
     # Trigger Sync
     print("   -> Triggering com.daedalus.notes.SYNC broadcast...")
-    out, err, code = run_cmd("adb shell am broadcast -a com.daedalus.notes.SYNC")
+    out, err, code = run_cmd("adb shell am broadcast -a com.daedalus.notes.SYNC -n com.daedalus.notes/.AdbReceiver")
     
     if "Broadcast completed" not in out:
         print("❌ FAILED: Could not trigger sync broadcast. Is the app installed and running?")

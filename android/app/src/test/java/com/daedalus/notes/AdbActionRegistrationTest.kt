@@ -11,16 +11,22 @@ import org.w3c.dom.Element
  * Structural guard against the class of bug in #99: MainActivity's debug-only ADB
  * BroadcastReceiver has a `when` branch (a "handled" action) with no matching entry in the
  * dynamic IntentFilter built in onCreate (a "registered" action), so the branch can never run.
- * A third, separately-maintained action list on the manifest's `.AdbReceiver` declaration can
- * drift from both.
  *
  * [AdbActions] is the single source of truth both MainActivity and this test read from. This
  * test does not just assert that object equals itself — it checks that MainActivity's `when`
- * block actually has a branch referencing every [AdbActions.HANDLED] constant, that onCreate
- * actually builds its IntentFilter from [AdbActions.REGISTERED] rather than a hand-typed list,
- * and that AndroidManifest.xml (a separate file, parsed independently) lists exactly
- * [AdbActions.REGISTERED]. A handler added without updating [AdbActions], or a manifest edited
- * out of step with it, fails one of these for a real reason.
+ * block actually has a branch referencing every [AdbActions.HANDLED] constant, and that onCreate
+ * actually builds its IntentFilter from [AdbActions.REGISTERED] rather than a hand-typed list.
+ * A handler added without updating [AdbActions] fails one of these for a real reason.
+ *
+ * This file also guards the #104 fix: AndroidManifest.xml's `.AdbReceiver` declaration must stay
+ * `android:exported="true"` (adb shell needs that) but must carry no `<intent-filter>` (an
+ * intent-filter would let any other installed app reach it via an IMPLICIT broadcast, including
+ * `com.daedalus.notes.DELETE_FILE` which wipes a recording off FW920 hardware), and the dynamic
+ * receiver registered in onCreate must use `ContextCompat.RECEIVER_NOT_EXPORTED` since it is only
+ * ever reached via `.AdbReceiver`'s in-package forward. This closes the implicit-broadcast path
+ * only: `.AdbReceiver` stays exported="true", so on a debug build another app can still deliver an
+ * EXPLICIT-component broadcast straight at it and reach the same hardware delete via the
+ * in-package forward. That residual is tracked in #104, not fixed here.
  */
 class AdbActionRegistrationTest {
 
@@ -36,8 +42,8 @@ class AdbActionRegistrationTest {
         strippedMainActivitySource.substringAfter("override fun onCreate")
     }
 
-    private val registeredManifestActions: Set<String> by lazy {
-        parseManifestAdbReceiverActions(File(moduleRoot, "src/main/AndroidManifest.xml"))
+    private val adbReceiverElement: Element by lazy {
+        parseManifestAdbReceiverElement(File(moduleRoot, "src/main/AndroidManifest.xml"))
     }
 
     @Test
@@ -110,16 +116,42 @@ class AdbActionRegistrationTest {
     }
 
     @Test
+    fun `the debug IntentFilter registration uses RECEIVER_NOT_EXPORTED`() {
+        // #104: this receiver is only ever reached via AdbReceiver's in-package forward
+        // (context.sendBroadcast(Intent(action).setPackage(context.packageName))), which IS
+        // delivered to RECEIVER_NOT_EXPORTED receivers. Registering it RECEIVER_EXPORTED lets any
+        // third-party app bypass .AdbReceiver entirely and broadcast an IMPLICIT
+        // com.daedalus.notes.DELETE_FILE with a spoofed "_forwarded"=true extra straight at it.
+        // NOT_EXPORTED closes that implicit path; it does not close the explicit-component path
+        // through .AdbReceiver itself, which remains open on debug builds (tracked in #104).
+        val debugGateBlock = extractDebugGateBlock(strippedMainActivitySource)
+        assertTrue(
+            "The BuildConfig.DEBUG-gated block in onCreate must register adbReceiver with " +
+                "ContextCompat.RECEIVER_NOT_EXPORTED, not RECEIVER_EXPORTED — this receiver is " +
+                "only ever reached via AdbReceiver's same-package forward, and exporting it lets " +
+                "any app on the device trigger hardware DELETE_FILE directly.",
+            debugGateBlock.contains("ContextCompat.RECEIVER_NOT_EXPORTED")
+        )
+        assertTrue(
+            "The BuildConfig.DEBUG-gated block must not reference ContextCompat.RECEIVER_EXPORTED " +
+                "at all, even alongside a correct RECEIVER_NOT_EXPORTED reference — any use of the " +
+                "EXPORTED constant here re-exports the receiver to every app on the device.",
+            !debugGateBlock.contains("ContextCompat.RECEIVER_EXPORTED")
+        )
+    }
+
+    @Test
     fun `the dynamic receiver ignores broadcasts AdbReceiver has not forwarded`() {
         // This only checks the SHAPE of the fix for #99 review MEDIUM-1 (double dispatch): that
         // onReceive checks the "_forwarded" extra and returns early before the when-block, for
-        // every action uniformly. Whether this actually prevents a double dispatch depends on
-        // Android's broadcast-matching semantics — an implicit `-a ACTION` broadcast reaching
-        // both the manifest-registered AdbReceiver and this dynamically registered receiver in
-        // parallel — which a plain JVM unit test has no way to exercise (no real broadcast
-        // dispatcher, and constructing this receiver at all requires a live MainActivity with
-        // its ViewModels, BLE manager and Compose content). That is verified on-device via
-        // logcat line counts per trigger, with and without -n.
+        // every action uniformly. The original double-dispatch scenario (an implicit `-a ACTION`
+        // broadcast matching both the manifest-registered AdbReceiver and this dynamically
+        // registered receiver in parallel) is now structurally impossible — the manifest carries
+        // no intent-filter — but the guard stays load-bearing: it is the only thing enforcing that
+        // this receiver acts solely on AdbReceiver's in-package forward, not a security control.
+        // A plain JVM unit test can't exercise real broadcast dispatch (no dispatcher, and
+        // constructing this receiver requires a live MainActivity with its ViewModels, BLE
+        // manager and Compose content); that is verified on-device via logcat line counts.
         val onReceiveBody = extractOnReceiveBody(strippedMainActivitySource)
         val whenIndex = onReceiveBody.indexOf("when (intent")
         assertTrue("Could not find the when-block inside onReceive", whenIndex >= 0)
@@ -137,13 +169,61 @@ class AdbActionRegistrationTest {
     }
 
     @Test
-    fun `manifest AdbReceiver action set matches AdbActions REGISTERED`() {
+    fun `manifest AdbReceiver declares no intent-filter`() {
+        // #104: an <intent-filter> makes .AdbReceiver reachable via IMPLICIT broadcast from any
+        // other installed app — including com.daedalus.notes.DELETE_FILE, which reaches
+        // BleManager.deleteFile(filename) and wipes a recording off FW920 hardware. It buys the
+        // ADB harness nothing: every documented invocation uses the explicit
+        // `-n com.daedalus.notes/.AdbReceiver` form, which bypasses filter matching entirely for
+        // a manifest-declared receiver. This closes only the implicit path — .AdbReceiver stays
+        // exported="true", so an EXPLICIT-component broadcast from another app on a debug build
+        // still reaches it and forwards on to the hardware delete. See #104.
+        val intentFilterCount = adbReceiverElement.getElementsByTagName("intent-filter").length
         assertEquals(
-            "AndroidManifest.xml's .AdbReceiver <intent-filter> must list exactly " +
-                "AdbActions.REGISTERED, or delivery via -n can silently diverge from what " +
-                "MainActivity actually handles.",
-            AdbActions.REGISTERED.toSet(),
-            registeredManifestActions
+            "AndroidManifest.xml's .AdbReceiver must have no <intent-filter>. An intent-filter " +
+                "reopens implicit third-party delivery to a receiver that can trigger hardware " +
+                "file deletion (com.daedalus.notes.DELETE_FILE); adb shell only ever uses the " +
+                "explicit -n component form, which does not need one.",
+            0,
+            intentFilterCount
+        )
+    }
+
+    @Test
+    fun `manifest AdbReceiver stays exported for adb shell delivery`() {
+        // adb shell runs as uid 2000; a non-exported manifest receiver has never been reachable
+        // from another uid, including adb shell's, on any Android version. This pins the intent
+        // so a future edit doesn't silently break the whole harness while fixing #104.
+        assertEquals(
+            "AndroidManifest.xml's .AdbReceiver must keep android:exported=\"true\" — without " +
+                "it, adb shell's explicit -n broadcasts stop being delivered and the whole ADB " +
+                "test harness breaks.",
+            "true",
+            adbReceiverElement.getAttribute("android:exported")
+        )
+    }
+
+    @Test
+    fun `no variant manifest other than src main reintroduces AdbReceiver`() {
+        // #104: this test's other manifest checks only parse src/main/AndroidManifest.xml. A
+        // src/debug/AndroidManifest.xml (exactly the variant this debug-only receiver lives in)
+        // or a library manifest could declare its own <receiver android:name=".AdbReceiver">
+        // with an <intent-filter>, which the manifest merger would combine into the installed
+        // app, reopening implicit third-party delivery — while `manifest AdbReceiver declares no
+        // intent-filter` above keeps passing because it never looks past src/main.
+        val srcDir = File(moduleRoot, "src")
+        val offendingManifests = srcDir.walkTopDown()
+            .filter { it.isFile && it.name == "AndroidManifest.xml" }
+            .filterNot { it.canonicalFile == File(moduleRoot, "src/main/AndroidManifest.xml").canonicalFile }
+            .filter { manifestDeclaresAdbReceiver(it) }
+            .map { it.path }
+            .toList()
+        assertTrue(
+            "Found AndroidManifest.xml file(s) other than src/main declaring .AdbReceiver: " +
+                "$offendingManifests. A variant or library manifest can merge an <intent-filter> " +
+                "back onto .AdbReceiver via manifest merger and defeat the #104 guard, even though " +
+                "src/main/AndroidManifest.xml itself has none.",
+            offendingManifests.isEmpty()
         )
     }
 
@@ -203,18 +283,29 @@ class AdbActionRegistrationTest {
             error("Unbalanced braces starting at index $openBraceIndex")
         }
 
-        private fun parseManifestAdbReceiverActions(manifestFile: File): Set<String> {
+        /** Locates the `<receiver android:name=".AdbReceiver">` element in AndroidManifest.xml so
+         *  tests can assert on its shape directly (exported attribute, absence of intent-filter)
+         *  rather than on a scraped action list — see #104. */
+        private fun parseManifestAdbReceiverElement(manifestFile: File): Element {
             val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(manifestFile)
             val receivers = doc.getElementsByTagName("receiver")
             for (i in 0 until receivers.length) {
                 val receiver = receivers.item(i) as Element
-                if (receiver.getAttribute("android:name") != ".AdbReceiver") continue
-                val actions = receiver.getElementsByTagName("action")
-                return (0 until actions.length)
-                    .map { (actions.item(it) as Element).getAttribute("android:name") }
-                    .toSet()
+                if (receiver.getAttribute("android:name") == ".AdbReceiver") return receiver
             }
             error("Could not find a <receiver android:name=\".AdbReceiver\"> in AndroidManifest.xml")
+        }
+
+        /** True if [manifestFile] declares a `<receiver android:name=".AdbReceiver">`. Used by
+         *  the LOW-2 guard to catch a variant manifest reintroducing it outside src/main. */
+        private fun manifestDeclaresAdbReceiver(manifestFile: File): Boolean {
+            val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(manifestFile)
+            val receivers = doc.getElementsByTagName("receiver")
+            for (i in 0 until receivers.length) {
+                val receiver = receivers.item(i) as Element
+                if (receiver.getAttribute("android:name") == ".AdbReceiver") return true
+            }
+            return false
         }
 
         /** Walks up from the test JVM's working directory to find the `:app` module root

@@ -40,12 +40,14 @@ object AdbActions {
     )
 
     /**
-     * Actions registered on the dynamic IntentFilter and mirrored in the manifest. Equal to
-     * [HANDLED] today (nothing is currently withheld), but the two stay separate names on
-     * purpose: they are conceptually distinct sets — every branch that exists vs. every action
-     * actually wired up — [AdbActionRegistrationTest] asserts against both independently, and a
-     * future action that needs quarantining (as REPAIR_FILE once did) only has to be removed
-     * from this list, not have the whole handled/registered distinction reintroduced.
+     * Actions registered on the dynamic IntentFilter in MainActivity.onCreate — the sole source
+     * of truth for that filter (the manifest's `.AdbReceiver` declaration carries no
+     * intent-filter of its own as of #104). Equal to [HANDLED] today (nothing is currently
+     * withheld), but the two stay separate names on purpose: they are conceptually distinct sets
+     * — every branch that exists vs. every action actually wired up — [AdbActionRegistrationTest]
+     * asserts against both independently, and a future action that needs quarantining (as
+     * REPAIR_FILE once did) only has to be removed from this list, not have the whole
+     * handled/registered distinction reintroduced.
      */
     val REGISTERED: List<String> = HANDLED
 }
