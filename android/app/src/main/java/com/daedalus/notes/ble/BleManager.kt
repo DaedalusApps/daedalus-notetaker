@@ -351,12 +351,20 @@ class BleManager(private val context: Context) {
 
     private fun handleIncoming(gatt: BluetoothGatt, characteristicUuid: String, data: ByteArray) {
         val hex = data.joinToString(" ") { "%02X".format(it) }
-        Log.d("BleManager", "RX [${data.size}b]: $hex")
+        Log.d("BleManager", "RX char=$characteristicUuid [${data.size}b]: $hex")
         // Audio data arrives on B0B3/B0B4, control responses on B0B2 — route on the
         // characteristic, not the packet prefix, so an audio chunk that coincidentally begins
-        // A0 0A is never misparsed as a control packet (#96).
-        val isAudioChannel = characteristicUuid.equals(NOTIFY_B0B3_UUID, ignoreCase = true) ||
-            characteristicUuid.equals(NOTIFY_B0B4_UUID, ignoreCase = true)
+        // A0 0A is never misparsed as a control packet (#96). This assumes control acks never
+        // arrive on B0B3/B0B4 — see GEMINI.md, "assumed, not yet measured" until confirmed on
+        // hardware.
+        val isB0B3 = characteristicUuid.equals(NOTIFY_B0B3_UUID, ignoreCase = true)
+        if (isB0B3 && !b0b3EverObserved) {
+            b0b3EverObserved = true
+            Log.w("BleManager", "B0B3 delivered data for the first time ever observed " +
+                "[${data.size}b]: $hex — treated as audio; if this is actually a control " +
+                "packet, audio streams will be corrupted")
+        }
+        val isAudioChannel = isB0B3 || characteristicUuid.equals(NOTIFY_B0B4_UUID, ignoreCase = true)
         val parsed = parseResponse(data, isAudioChannel) ?: return
         Log.d("BleManager", "RX parsed: $parsed")
 
@@ -455,6 +463,15 @@ class BleManager(private val context: Context) {
             Log.w("BleManager", "runInitSequence: gatt is null after init — device disconnected mid-sequence")
         }
     }
+
+    /**
+     * True once B0B3 has delivered any notification. B0B3 was never observed carrying data
+     * (GEMINI.md) but is still classified as an audio channel by [handleIncoming]; this flag
+     * gates a one-time warning log so a first-ever B0B3 payload is surfaced instead of silently
+     * treated as audio.
+     */
+    @Volatile
+    private var b0b3EverObserved = false
 
     /**
      * Set while a file transfer owns the link. The FW920 streams audio in response to one
