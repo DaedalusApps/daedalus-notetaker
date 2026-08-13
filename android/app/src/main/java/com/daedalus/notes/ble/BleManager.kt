@@ -315,7 +315,7 @@ class BleManager(private val context: Context) {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            handleIncoming(gatt, characteristic.value)
+            handleIncoming(gatt, characteristic.uuid.toString(), characteristic.value)
         }
 
         override fun onCharacteristicChanged(
@@ -323,7 +323,7 @@ class BleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            handleIncoming(gatt, value)
+            handleIncoming(gatt, characteristic.uuid.toString(), value)
         }
     }
 
@@ -349,10 +349,15 @@ class BleManager(private val context: Context) {
     // Incoming data handler
     // ------------------------------------------------------------------
 
-    private fun handleIncoming(gatt: BluetoothGatt, data: ByteArray) {
+    private fun handleIncoming(gatt: BluetoothGatt, characteristicUuid: String, data: ByteArray) {
         val hex = data.joinToString(" ") { "%02X".format(it) }
         Log.d("BleManager", "RX [${data.size}b]: $hex")
-        val parsed = parseResponse(data) ?: return
+        // Audio data arrives on B0B3/B0B4, control responses on B0B2 — route on the
+        // characteristic, not the packet prefix, so an audio chunk that coincidentally begins
+        // A0 0A is never misparsed as a control packet (#96).
+        val isAudioChannel = characteristicUuid.equals(NOTIFY_B0B3_UUID, ignoreCase = true) ||
+            characteristicUuid.equals(NOTIFY_B0B4_UUID, ignoreCase = true)
+        val parsed = parseResponse(data, isAudioChannel) ?: return
         Log.d("BleManager", "RX parsed: $parsed")
 
         // Eagerly update state based on parsed response
