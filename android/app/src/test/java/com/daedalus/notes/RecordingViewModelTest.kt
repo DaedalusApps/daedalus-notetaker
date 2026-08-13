@@ -14,6 +14,7 @@ import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.viewmodel.RecordingViewModel
 import io.mockk.*
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -1116,6 +1117,262 @@ class RecordingViewModelTest {
         coVerify(exactly = 0) { repo.save(any()) }
         coVerify(exactly = 1) { bleManager.downloadFile(eq(parentFilename), any()) }
         coVerify(exactly = 0) { bleManager.downloadFile(eq(partFilename), any()) }
+    }
+
+    // --- #122: heavyWork must cover the whole re-download critical section, not just the
+    // transfer, or a concurrent sync can interleave into a re-download's restore/save. ---------
+
+    // Property proven directly: heavyWork is actually held (not just intended to be held)
+    // across the whole critical section, not released between the transfer and the DB write.
+    // A concurrent sync attempting to download an unrelated file must be blocked from even
+    // starting until the re-download's critical section — including its repo.save — is done.
+    @Test
+    fun redownloadAndAnalyze_holdsHeavyWorkAcrossCriticalSection_blocksConcurrentSync() = runTest {
+        val filename = "locked_target.mp3"
+        val original = File.createTempFile("locked_target_orig", ".mp3").apply {
+            writeBytes(ByteArray(100) { it.toByte() })
+            deleteOnExit()
+        }
+        val recording = Recording(filename, isLocal = false, localPath = original.absolutePath, sizeBytes = 100L)
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "locked_target", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        // The transfer itself completes immediately; the gate sits on repo.deletePartsOf(),
+        // which runs AFTER the transfer, as the critical section's DB write is starting. This
+        // is the part that widening heavyWork is actually about: a lock held only around the
+        // transfer would already have been released by this point, letting a concurrent sync
+        // start downloading. Gating here — not on the transfer — is what makes this test able
+        // to distinguish the fix from the pre-fix code.
+        coEvery { bleManager.downloadFile(eq(filename), any()) } returns
+            File(original.absolutePath).apply { writeBytes(ByteArray(100) { it.toByte() }) }
+        val gate = CompletableDeferred<Unit>()
+        coEvery { repo.deletePartsOf(filename) } coAnswers { gate.await() }
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        // Runs the transfer to completion and up to the point the re-download is parked
+        // awaiting the gate inside repo.deletePartsOf() — still inside heavyWork.
+        runCurrent()
+
+        // A concurrent sync pass for a different file must not be able to start its own
+        // download while the re-download still holds heavyWork.
+        coEvery { repo.getPendingDeletes() } returns emptyList()
+        val otherEntry = com.daedalus.notes.ble.FileEntry(filename = "other_during_lock.mp3", sizeBytes = 50L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(otherEntry))
+        )
+        coEvery { repo.get("other_during_lock.mp3") } returns null
+        val otherTemp = File.createTempFile("other_during_lock", ".mp3").apply { deleteOnExit() }
+        coEvery { bleManager.downloadFile(eq("other_during_lock.mp3"), any()) } returns otherTemp
+
+        viewModel.syncAllBleFiles(bleManager)
+        runCurrent()
+
+        coVerify(exactly = 0) { bleManager.downloadFile(eq("other_during_lock.mp3"), any()) }
+
+        // Release the re-download's transfer; both its own DB write and the now-freed sync
+        // must be able to proceed.
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { bleManager.downloadFile(eq("other_during_lock.mp3"), any()) }
+    }
+
+    // Property proven directly: no deadlock. doAnalyze() re-acquires heavyWork itself, so if
+    // the widened lock in redownloadAndAnalyze were still held when doAnalyze() runs, this
+    // would hang forever instead of completing — advanceUntilIdle() would simply leave the
+    // coroutine parked, and the coVerify below would fail with "was not called".
+    @Test
+    fun redownloadAndAnalyze_completesAndReachesAnalysis_noDeadlock() = runTest {
+        val filename = "redl_full.mp3"
+        val transcriber = mockk<TranscriptionService>(relaxed = true)
+        coEvery { transcriber.transcribe(any()) } returns "a readable transcript with enough words"
+        val vm = RecordingViewModel(
+            application = application, db = db, repo = repo, llm = llm,
+            transcriber = transcriber, embedder = embedder, ioDispatcher = testDispatcher
+        )
+        val original = File.createTempFile("redl_full_orig", ".mp3").apply {
+            writeBytes(ByteArray(100) { it.toByte() })
+            deleteOnExit()
+        }
+        val recording = Recording(
+            filename, isLocal = false, localPath = original.absolutePath,
+            sizeBytes = 100L, durationMillis = 500L
+        )
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "redl_full", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        val downloaded = File.createTempFile("redl_full_downloaded", ".mp3").apply {
+            writeBytes(ByteArray(150) { it.toByte() })
+            deleteOnExit()
+        }
+        coEvery { bleManager.downloadFile(eq(filename), any()) } returns downloaded
+
+        vm.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        // doAnalyze() actually ran to completion — the regression test for the deadlock risk.
+        coVerify(exactly = 1) { transcriber.transcribe(any()) }
+        assertEquals(false, vm.isProcessing.value)
+        assertEquals(null, vm.syncProgress.value)
+    }
+
+    // Property proven directly: an early exit taken from *inside* heavyWork.withLock (the
+    // #119 short-replacement rejection, a plain `return@launch` non-local return) still
+    // releases the mutex. If it didn't, a later attempt to acquire heavyWork would never
+    // proceed and the coVerify below would fail with "was not called".
+    @Test
+    fun redownloadAndAnalyze_shorterReplacementRejection_releasesHeavyWork() = runTest {
+        val filename = "reject_release.mp3"
+        val originalContent = ByteArray(1000) { it.toByte() }
+        val original = File.createTempFile("reject_release_orig", ".mp3").apply {
+            writeBytes(originalContent)
+            deleteOnExit()
+        }
+        val recording = Recording(
+            filename, isLocal = false, localPath = original.absolutePath,
+            sizeBytes = originalContent.size.toLong()
+        )
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "reject_release", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+        coEvery { bleManager.downloadFile(eq(filename), any()) } coAnswers {
+            original.delete()
+            File(original.absolutePath).apply { writeBytes(ByteArray(500) { it.toByte() }) }
+        }
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected the rejection to have happened first",
+            viewModel.aiError.value?.contains("shorter", ignoreCase = true) == true
+        )
+
+        coEvery { repo.getPendingDeletes() } returns emptyList()
+        val otherEntry = com.daedalus.notes.ble.FileEntry(filename = "after_reject.mp3", sizeBytes = 10L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(otherEntry))
+        )
+        coEvery { repo.get("after_reject.mp3") } returns null
+        val otherTemp = File.createTempFile("after_reject", ".mp3").apply { deleteOnExit() }
+        coEvery { bleManager.downloadFile(eq("after_reject.mp3"), any()) } returns otherTemp
+
+        viewModel.syncAllBleFiles(bleManager)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { bleManager.downloadFile(eq("after_reject.mp3"), any()) }
+    }
+
+    // Property proven directly: two concurrent re-downloads of the same file. The second call,
+    // made while the first is still inside heavyWork awaiting its transfer, must be rejected
+    // outright with a visible error rather than silently queued behind the lock — see the
+    // inFlightRedownloads doc comment for why queuing behind the lock isn't safe here.
+    @Test
+    fun redownloadAndAnalyze_concurrentSameFile_secondRejectedWithError() = runTest {
+        val filename = "concurrent_target.mp3"
+        val original = File.createTempFile("concurrent_target_orig", ".mp3").apply {
+            writeBytes(ByteArray(100) { it.toByte() })
+            deleteOnExit()
+        }
+        val recording = Recording(filename, isLocal = false, localPath = original.absolutePath, sizeBytes = 100L)
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "concurrent_target", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        val gate = CompletableDeferred<Unit>()
+        coEvery { bleManager.downloadFile(eq(filename), any()) } coAnswers {
+            gate.await()
+            File(original.absolutePath).apply { writeBytes(ByteArray(100) { it.toByte() }) }
+        }
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        runCurrent()
+
+        // Second call for the same file while the first is still in flight — must be
+        // rejected immediately, not queued behind heavyWork.
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        assertEquals(
+            "Already re-downloading this recording — please wait for it to finish.",
+            viewModel.aiError.value
+        )
+        coVerify(exactly = 1) { bleManager.downloadFile(eq(filename), any()) }
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+    }
+
+    // Regression test for the fix moving inFlightRedownloads.remove(filename) into the inner
+    // finally (alongside _isProcessing reset) instead of the outer one that also wrapped
+    // doAnalyze()/loadNote(). Drives a re-download all the way to completion, then issues a
+    // second, non-concurrent re-download of the same filename and asserts it is accepted rather
+    // than rejected with "already re-downloading". If `remove` were reached late — or not at
+    // all — this fails with the rejection error instead of a second downloadFile() call.
+    @Test
+    fun redownloadAndAnalyze_secondCallAfterFirstFullyCompletes_isNotRejected() = runTest {
+        val filename = "redl_twice.mp3"
+        val transcriber = mockk<TranscriptionService>(relaxed = true)
+        coEvery { transcriber.transcribe(any()) } returns "a readable transcript with enough words"
+        val vm = RecordingViewModel(
+            application = application, db = db, repo = repo, llm = llm,
+            transcriber = transcriber, embedder = embedder, ioDispatcher = testDispatcher
+        )
+        val original = File.createTempFile("redl_twice_orig", ".mp3").apply {
+            writeBytes(ByteArray(100) { it.toByte() })
+            deleteOnExit()
+        }
+        val recording = Recording(
+            filename, isLocal = false, localPath = original.absolutePath,
+            sizeBytes = 100L, durationMillis = 500L
+        )
+        coEvery { repo.get(filename) } returns recording
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "redl_twice", sizeBytes = 100L)
+        every { bleManager.bleState } returns MutableStateFlow(
+            BleState(connectionState = ConnectionState.CONNECTED, files = listOf(entry))
+        )
+        coEvery { bleManager.listFiles() } returns Unit
+
+        val downloaded = File.createTempFile("redl_twice_downloaded", ".mp3").apply {
+            writeBytes(ByteArray(150) { it.toByte() })
+            deleteOnExit()
+        }
+        coEvery { bleManager.downloadFile(eq(filename), any()) } returns downloaded
+
+        vm.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+        assertEquals(null, vm.aiError.value)
+
+        // First re-download fully completed — including doAnalyze() and loadNote() — before
+        // this second call starts, so it is not concurrent with the first.
+        vm.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        assertEquals(
+            "the second, non-concurrent re-download must not be rejected as already in flight",
+            null,
+            vm.aiError.value
+        )
+        coVerify(exactly = 2) { bleManager.downloadFile(eq(filename), any()) }
     }
 
     @Test
