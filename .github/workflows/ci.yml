@@ -18,6 +18,11 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v4
+      # -Dmp3.fixtures is deliberately NOT passed here: it points at real meeting audio
+      # recorded off device hardware, and this repo is public. Mp3FrameScanTest.realFileCrossCheck
+      # detects the absent/unset property via Assume.assumeTrue and reports itself as SKIPPED
+      # (not passed) by design — see #106. To run it locally against your own fixture corpus:
+      #   ./gradlew :app:testDebugUnitTest -Dmp3.fixtures=<dir>
       - name: Run unit tests
         working-directory: android
         run: ./gradlew testDebugUnitTest
