@@ -36,7 +36,7 @@ class AdbActionRegistrationTest {
     /** Comments stripped so a comment claiming to do the right thing can't satisfy a
      *  `.contains(...)` check that was meant to verify real code. See HIGH-1 in the #99 review. */
     private val strippedMainActivitySource: String by lazy { stripComments(mainActivitySource) }
-    private val receiverWhenBlock: String by lazy { extractReceiverWhenBlock(mainActivitySource) }
+    private val receiverWhenBlock: String by lazy { extractReceiverWhenBlock(strippedMainActivitySource) }
     private val onCreateSource: String by lazy {
         strippedMainActivitySource.substringAfter("override fun onCreate")
     }
@@ -131,6 +131,33 @@ class AdbActionRegistrationTest {
     }
 
     @Test
+    fun `the dynamic receiver ignores broadcasts AdbReceiver has not forwarded`() {
+        // This only checks the SHAPE of the fix for #99 review MEDIUM-1 (double dispatch): that
+        // onReceive checks the "_forwarded" extra and returns early before the when-block, for
+        // every action uniformly. Whether this actually prevents a double dispatch depends on
+        // Android's broadcast-matching semantics — an implicit `-a ACTION` broadcast reaching
+        // both the manifest-registered AdbReceiver and this dynamically registered receiver in
+        // parallel — which a plain JVM unit test has no way to exercise (no real broadcast
+        // dispatcher, and constructing this receiver at all requires a live MainActivity with
+        // its ViewModels, BLE manager and Compose content). That is verified on-device via
+        // logcat line counts per trigger, with and without -n.
+        val onReceiveBody = extractOnReceiveBody(strippedMainActivitySource)
+        val whenIndex = onReceiveBody.indexOf("when (intent")
+        assertTrue("Could not find the when-block inside onReceive", whenIndex >= 0)
+        val guardSnippet = onReceiveBody.substring(0, whenIndex)
+        assertTrue(
+            "onReceive must check the \"_forwarded\" extra before dispatching",
+            guardSnippet.contains("_forwarded")
+        )
+        assertTrue(
+            "The \"_forwarded\" check must return early (not just log) when the broadcast was " +
+                "not forwarded by AdbReceiver, or an implicit -a ACTION broadcast still reaches " +
+                "the when-block directly and double-dispatches.",
+            guardSnippet.contains("return")
+        )
+    }
+
+    @Test
     fun `manifest AdbReceiver action set matches AdbActions REGISTERED`() {
         assertEquals(
             "AndroidManifest.xml's .AdbReceiver <intent-filter> must list exactly " +
@@ -173,11 +200,18 @@ class AdbActionRegistrationTest {
             }
         }
 
+        /** Slices out the adbReceiver's whole `onReceive` function body (guard clause and all). */
+        private fun extractOnReceiveBody(source: String): String {
+            val start = source.indexOf("override fun onReceive")
+            require(start >= 0) { "Could not find 'override fun onReceive' in MainActivity.kt" }
+            return balancedBraceBlock(source, source.indexOf('{', start))
+        }
+
         /** Slices out just the adbReceiver's `onReceive` `when` block, so a match can't
          *  accidentally pick up an unrelated `when` elsewhere in the file. */
         private fun extractReceiverWhenBlock(source: String): String {
-            val start = source.indexOf("when (intent?.action)")
-            require(start >= 0) { "Could not find 'when (intent?.action)' in MainActivity.kt" }
+            val start = source.indexOf("when (intent")
+            require(start >= 0) { "Could not find the when-block in MainActivity.kt's onReceive" }
             return balancedBraceBlock(source, source.indexOf('{', start))
         }
 

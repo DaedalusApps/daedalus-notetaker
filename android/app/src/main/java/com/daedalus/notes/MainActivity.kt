@@ -41,7 +41,16 @@ class MainActivity : ComponentActivity() {
 
     private val adbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
+            // This receiver is dynamically registered RECEIVER_EXPORTED, so an implicit
+            // `-a ACTION` broadcast (no -n) matches it directly AND matches AdbReceiver's
+            // manifest intent-filter in parallel — AdbReceiver then forwards its own copy with
+            // "_forwarded"=true, which would double-dispatch every action. Only ever act on the
+            // forwarded copy: `-n .../.AdbReceiver` (every documented command) never reaches this
+            // receiver directly at all — explicit-component targeting cannot match a dynamically
+            // registered receiver — so it only ever arrives here via AdbReceiver's forward, which
+            // always sets this flag. See #99 review, MEDIUM-1.
+            if (intent == null || !intent.getBooleanExtra("_forwarded", false)) return
+            when (intent.action) {
                 AdbActions.SYNC -> {
                     Log.i("DaedalusADB", "ADB BLE sync triggered")
                     recordingViewModel.syncAllBleFiles(deviceViewModel.bleManager)
