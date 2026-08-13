@@ -71,10 +71,12 @@ class MainActivity : ComponentActivity() {
                 AdbActions.PROBE_DELETE -> {
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Delete probe triggered for '$filename'")
-                    if (filename.isNotBlank()) {
+                    if (filename.isNotBlank() && com.daedalus.notes.util.SafeFilename.isSafe(filename)) {
                         lifecycleScope.launch {
                             deviceViewModel.bleManager.probeDeleteCmds(filename)
                         }
+                    } else if (filename.isNotBlank()) {
+                        Log.i("DaedalusADB", "Rejected delete probe for unsafe filename '$filename'")
                     }
                 }
                 AdbActions.PROBE_UPLOAD -> {
@@ -101,10 +103,12 @@ class MainActivity : ComponentActivity() {
                 AdbActions.REDOWNLOAD -> {
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Re-download + analyze triggered for '$filename'")
-                    if (filename.isNotBlank()) {
+                    if (filename.isNotBlank() && com.daedalus.notes.util.SafeFilename.isSafe(filename)) {
                         lifecycleScope.launch {
                             recordingViewModel.redownloadAndAnalyze(filename, deviceViewModel.bleManager)
                         }
+                    } else if (filename.isNotBlank()) {
+                        Log.i("DaedalusADB", "Rejected re-download for unsafe filename '$filename'")
                     }
                 }
                 AdbActions.DELETE_FILE -> {
@@ -113,11 +117,13 @@ class MainActivity : ComponentActivity() {
                     // two-phase-deletes over BLE then re-lists to confirm the file is gone.
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Hardware delete triggered for '$filename'")
-                    if (filename.isNotBlank()) {
+                    if (filename.isNotBlank() && com.daedalus.notes.util.SafeFilename.isSafe(filename)) {
                         lifecycleScope.launch {
                             val ok = deviceViewModel.bleManager.deleteFile(filename)
                             Log.i("DaedalusADB", "Hardware delete result for '$filename': $ok")
                         }
+                    } else if (filename.isNotBlank()) {
+                        Log.i("DaedalusADB", "Rejected hardware delete for unsafe filename '$filename'")
                     }
                 }
                 AdbActions.ADD_CALENDAR -> {

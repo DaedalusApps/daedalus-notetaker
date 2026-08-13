@@ -23,10 +23,11 @@ import org.w3c.dom.Element
  * intent-filter would let any other installed app reach it via an IMPLICIT broadcast, including
  * `com.daedalus.notes.DELETE_FILE` which wipes a recording off FW920 hardware), and the dynamic
  * receiver registered in onCreate must use `ContextCompat.RECEIVER_NOT_EXPORTED` since it is only
- * ever reached via `.AdbReceiver`'s in-package forward. This closes the implicit-broadcast path
- * only: `.AdbReceiver` stays exported="true", so on a debug build another app can still deliver an
- * EXPLICIT-component broadcast straight at it and reach the same hardware delete via the
- * in-package forward. That residual is tracked in #104, not fixed here.
+ * ever reached via `.AdbReceiver`'s in-package forward. This closes both the implicit-broadcast
+ * path (no intent-filter) and the explicit-component residual (`.AdbReceiver` now also declares
+ * `android:permission="android.permission.DUMP"`, so only a sender holding that
+ * signature|privileged|development permission — i.e. adb shell — can deliver to it at all, by
+ * either broadcast form).
  */
 class AdbActionRegistrationTest {
 
@@ -204,6 +205,56 @@ class AdbActionRegistrationTest {
     }
 
     @Test
+    fun `manifest AdbReceiver requires DUMP permission from the sender`() {
+        // #104: exported="true" alone still lets any app on a debug build deliver an
+        // EXPLICIT-component broadcast straight at .AdbReceiver, which forwards in-package to a
+        // dynamic receiver that reaches BleManager.deleteFile and wipes a recording off FW920
+        // hardware. android:permission requires the SENDER hold the named permission — DUMP is
+        // signature|privileged|development, so com.android.shell (adb shell, uid 2000) holds it
+        // but a normal third-party app cannot be granted it without adb access it would already
+        // have to have.
+        assertEquals(
+            "AndroidManifest.xml's .AdbReceiver must declare " +
+                "android:permission=\"android.permission.DUMP\". Without it, any app on a debug " +
+                "build can deliver an EXPLICIT-component broadcast to a receiver that reaches " +
+                "hardware file deletion (com.daedalus.notes.DELETE_FILE) via the in-package forward.",
+            "android.permission.DUMP",
+            adbReceiverElement.getAttribute("android:permission")
+        )
+    }
+
+    @Test
+    fun `DELETE_FILE, REDOWNLOAD and PROBE_DELETE branches guard filename with SafeFilename`() {
+        // #104: filenames in these broadcasts are attacker-influenced (see SafeFilename's own
+        // KDoc) and each branch reaches destructive hardware/local-file operations
+        // (BleManager.deleteFile, RecordingViewModel.redownloadAndAnalyze which deletes the local
+        // file before re-downloading, and BleManager.probeDeleteCmds which brute-forces CMD
+        // 0x0D-0x17 at the FW920 with the filename until the file disappears — see MEDIUM-1 in
+        // the follow-up review). Extract each branch's own text rather than searching the whole
+        // when-block so a SafeFilename reference in some other branch can't satisfy this.
+        val deleteFileBranch = extractWhenBranch(receiverWhenBlock, "AdbActions.DELETE_FILE")
+        val redownloadBranch = extractWhenBranch(receiverWhenBlock, "AdbActions.REDOWNLOAD")
+        val probeDeleteBranch = extractWhenBranch(receiverWhenBlock, "AdbActions.PROBE_DELETE")
+        assertTrue(
+            "The AdbActions.DELETE_FILE branch must guard its filename with SafeFilename.isSafe " +
+                "before reaching BleManager.deleteFile.",
+            deleteFileBranch.contains("SafeFilename")
+        )
+        assertTrue(
+            "The AdbActions.REDOWNLOAD branch must guard its filename with SafeFilename.isSafe " +
+                "before reaching redownloadAndAnalyze, which deletes the local file before " +
+                "re-downloading.",
+            redownloadBranch.contains("SafeFilename")
+        )
+        assertTrue(
+            "The AdbActions.PROBE_DELETE branch must guard its filename with SafeFilename.isSafe " +
+                "before reaching probeDeleteCmds, which brute-forces CMD 0x0D-0x17 at the FW920 " +
+                "with the filename.",
+            probeDeleteBranch.contains("SafeFilename")
+        )
+    }
+
+    @Test
     fun `no variant manifest other than src main reintroduces AdbReceiver`() {
         // #104: this test's other manifest checks only parse src/main/AndroidManifest.xml. A
         // src/debug/AndroidManifest.xml (exactly the variant this debug-only receiver lives in)
@@ -258,6 +309,16 @@ class AdbActionRegistrationTest {
             val start = source.indexOf("when (intent")
             require(start >= 0) { "Could not find the when-block in MainActivity.kt's onReceive" }
             return balancedBraceBlock(source, source.indexOf('{', start))
+        }
+
+        /** Slices out a single `AdbActions.X -> { ... }` branch's body from a `when`-block's text,
+         *  so a check for one branch can't be satisfied by a match anywhere else in the block. */
+        private fun extractWhenBranch(whenBlock: String, branchLabel: String): String {
+            val labelStart = whenBlock.indexOf("$branchLabel ->")
+            require(labelStart >= 0) { "Could not find branch '$branchLabel ->' in the when-block" }
+            val openBrace = whenBlock.indexOf('{', labelStart)
+            require(openBrace >= 0) { "Branch '$branchLabel' has no '{' body" }
+            return balancedBraceBlock(whenBlock, openBrace)
         }
 
         /** Slices out the `if (BuildConfig.DEBUG) { ... }` block in onCreate. Throws (failing the
