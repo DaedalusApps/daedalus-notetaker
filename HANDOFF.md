@@ -1,36 +1,42 @@
 # Handoff Brief — Daedalus Notetaker
 
-Written 2026-08-13 (session 6). Replaces the previous version. Read this whole file before starting.
+Written 2026-08-13 (session 6, including a live-device phase). Replaces the previous version. Read
+this whole file before starting.
 
 ---
 
 ## Current state
 
-- **`main`** = `5a60965`, clean working tree, in sync with `origin/main`.
-- **`.\gradlew :app:testDebugUnitTest` → 419 tests / 0 failures / 1 skipped.** The skip is
-  `Mp3FrameScanTest.realFileCrossCheck` and it is **by design** — see #106 below. A skip here is
-  correct; a *pass* would mean something regressed.
-- **`:app:assembleRelease` builds clean** (`lintVitalRelease` passes).
+- **`main`** = `ec9b13f`, clean working tree, in sync with `origin/main`.
+- **`.\gradlew :app:testDebugUnitTest` → 425 tests / 0 failures / 1 skipped.** The skip is
+  `Mp3FrameScanTest.realFileCrossCheck` and it is **by design**. A skip there is correct; a *pass*
+  would mean something regressed.
+- **Phone** (Galaxy S26 Ultra, `R3GL503MXPX`) is on the **release** build, **versionCode 313**,
+  installed with `adb install -r`. `versionCode = gitCommitCount` (`app/build.gradle.kts:41`), so
+  `main` reads higher than the phone by however many commits landed after that install — all of
+  them test-fixture and documentation commits with **no app-behaviour change**. The phone is
+  functionally current for `main` as of this handoff. Check with `git rev-list --count HEAD`.
+- **Data verified: 22 recordings, 58,658,554 bytes, MD5 byte-identical at seven checkpoints** —
+  before any work, after each of five installs, and after every interrupted transfer. Baseline was
+  pulled with `adb pull` and proven identical to the device with per-file MD5 comparison.
+  The db, `-wal` and `-shm` were also pulled byte-exact via `adb exec-out`.
 
-> **⚠ THE PHONE IS STALE. No device work happened this session — no device was attached
-> (`adb devices` empty), and the owner scoped the session to work that needs no ADB.** The phone is
-> still on the **session-5 release build, versionCode 294**. Everything merged in session 6 is on
-> `main` and **not on the phone**. The next session that touches hardware must install first.
->
-> The last recorded device state, from session 5, was: Galaxy S26 Ultra `R3GL503MXPX`, 21 recordings
-> / 57,896,028 bytes, MD5-verified byte-identical. **That baseline is from a previous session — do
-> not trust it. Re-pull your own before touching anything** (see the data-integrity protocol below).
+> **One file on the phone is NOT the owner's data:** `20260813084543.mp3` (337,148 bytes, MD5
+> `a0e25951817b9161008bd0a8b9aae194`) and its matching FW920 entry are a throwaway test recording
+> made this session. Safe to delete. It is a useful reproduction asset for #119.
 
 **Merged this session (Session 6):**
 
 | PR | Issue | What |
 |---|---|---|
-| #113 | #104 | Removed the `.AdbReceiver` `<intent-filter>` and switched MainActivity's dynamic receiver to `RECEIVER_NOT_EXPORTED`, closing both *implicit*-broadcast paths into the debug ADB harness |
-| #114 | #106 | `realFileCrossCheck` now reports SKIPPED instead of a false pass; incomplete fixture dirs hard-fail; `expectedResults.size` pinned so the list cannot be silently emptied |
+| #113 | #104 | Removed the `.AdbReceiver` `<intent-filter>` and switched the dynamic receiver to `RECEIVER_NOT_EXPORTED`, closing both *implicit*-broadcast paths into the debug ADB harness |
+| #114 | #106 | `realFileCrossCheck` reports SKIPPED instead of a false pass; incomplete fixture dirs hard-fail; `expectedResults.size` pinned so the list cannot be silently emptied |
+| #115 | — | Handoff |
+| #118 | **#104 closed** | `.AdbReceiver` gated on `android.permission.DUMP`; `SafeFilename` guards on all three destructive ADB handlers; dot-only names rejected centrally |
+| #120 | #106 | Real interrupted-BLE-transfer fixtures (structure-only, audio zeroed), pinned against ffmpeg ground truth |
 
-**Both PRs used `Refs`, not `Closes`. #104 and #106 are still OPEN on purpose** — each has an
-acceptance criterion that is device-blocked. What shipped is narrower than either issue title, and
-both PR bodies say so explicitly. Do not read "merged" as "done".
+**#104 is closed and device-verified. #106 was closed by the owner** — note PR #120 documents a
+residual the issue's own plan cannot reach (see below). #101 and #103 remain untouched.
 
 ---
 
@@ -51,52 +57,55 @@ both PR bodies say so explicitly. Do not read "merged" as "done".
 
 | # | Title | Note |
 |---|---|---|
-| **#103** | `SpeakerDiarizer` not wired to pipeline or UI | **Start here.** Wire speaker badges in `NoteDetailScreen.kt` and integrate diarization into the pipeline. Needs a device to verify |
-| #104 | Exported `AdbReceiver` — **residual only** | Implicit paths closed in #113. Remaining: an explicit-component broadcast still reaches it on debug builds. Needs the phone |
-| #106 | Corruption detection — **residual only** | Silent-skip fixed in #114. Remaining: the trailing-span paths still have no real-data coverage. Needs captured damaged transfers |
-| #101 | FTS4 never implemented | Lowest priority at 21 recordings; `LIKE` search active |
+| **#119** | A transfer after an interrupted one can complete with a valid EOF ack but truncated data | **Start here.** Silent data loss on the recovery path. See below |
+| #117 | Zero-byte transfer leaves a 0-byte file, no DB row, retries forever | Small robustness fix; no integrity check on a completed transfer |
+| #116 | Delete/download packets omit the 14-byte filename clamp | Needs a throwaway-file hardware delete to verify |
+| #103 | `SpeakerDiarizer` not wired to pipeline or UI | Feature work. Needs a device to verify |
+| #101 | FTS4 never implemented | Lowest priority at 22 recordings; `LIKE` search active |
 
 **#101 and #103 need an owner priority call before building.** They are new feature work, not
 verification. Do not silently absorb them.
 
-### What is actually left on #104 and #106
+### #119 is the one that matters
 
-Both are one device session away from closing. Neither needs new design work.
+Same FW920 file, transferred repeatedly. One transfer returned **217,412 bytes** where every other
+attempt returned **337,148** — and it **completed normally**: end-of-file `Ack(0x0B)`,
+`readyReceived=true`, `downloadFile: done`, no timeout, no error. Three subsequent clean runs were
+byte-perfect and MD5-identical, so ordinary syncing is not lossy.
 
-**#104 residual.** `.AdbReceiver` must stay `android:exported="true"` for adb shell (uid 2000), so a
-third-party app on a *debug* build can still deliver an explicit-component broadcast:
+**Honest caveat: it was induced.** It happened immediately after several force-stops mid-transfer,
+so the FW920 was very likely left with a stale stream position. It has NOT been reproduced from a
+clean start.
 
-```kotlin
-sendBroadcast(Intent("com.daedalus.notes.DELETE_FILE")
-    .setComponent(ComponentName("com.daedalus.notes", "com.daedalus.notes.AdbReceiver"))
-    .putExtra("filename", "20260812113220"))
-```
+Why it still matters: **re-download is the recovery path.** #100 deleted `AudioRepairEngine`
+precisely because `redownload` covered the need non-destructively (D30). That path runs exactly when
+a previous transfer went wrong — the state that produced the truncation here. And
+`redownloadAndAnalyze` **deletes the local file before the replacement is known to be good**. If the
+FW920 copy is later deleted, the shortfall is permanent and silent.
 
-`RECEIVER_NOT_EXPORTED` does not block it — the attacker goes *through* `AdbReceiver`, and our own
-forward code sets `_forwarded=true`. Two independent reviews confirmed this is now the **only**
-remaining path. The candidate fix is `android:permission` naming a permission the shell uid holds
-but a normal app cannot obtain; **whether adb can still reach the receiver under it is exactly what
-needs testing on the phone.** Scope in the unsanitized `filename` at the same time: it reaches
-`BleManager.deleteFile` (`BleManager.kt:688`) with no `SafeFilename` call, though `SafeFilename.kt:5`
-names `am broadcast` extras as attacker-influenced.
+There is no end-to-end integrity check on a transfer. The device's `sizeBytes` is unusable for it
+(wrong unit; it reported `33301509` for a 337,148-byte file and a 16 MiB placeholder for an empty
+entry), so the EOF ack is currently treated as proof of completeness — and this shows it is not. The
+corruption scanner would not catch it either: a clean truncation at a frame boundary leaves no
+interior gap.
 
-*Mitigator:* the dynamic receiver only exists while `MainActivity` is alive (`onCreate` registers,
-`onDestroy` unregisters at `MainActivity.kt:252`). The manifest receiver cold-starts the process but
-the forward then lands on nothing, so the attack needs the app already running.
+Reproduction asset: the throwaway `20260813084543` on both the FW920 and the phone. No personal
+content — use it freely.
 
-**#106 residual.** `recordGap`-on-unresyncable-EOF, `isBenignTrailer` and `isBoundedApeV2Footer` are
-exercised **only** by synthetic fixtures authored alongside the parser. No file in the real corpus
-takes those paths. Closing it needs genuinely damaged real captures — deliberately interrupted BLE
-downloads, with ffmpeg ground truth.
+### #106's residual, and why more captures will not close it
 
-**Constraint to solve first: this repo is PUBLIC and the corpus is real meeting audio, so fixtures
-can never be committed here.** The option recorded for that session is **structure-only fixtures** —
-keep the MP3 frame headers, zero the audio payload. The structural damage the scanner reasons about
-survives; nothing intelligible leaks. Unlike synthetic fixtures, the structure comes from a real
-damaged transfer rather than from the parser's own model.
+`recordGap`-on-unresyncable-EOF, `isBenignTrailer` and `isBoundedApeV2Footer` are still exercised
+**only** by synthetic fixtures. #120 added real-capture coverage, but branch tracing against an
+instrumented build shows those captures only hit `recordGap` with a **non-null** resync position
+(mid-stream loss), 28 and 70 times.
 
-**Do not "fix" #106 by adding synthetic fixtures.** That was considered and rejected by the owner —
-see D35 and the reasoning under *Judgment lessons*.
+**An interrupted BLE transfer truncates cleanly at a frame boundary — it does not garble to EOF.**
+So capturing more interrupted transfers cannot reach the trailing-span paths, however many you take.
+That needs a different failure mode: damage continuing to EOF without resyncing. The issue's own
+proposed remedy does not reach its own acceptance criterion. Recorded here because it is easy to
+rediscover the hard way.
+
+**Do not "fix" this by adding synthetic fixtures.** Considered and rejected by the owner — see D35.
 
 ---
 
@@ -127,8 +136,28 @@ see D35 and the reasoning under *Judgment lessons*.
    recording.
 3. Re-pull and diff MD5s afterwards to *prove* byte-identity. Report it.
 
-This session that baseline was 21 files / 57,896,028 bytes, verified byte-identical **five times**.
+Session 6's baseline was **22 files / 58,658,554 bytes**, verified byte-identical **seven times**.
 The scratchpad holding it is session-scoped and is gone — re-pull your own baseline.
+
+### Device-work gotchas that cost real time this session
+
+- **Git Bash mangles device paths.** `adb pull /sdcard/...` becomes
+  `C:/Program Files/Git/sdcard/...` and fails. Export `MSYS_NO_PATHCONV=1` for every adb command
+  that names a device path.
+- **`adb pull` on a directory is binary-safe** and is the right tool for the recordings; the
+  `adb shell` CRLF warning applies to `adb shell cat`. Use `adb exec-out` for the db/wal/shm.
+- **Android `md5sum` and Windows `md5sum` format differently** — two spaces vs ` *` (binary marker).
+  A naive `diff` of the two reports all 22 files as changed when nothing has. Normalise with
+  `sed -E 's/[ ]+\*?/  /'` before comparing, or you will scare yourself badly.
+- **Do not sum sizes from `ls -la`** — it includes the `total` line and `.`/`..`. The per-file MD5
+  comparison is the authoritative check; a byte total computed that way is off by a few KB.
+- **The BLE log tag is `BleManager`, not `DaedalusBLE`.** Filtering on the wrong one makes a
+  perfectly healthy transfer look completely silent. Real tags: `BleManager`, `DaedalusSync`,
+  `DaedalusADB`, `DaedalusAI`, `AudioRecorder`.
+- **`"Downloading …"` is a StateFlow update, not a log line.** Its absence from logcat means
+  nothing.
+- **The phone-mic path records AAC/`.m4a`** (`AudioRecorder.kt:36-37`), not MP3. It cannot produce
+  fixtures for `Mp3FrameScan`, which only sees MP3s arriving over BLE.
 
 ---
 
@@ -154,20 +183,35 @@ The scratchpad holding it is session-scoped and is gone — re-pull your own bas
 **ffmpeg decode errors across the device corpus:** 0, 0, 0, 0, 6, 523. Only `20260804141258.mp3` is
 badly damaged. Ground truth: `ffmpeg -v error -i FILE -f null -`.
 
-**⚠ FIRST THING TO CHECK IF THE ADB HARNESS STOPS RESPONDING AFTER THE NEXT DEBUG INSTALL.**
-PR #113 switched MainActivity's dynamic receiver to `RECEIVER_NOT_EXPORTED`. `reverse/WIFI_DISCOVERY.md`
-previously recorded that constant as having been *tried and abandoned* because the harness broke. The
-security review established that note misattributed its own cause: at `0c58f51` the in-package
-forwarder already existed, and the real blocker was the manifest receiver being `exported="false"` at
-the time, which flipped to `"true"` later in `7a13697`. Each leg of the current path is exercised on
-hardware; **the exact combination (manifest `exported="true"` + dynamic `RECEIVER_NOT_EXPORTED`) has
-never been run on the phone.** If triggers go silent, revert that one constant first and report it —
-it is the highest-prior suspect and the whole harness depends on it.
+**The `RECEIVER_NOT_EXPORTED` risk flagged in the previous handoff is RETIRED — verified on
+hardware.** The full chain works: `-n` → exported manifest receiver → in-package forward → dynamic
+`RECEIVER_NOT_EXPORTED` receiver → handler. Confirmed by logcat, repeatedly. The old
+`reverse/WIFI_DISCOVERY.md` note that recorded this constant as tried-and-abandoned had
+misattributed its own cause (the real blocker was the manifest receiver being `exported="false"` at
+the time, flipped to `"true"` in `7a13697`); that note is corrected.
+
+**Also verified: all three implicit attack forms now reach nothing** — bare `-a`, bare `-a` with a
+spoofed `_forwarded=true`, and `-p com.daedalus.notes` with a spoofed `_forwarded=true`. The last of
+those was a *live hole* before #113.
 
 **ADB triggers** (debug build only; app must be foregrounded). Single source of truth is
-`AdbActions.kt`; a test enforces that handlers and the dynamic `IntentFilter` agree. **Every
-invocation must use the explicit `-n com.daedalus.notes/.AdbReceiver` form** — the manifest
-intent-filter is gone as of #113, so a bare `-a ACTION` broadcast now reaches nothing.
+`AdbActions.kt`; a test enforces that handlers and the dynamic `IntentFilter` agree.
+
+- **Every invocation must use the explicit `-n com.daedalus.notes/.AdbReceiver` form.** The manifest
+  intent-filter is gone as of #113, so a bare `-a ACTION` broadcast reaches nothing.
+- **The receiver now requires `android.permission.DUMP` from the sender** (#118). `adb shell` holds
+  it, so the harness is unaffected. Any other sender is refused.
+- **`am` prints `Broadcast completed: result=0` whether the broadcast was delivered OR refused.**
+  The exit code is worthless here. Only live logcat tells you which happened — this is the single
+  most useful thing learned this session about testing the harness.
+
+> **⚠ `SYNC` IS NOT A READ-ONLY TRIGGER.** `syncAllBleFiles` (`RecordingViewModel.kt:379-392`)
+> processes queued deletions *before* it syncs: for every row with `pendingDelete=1` it calls
+> `bleManager.deleteFile(...)`, wiping the file off FW920 hardware, then deletes the DB row. **The
+> app also auto-syncs on BLE connect**, so merely launching it with the device in range can fire
+> those deletions. It was safe this session only because the queue was empty. **Check
+> `SELECT COUNT(*) FROM recordings WHERE pendingDelete=1` on a pulled copy of the db before letting
+> the app connect.**
 ```
 adb shell am broadcast -a com.daedalus.notes.SYNC -n com.daedalus.notes/.AdbReceiver
 adb shell am broadcast -a com.daedalus.notes.ANALYZE --es filename "20260812113220" -n com.daedalus.notes/.AdbReceiver
@@ -250,3 +294,33 @@ believes.** Both were narrowed to the true claim.
 **Ship with the issue open when the issue isn't done.** Both PRs used `Refs`, not `Closes`, and
 named their unmet acceptance criteria. Given D33 — six pillars reported delivered, three of which
 did not exist — a PR that states what it does *not* do is the cheapest defence available.
+
+**A positive result is not a verified result without its negative control.** Confirming adb still
+reached the `DUMP`-gated receiver proved only that adb was not blocked; an attribute Android
+silently ignored would have looked identical. Gating the receiver on a permission *nobody* holds and
+watching delivery stop is what actually proved enforcement. Both cases printed
+`Broadcast completed: result=0`. **Ask what a broken version would look like, and check that it
+looks different.**
+
+**A test written from the same list as the fix inherits the fix's blind spot.** The `SafeFilename`
+guards were scoped to the two handlers #104 named, and the new test enshrined exactly those two —
+certifying the gap as covered. `PROBE_DELETE` was worse than either (it brute-forces CMD `0x0D`–`0x17`
+at the firmware until a file disappears) and had only an `isNotBlank()` check. Adversarial review
+found it; the test could not have.
+
+**Ask what the artifact actually contains before publishing it.** The first "structure-only" fixture
+zeroed payload inside validated frames but left gap-span bytes — real audio that merely failed to
+parse. It decoded at mean −29.3 dB / max 0.0 dB, **louder than the source recording**, and was one
+commit from a public repo. `ffmpeg -af volumedetect` plus a non-zero-byte count is a five-second
+check. Run it on anything derived from user data.
+
+**The owner's domain knowledge beats hours of inference.** Two hypotheses this session — "fresh
+recordings never sync" and "the device never stopped recording" — were both wrong, and the second
+was disproved by `isRecording=false` sitting in logs already collected. The actual answer ("the app
+cannot trigger hardware recording; that path is disabled") was unobtainable from the device. **Ask
+early when behaviour contradicts the model.** Note also that the discarded silence hypothesis was
+still worth testing: ruling it out produced the evidence that found the real cause.
+
+**Check what a trigger does before firing it.** `SYNC` reads as innocuous and executes hardware
+deletions. Reading `syncAllBleFiles` first cost one minute; firing it blind with a non-empty
+pending-delete queue would have destroyed recordings off the FW920.
