@@ -27,10 +27,19 @@ Implement and verify the 6-Pillar Feature Suite: Background Processing Service, 
 5. **Pillar 5: Room FTS4 Full-Text Search Engine**
    - Verified search query flow and intent broadcast handling.
 
-6. **Pillar 6: Storage Repair & Audio Defragmentation (`AudioRepairEngine.kt`)**
-   - Scans MP3 frame headers, trims truncated trailing bytes, rebuilds sync frames, and repairs duration headers.
-   - Added `com.daedalus.notes.REPAIR_FILE` broadcast in `MainActivity.kt`.
-   - Verified by unit tests in `AudioRepairEngineTest.kt`.
+6. **Pillar 6: Storage Repair & Audio Defragmentation — REMOVED (see #99, #100)**
+   - `AudioRepairEngine.kt` truncated a recording at the first detected gap and overwrote the
+     *only* copy on disk with no backup; quarantined behind `AdbActions.QUARANTINED` after #99.
+     Two adversarial cold reviews of the #100 fix each found a further data-integrity hazard
+     (a backup-path collision with the re-download flow; an unbounded "benign trailer"
+     classifier that could hide total audio loss as clean). The engine came from a feature plan
+     rather than a reported problem and duplicates recovery already covered non-destructively
+     by `RecordingViewModel.redownloadAndAnalyze`, so it was deleted rather than hardened
+     further — `AudioRepairEngine.kt`, `AudioRepairEngineTest.kt`, the `REPAIR_FILE` broadcast,
+     and its `MainActivity` handler are all gone. `Mp3FrameScan.kt` (the detector Pillar 6 was
+     built on) is kept — it also drives the corruption banner in `NoteDetailScreen` — with its
+     genuine detector bugs fixed. See `plans/2026-08-12_FULL_FEATURE_SUITE_PLAN.md`'s Pillar 6
+     section for the full account.
 
 ## Verification Evidence
 1. **Unit Tests:**

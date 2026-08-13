@@ -129,11 +129,12 @@
 > ⚠️ **REMOVED — Pillar 6 no longer exists in the codebase (see #99, #100).**
 > `AudioRepairEngine.repairMp3File` was quarantined behind `AdbActions.QUARANTINED` after #99
 > found it truncated a recording at the first detected gap and overwrote the *only* copy on disk
-> with no backup. #100 attempted a fix across three rounds of adversarial review; each round's
-> repair surfaced a new, distinct data-integrity hazard (a backup-path collision with the
-> re-download flow, an unbounded "benign trailer" classifier that could hide total audio loss as
-> clean, an unbounded tag-recognition carve-out that could hide real corruption behind a 32-byte
-> footer, no ceiling on how much of a file a single repair could excise). The owner's conclusion
+> with no backup. #100 attempted a fix, and two adversarial cold reviews of that fix each
+> surfaced a new, distinct data-integrity hazard: the first forced a backup-path collision fix
+> (it collided with the re-download flow's own backup) and a scanner rework; the second found an
+> unbounded "benign trailer" classifier that could hide total audio loss as clean, an unbounded
+> tag-recognition carve-out that could hide real corruption behind a 32-byte footer, and no
+> ceiling on how much of a file a single repair could excise. The owner's conclusion
 > was that the engine came from a feature plan rather than a reported problem, it operates on
 > files that are frequently the user's only copy, and the non-destructive `redownloadAndAnalyze`
 > re-fetch path already covers the same recovery need without rewriting audio bytes in place.

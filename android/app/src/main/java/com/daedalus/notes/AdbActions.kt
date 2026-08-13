@@ -10,9 +10,11 @@ package com.daedalus.notes
  * impossible to express by omission.
  *
  * REPAIR_FILE previously lived here, quarantined (present in [HANDLED], withheld from
- * [REGISTERED]) pending a fix for #100. #100's own audit surfaced enough further data-integrity
- * problems in AudioRepairEngine across two rounds of review that the engine was deleted rather
- * than repaired — see #100's final resolution. There is no longer a quarantined action to track.
+ * [REGISTERED]) pending a fix for #100. Two adversarial cold reviews of AudioRepairEngine's fix
+ * each found a further data-integrity problem (the first forced a `.bak`-collision and scanner
+ * rework; the second found an unbounded homogeneous-run carve-out and a missing excision
+ * ceiling), after which the engine was deleted rather than repaired further — see #100's final
+ * resolution. There is no longer a quarantined action to track.
  */
 object AdbActions {
     const val SYNC = "com.daedalus.notes.SYNC"
@@ -37,6 +39,13 @@ object AdbActions {
         SEARCH_FTS
     )
 
-    /** Actions registered on the dynamic IntentFilter and mirrored in the manifest. */
+    /**
+     * Actions registered on the dynamic IntentFilter and mirrored in the manifest. Equal to
+     * [HANDLED] today (nothing is currently withheld), but the two stay separate names on
+     * purpose: they are conceptually distinct sets — every branch that exists vs. every action
+     * actually wired up — [AdbActionRegistrationTest] asserts against both independently, and a
+     * future action that needs quarantining (as REPAIR_FILE once did) only has to be removed
+     * from this list, not have the whole handled/registered distinction reintroduced.
+     */
     val REGISTERED: List<String> = HANDLED
 }

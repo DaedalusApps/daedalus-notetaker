@@ -82,8 +82,9 @@ class AdbActionRegistrationTest {
     fun `MainActivity contains no hand-typed addAction string literal`() {
         // The IntentFilter must be built exclusively from AdbActions.REGISTERED. A hand-typed
         // addAction("com.daedalus.notes.X") anywhere in the file — even alongside a correct
-        // AdbActions.REGISTERED loop — reopens the #99 hole: it can register an action (like
-        // the quarantined REPAIR_FILE) that AdbActions never sanctioned.
+        // AdbActions.REGISTERED loop — reopens the #99 hole: it can register an action that
+        // AdbActions never sanctioned, silently drifting the receiver out of sync with the
+        // single source of truth the other checks in this file assume it matches.
         val literalAddActionCalls = Regex("""addAction\(\s*"[^"]*"""")
             .findAll(strippedMainActivitySource)
             .map { it.value }
