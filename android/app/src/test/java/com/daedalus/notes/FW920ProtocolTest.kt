@@ -18,7 +18,7 @@ class FW920ProtocolTest {
 
     @Test
     fun status0x05_reportsRecordingTrue() {
-        val parsed = parseResponse(buildPacket(0x05, statusPayload(isRecording = true)))
+        val parsed = parseResponse(buildPacket(0x05, statusPayload(isRecording = true)), isAudioChannel = false)
         assertTrue(parsed is ParsedResponse.Status)
         assertEquals(0x05, (parsed as ParsedResponse.Status).cmd)
         assertTrue(parsed.status.isRecording)
@@ -26,7 +26,7 @@ class FW920ProtocolTest {
 
     @Test
     fun status0x05_reportsRecordingFalse() {
-        val parsed = parseResponse(buildPacket(0x05, statusPayload(isRecording = false)))
+        val parsed = parseResponse(buildPacket(0x05, statusPayload(isRecording = false)), isAudioChannel = false)
         assertTrue(parsed is ParsedResponse.Status)
         assertEquals(false, (parsed as ParsedResponse.Status).status.isRecording)
     }
@@ -36,7 +36,7 @@ class FW920ProtocolTest {
         val data = ByteArray(244) { 0x00 }
         data[0] = 0xA0.toByte()
         data[1] = 0x0A.toByte()
-        val parsed = parseResponse(data)
+        val parsed = parseResponse(data, isAudioChannel = true)
         assertTrue(parsed is ParsedResponse.AudioChunk)
     }
 
@@ -50,7 +50,7 @@ class FW920ProtocolTest {
             0x00.toByte(), 0x09.toByte(), 0x2B.toByte(), 0x72.toByte(), 0x01.toByte(),
             0x10.toByte(), 0xB7.toByte()
         )
-        val parsed = parseResponse(raw0A)
+        val parsed = parseResponse(raw0A, isAudioChannel = false)
         assertTrue("Expected FileList, got $parsed", parsed is ParsedResponse.FileList)
         val entry = (parsed as ParsedResponse.FileList).entry
         assertEquals("20260812102746", entry?.filename)
@@ -59,8 +59,77 @@ class FW920ProtocolTest {
 
     @Test
     fun validControlPacket_parsedAsCommand() {
-        val parsed = parseResponse(buildPacket(0x05, statusPayload(isRecording = true)))
+        val parsed = parseResponse(buildPacket(0x05, statusPayload(isRecording = true)), isAudioChannel = false)
         assertTrue(parsed is ParsedResponse.Status)
+    }
+
+    // --- #96: audio chunks beginning A0 0A must not parse as control -------------------------
+
+    /**
+     * A 244-byte raw-MP3 audio notification whose bytes happen to satisfy the old length
+     * heuristic (byte[4] == 237 -> 5 + 237 + 2 == 244) must still be treated as audio when it
+     * arrives on the audio channel, not misparsed as a CMD 0x0B control packet.
+     */
+    @Test
+    fun audioChunkOnAudioChannel_matchingAckHeuristic_parsedAsAudioChunk() {
+        val data = ByteArray(244) { 0x00 }
+        data[0] = 0xA0.toByte()
+        data[1] = 0x0A.toByte()
+        data[2] = 0x01
+        data[3] = 0x0B          // looks like CMD 0x0B (download ack)
+        data[4] = 237.toByte()  // 5 + 237 + 2 == 244 -> satisfies the old length heuristic
+
+        val parsed = parseResponse(data, isAudioChannel = true)
+        assertTrue("Expected AudioChunk, got $parsed", parsed is ParsedResponse.AudioChunk)
+    }
+
+    /** The same bytes, received on the control channel while idle, are still a control packet. */
+    @Test
+    fun sameBytesOnControlChannel_parsedAsControl() {
+        val data = ByteArray(244) { 0x00 }
+        data[0] = 0xA0.toByte()
+        data[1] = 0x0A.toByte()
+        data[2] = 0x01
+        data[3] = 0x0B
+        data[4] = 237.toByte()
+
+        val parsed = parseResponse(data, isAudioChannel = false)
+        assertTrue("Expected Ack, got $parsed", parsed is ParsedResponse.Ack)
+        assertEquals(0x0B, (parsed as ParsedResponse.Ack).cmd)
+    }
+
+    /**
+     * The end-of-file Ack(0x0B) — sent on the control channel — must still parse as a control
+     * Ack even while a transfer is in progress. This is the regression that would hurt most:
+     * misrouting this packet would make downloadFile() hang until timeout.
+     */
+    @Test
+    fun eofAck_onControlChannel_stillParsedDuringTransfer() {
+        val eofAck = buildPacket(0x0B)
+        val parsed = parseResponse(eofAck, isAudioChannel = false)
+        assertTrue("Expected Ack, got $parsed", parsed is ParsedResponse.Ack)
+        assertEquals(0x0B, (parsed as ParsedResponse.Ack).cmd)
+    }
+
+    /**
+     * A sub-2-byte tail chunk on the audio channel (e.g. the final byte of a block) must still
+     * be treated as audio, not dropped by the too-short-for-a-header check that only applies to
+     * the control-parsing path.
+     */
+    @Test
+    fun oneByteChunkOnAudioChannel_parsedAsAudioChunk() {
+        val data = byteArrayOf(0x7F)
+        val parsed = parseResponse(data, isAudioChannel = true)
+        assertTrue("Expected AudioChunk, got $parsed", parsed is ParsedResponse.AudioChunk)
+        assertEquals(1, (parsed as ParsedResponse.AudioChunk).data.size)
+    }
+
+    /** The same too-short buffer on the control channel is still discarded as unparseable. */
+    @Test
+    fun oneByteChunkOnControlChannel_returnsNull() {
+        val data = byteArrayOf(0x7F)
+        val parsed = parseResponse(data, isAudioChannel = false)
+        assertEquals(null, parsed)
     }
 
     // --- File list parsing tests ---
@@ -81,7 +150,7 @@ class FW920ProtocolTest {
         payload[18] = 0x00
         payload[19] = 0x00
 
-        val parsed = parseResponse(buildPacket(0x0A, payload))
+        val parsed = parseResponse(buildPacket(0x0A, payload), isAudioChannel = false)
         assertTrue("Expected FileList, got $parsed", parsed is ParsedResponse.FileList)
         val entry = (parsed as ParsedResponse.FileList).entry
         assertEquals("20260806130549", entry?.filename)
@@ -104,7 +173,7 @@ class FW920ProtocolTest {
         payload[23] = 0x01
         payload[24] = 0x00
 
-        val parsed = parseResponse(buildPacket(0x0A, payload))
+        val parsed = parseResponse(buildPacket(0x0A, payload), isAudioChannel = false)
         assertTrue("Expected FileList, got $parsed", parsed is ParsedResponse.FileList)
         val entry = (parsed as ParsedResponse.FileList).entry
         assertEquals("Note-20260812102746", entry?.filename)
@@ -116,7 +185,7 @@ class FW920ProtocolTest {
     fun fileList_endOfList_returnsNull() {
         // Short payload = end of list
         val payload = byteArrayOf(0x00)
-        val parsed = parseResponse(buildPacket(0x0A, payload))
+        val parsed = parseResponse(buildPacket(0x0A, payload), isAudioChannel = false)
         assertTrue("Expected FileList, got $parsed", parsed is ParsedResponse.FileList)
         val entry = (parsed as ParsedResponse.FileList).entry
         assertEquals(null, entry)

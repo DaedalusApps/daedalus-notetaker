@@ -15,6 +15,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.daedalus.notes.BuildConfig
 import com.daedalus.notes.data.model.Mp3FrameScan
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -315,7 +316,7 @@ class BleManager(private val context: Context) {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            handleIncoming(gatt, characteristic.value)
+            handleIncoming(gatt, characteristic.uuid.toString(), characteristic.value)
         }
 
         override fun onCharacteristicChanged(
@@ -323,7 +324,7 @@ class BleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            handleIncoming(gatt, value)
+            handleIncoming(gatt, characteristic.uuid.toString(), value)
         }
     }
 
@@ -349,10 +350,32 @@ class BleManager(private val context: Context) {
     // Incoming data handler
     // ------------------------------------------------------------------
 
-    private fun handleIncoming(gatt: BluetoothGatt, data: ByteArray) {
-        val hex = data.joinToString(" ") { "%02X".format(it) }
-        Log.d("BleManager", "RX [${data.size}b]: $hex")
-        val parsed = parseResponse(data) ?: return
+    private fun handleIncoming(gatt: BluetoothGatt, characteristicUuid: String, data: ByteArray) {
+        // Per-notification hex dump is debug-only: isMinifyEnabled is false, so Log.d ships in
+        // release, and a full download is ~45,000 notifications — logging every payload evicts
+        // the BleAudit summary, frameScan result, and the B0B3 warning below from the circular
+        // log buffer before anyone can read them. Build the hex string only when it'll be used.
+        if (BuildConfig.DEBUG) {
+            val hex = data.joinToString(" ") { "%02X".format(it) }
+            Log.d("BleManager", "RX char=$characteristicUuid [${data.size}b]: $hex")
+        }
+        // Audio data arrives on B0B3/B0B4, control responses on B0B2 — route on the
+        // characteristic, not the packet prefix, so an audio chunk that coincidentally begins
+        // A0 0A is never misparsed as a control packet (#96). Confirmed on hardware 2026-08-12:
+        // both download acks arrived on B0B2 ("RX char=0000b0b2-... [12b]: A0 0A 01 0B 05 00 00
+        // 00 F4 D8 45 E1" for ready, "RX char=0000b0b2-... [8b]: A0 0A 01 0B 01 02 70 CE" for
+        // EOF), a full 62,680-byte download round-tripped byte-identical (MD5
+        // 7eb5e3a9a1c8c886642e748c56f97727), and B0B3 delivered no data at all during that run.
+        val isB0B3 = characteristicUuid.equals(NOTIFY_B0B3_UUID, ignoreCase = true)
+        if (isB0B3 && !b0b3EverObserved) {
+            b0b3EverObserved = true
+            val hex = data.joinToString(" ") { "%02X".format(it) }
+            Log.w("BleManager", "B0B3 delivered data for the first time ever observed " +
+                "[${data.size}b]: $hex — treated as audio; if this is actually a control " +
+                "packet, audio streams will be corrupted")
+        }
+        val isAudioChannel = isB0B3 || characteristicUuid.equals(NOTIFY_B0B4_UUID, ignoreCase = true)
+        val parsed = parseResponse(data, isAudioChannel) ?: return
         Log.d("BleManager", "RX parsed: $parsed")
 
         // Eagerly update state based on parsed response
@@ -450,6 +473,15 @@ class BleManager(private val context: Context) {
             Log.w("BleManager", "runInitSequence: gatt is null after init — device disconnected mid-sequence")
         }
     }
+
+    /**
+     * True once B0B3 has delivered any notification. B0B3 was never observed carrying data
+     * (GEMINI.md) but is still classified as an audio channel by [handleIncoming]; this flag
+     * gates a one-time warning log so a first-ever B0B3 payload is surfaced instead of silently
+     * treated as audio.
+     */
+    @Volatile
+    private var b0b3EverObserved = false
 
     /**
      * Set while a file transfer owns the link. The FW920 streams audio in response to one
@@ -714,8 +746,10 @@ class BleManager(private val context: Context) {
 
                 when (response) {
                     is ParsedResponse.AudioChunk -> {
-                        readyReceived = true
-
+                        // An empty chunk must not latch readyReceived: if it arrived between
+                        // CMD 0x0B and the ready Ack(0x0B), latching here would make that ready
+                        // ack read as the end-of-file ack below, ending the download at 0 bytes.
+                        if (response.data.isNotEmpty()) readyReceived = true
 
                         fos.write(response.data)
                         // The histogram these feed was previously logged from variables nothing
@@ -737,7 +771,6 @@ class BleManager(private val context: Context) {
                             0x0B -> {
                                 if (!readyReceived) {
                                     // Initial "ready" Ack — keep waiting for data
-                                    readyReceived = false  // stays false until first chunk
                                     lastDataTime = System.currentTimeMillis()
                                 } else {
                                     // End-of-file Ack
