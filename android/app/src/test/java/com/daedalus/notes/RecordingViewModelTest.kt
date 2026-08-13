@@ -703,12 +703,41 @@ class RecordingViewModelTest {
                 files = listOf(entry)
             )
         )
+        coEvery { bleManager.listFiles() } returns Unit
 
         viewModel.redownloadAndAnalyze(filename, bleManager)
         advanceUntilIdle()
 
+        coVerify(exactly = 1) { bleManager.listFiles() }
         coVerify(exactly = 0) { bleManager.downloadFile(any(), any()) }
         assertEquals("Recording no longer exists on device.", viewModel.aiError.value)
+    }
+
+    @Test
+    fun redownloadAndAnalyze_refreshesFileListBeforeCheckingExistence() = runTest {
+        val filename = "target_recording.mp3"
+        coEvery { repo.get(filename) } returns Recording(filename, isLocal = false)
+
+        val entry = com.daedalus.notes.ble.FileEntry(filename = "target_recording", sizeBytes = 100L)
+        val bleStateFlow = MutableStateFlow(
+            BleState(
+                connectionState = ConnectionState.CONNECTED,
+                files = emptyList() // Initially stale/empty!
+            )
+        )
+        every { bleManager.bleState } returns bleStateFlow
+        coEvery { bleManager.listFiles() } answers {
+            bleStateFlow.value = BleState(
+                connectionState = ConnectionState.CONNECTED,
+                files = listOf(entry)
+            )
+        }
+        coEvery { bleManager.downloadFile(any(), any()) } returns null
+
+        viewModel.redownloadAndAnalyze(filename, bleManager)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { bleManager.listFiles() }
     }
     @Test
     fun loadNote_populatesCurrentScanResult() = runTest {
