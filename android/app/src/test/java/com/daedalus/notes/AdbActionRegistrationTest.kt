@@ -21,11 +21,6 @@ import org.w3c.dom.Element
  * and that AndroidManifest.xml (a separate file, parsed independently) lists exactly
  * [AdbActions.REGISTERED]. A handler added without updating [AdbActions], or a manifest edited
  * out of step with it, fails one of these for a real reason.
- *
- * The one intentional exception is `REPAIR_FILE`: AudioRepairEngine.repairMp3File destructively
- * truncates audio with no backup (see #100), so that handler must stay reachable in source (for
- * a future fix) but unreachable via the receiver — "quarantined" via [AdbActions.QUARANTINED]
- * rather than silently dropped.
  */
 class AdbActionRegistrationTest {
 
@@ -101,23 +96,6 @@ class AdbActionRegistrationTest {
     }
 
     @Test
-    fun `the REPAIR_FILE action string appears in MainActivity only via the AdbActions constant`() {
-        // MainActivity's REPAIR_FILE `when` branch must be reached through AdbActions.REPAIR_FILE,
-        // never through the raw string — a raw string can't be caught by the "no hand-typed
-        // addAction literal" check above if someone builds the literal via concatenation or a
-        // local val instead of calling addAction(...) directly.
-        val rawOccurrences = Regex(Regex.escape("\"com.daedalus.notes.REPAIR_FILE\""))
-            .findAll(strippedMainActivitySource)
-            .count()
-        assertEquals(
-            "MainActivity.kt must reference REPAIR_FILE only as AdbActions.REPAIR_FILE, never as " +
-                "the raw action string — found $rawOccurrences raw occurrence(s).",
-            0,
-            rawOccurrences
-        )
-    }
-
-    @Test
     fun `the debug IntentFilter registration is gated by BuildConfig DEBUG`() {
         // Deleting the `if (BuildConfig.DEBUG)` wrapper would ship every ADB trigger —
         // including hardware DELETE_FILE — to production users on an exported receiver.
@@ -165,20 +143,6 @@ class AdbActionRegistrationTest {
                 "MainActivity actually handles.",
             AdbActions.REGISTERED.toSet(),
             registeredManifestActions
-        )
-    }
-
-    @Test
-    fun `REPAIR_FILE is quarantined and not registered anywhere`() {
-        assertTrue(AdbActions.REPAIR_FILE in AdbActions.QUARANTINED)
-        assertTrue(
-            "REPAIR_FILE must not be on AdbActions.REGISTERED (AudioRepairEngine is unsafe; " +
-                "see class doc)",
-            AdbActions.REPAIR_FILE !in AdbActions.REGISTERED
-        )
-        assertTrue(
-            "REPAIR_FILE must not be on the manifest's AdbReceiver intent-filter either",
-            AdbActions.REPAIR_FILE !in registeredManifestActions
         )
     }
 

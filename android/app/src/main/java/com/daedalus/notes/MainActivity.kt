@@ -16,7 +16,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
-import java.io.File
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -124,24 +123,6 @@ class MainActivity : ComponentActivity() {
                     val note = intent?.getStringExtra("note") ?: ""
                     Log.i("DaedalusADB", "Add to calendar triggered for '$title'")
                     com.daedalus.notes.util.CalendarIntegration.addToCalendar(this@MainActivity, title, note)
-                }
-                AdbActions.REPAIR_FILE -> {
-                    // Quarantined — see AdbActions.QUARANTINED. AudioRepairEngine.repairMp3File
-                    // currently truncates audio at the first gap with no backup (#100), so this
-                    // branch is deliberately unreachable: it has no IntentFilter registration and
-                    // never will until #100 is fixed.
-                    val filename = intent?.getStringExtra("filename") ?: ""
-                    Log.i("DaedalusADB", "Repair file triggered for '$filename'")
-                    // Same filename allowlist as RecordingViewModel's sync path — this branch is
-                    // unreachable today (see above), but whoever re-arms it must not inherit a
-                    // path-traversal hole via --es filename "../../...".
-                    if (com.daedalus.notes.util.SafeFilename.isSafe(filename)) {
-                        val file = File(getExternalFilesDir(null), "Recordings/$filename")
-                        val ok = com.daedalus.notes.data.model.AudioRepairEngine.repairMp3File(file)
-                        Log.i("DaedalusADB", "Audio repair result for '$filename': $ok")
-                    } else if (filename.isNotBlank()) {
-                        Log.w("DaedalusADB", "Rejected suspicious filename: '$filename'")
-                    }
                 }
                 AdbActions.SET_SPEED -> {
                     val speed = intent?.getFloatExtra("speed", -1f) ?: -1f

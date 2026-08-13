@@ -5,9 +5,14 @@ package com.daedalus.notes
  *
  * [HANDLED] is every action MainActivity's dynamic receiver has a `when` branch for.
  * [REGISTERED] is the subset actually wired onto the dynamic IntentFilter (and mirrored in
- * AndroidManifest.xml's `.AdbReceiver` declaration) — [HANDLED] minus [QUARANTINED]. Building
- * the IntentFilter from [REGISTERED] instead of a hand-typed list makes "a handler with no
- * registration" (see #99) impossible to express by omission.
+ * AndroidManifest.xml's `.AdbReceiver` declaration). Building the IntentFilter from
+ * [REGISTERED] instead of a hand-typed list makes "a handler with no registration" (see #99)
+ * impossible to express by omission.
+ *
+ * REPAIR_FILE previously lived here, quarantined (present in [HANDLED], withheld from
+ * [REGISTERED]) pending a fix for #100. #100's own audit surfaced enough further data-integrity
+ * problems in AudioRepairEngine across two rounds of review that the engine was deleted rather
+ * than repaired — see #100's final resolution. There is no longer a quarantined action to track.
  */
 object AdbActions {
     const val SYNC = "com.daedalus.notes.SYNC"
@@ -21,26 +26,17 @@ object AdbActions {
     const val REDOWNLOAD = "com.daedalus.notes.REDOWNLOAD"
     const val DELETE_FILE = "com.daedalus.notes.DELETE_FILE"
     const val ADD_CALENDAR = "com.daedalus.notes.ADD_CALENDAR"
-    const val REPAIR_FILE = "com.daedalus.notes.REPAIR_FILE"
     const val SET_SPEED = "com.daedalus.notes.SET_SPEED"
     const val FORMAT_SPEAKER = "com.daedalus.notes.FORMAT_SPEAKER"
     const val SEARCH_FTS = "com.daedalus.notes.SEARCH_FTS"
 
-    /**
-     * Withheld from [REGISTERED] on purpose: AudioRepairEngine.repairMp3File truncates audio
-     * after the first detected gap and overwrites the original file with no backup — see #100.
-     * Arming this trigger would let `adb shell am broadcast` destroy a user's only copy of a
-     * recording. Remove an action from here only in the same change that fixes #100.
-     */
-    val QUARANTINED: Set<String> = setOf(REPAIR_FILE)
-
     /** Every action the dynamic receiver's `when` block handles. */
     val HANDLED: List<String> = listOf(
         SYNC, PROBE, PROBE2, PROBE_DELETE, PROBE_UPLOAD, START_RECORDING, STOP_RECORDING,
-        ANALYZE, REDOWNLOAD, DELETE_FILE, ADD_CALENDAR, REPAIR_FILE, SET_SPEED, FORMAT_SPEAKER,
+        ANALYZE, REDOWNLOAD, DELETE_FILE, ADD_CALENDAR, SET_SPEED, FORMAT_SPEAKER,
         SEARCH_FTS
     )
 
     /** Actions registered on the dynamic IntentFilter and mirrored in the manifest. */
-    val REGISTERED: List<String> = HANDLED.filterNot { it in QUARANTINED }
+    val REGISTERED: List<String> = HANDLED
 }
