@@ -91,7 +91,9 @@ class BleManagerTest {
     @Test
     fun onCharacteristicChanged_b0b4_routesAsAudioEvenWhenBytesLookLikeControl() {
         val gatt = mockk<BluetoothGatt>(relaxed = true)
-        val characteristic = characteristicWithUuid(NOTIFY_B0B4_UUID)
+        // Literal, not NOTIFY_B0B4_UUID: if the UUID constants were ever transposed, using the
+        // constant here would make this test pass right alongside the real misrouting.
+        val characteristic = characteristicWithUuid("0000b0b4-0000-1000-8000-00805f9b34fb")
         val data = ByteArray(244) { 0x00 }
         data[0] = 0xA0.toByte()
         data[1] = 0x0A.toByte()
@@ -109,7 +111,7 @@ class BleManagerTest {
     @Test
     fun onCharacteristicChanged_b0b2_routesAsControl() {
         val gatt = mockk<BluetoothGatt>(relaxed = true)
-        val characteristic = characteristicWithUuid(NOTIFY_B0B2_UUID)
+        val characteristic = characteristicWithUuid("0000b0b2-0000-1000-8000-00805f9b34fb")
         val eofAck = buildPacket(0x0B)
 
         gattCallback.onCharacteristicChanged(gatt, characteristic, eofAck)
@@ -123,7 +125,7 @@ class BleManagerTest {
     @Test
     fun onCharacteristicChanged_b0b3_firstDelivery_logsWarningOnce() {
         val gatt = mockk<BluetoothGatt>(relaxed = true)
-        val characteristic = characteristicWithUuid(NOTIFY_B0B3_UUID)
+        val characteristic = characteristicWithUuid("0000b0b3-0000-1000-8000-00805f9b34fb")
         val data = byteArrayOf(0x01, 0x02)
 
         gattCallback.onCharacteristicChanged(gatt, characteristic, data)
@@ -132,5 +134,32 @@ class BleManagerTest {
         verify(exactly = 1) {
             Log.w("BleManager", match<String> { it.contains("B0B3 delivered data") })
         }
+    }
+
+    /**
+     * The deprecated 2-arg overload (API <= 32) sources bytes from `characteristic.value`
+     * instead of a `value` parameter; confirm it drives the same UUID -> isAudioChannel routing
+     * as the 3-arg overload, so a B0B4 payload that looks like a control packet still lands as
+     * exactly one AudioChunk (neither overload calls the other's super, so this is the only way
+     * to confirm the deprecated path doesn't silently no-op or double-deliver).
+     */
+    @Suppress("DEPRECATION")
+    @Test
+    fun onCharacteristicChanged_deprecatedTwoArgOverload_routesAsAudio() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val characteristic = characteristicWithUuid("0000b0b4-0000-1000-8000-00805f9b34fb")
+        val data = ByteArray(244) { 0x00 }
+        data[0] = 0xA0.toByte()
+        data[1] = 0x0A.toByte()
+        data[2] = 0x01
+        data[3] = 0x0B
+        data[4] = 237.toByte()
+        every { characteristic.value } returns data
+
+        gattCallback.onCharacteristicChanged(gatt, characteristic)
+
+        val result = responseChannel().tryReceive().getOrNull()
+        assertTrue("Expected AudioChunk, got $result", result is ParsedResponse.AudioChunk)
+        assertEquals(null, responseChannel().tryReceive().getOrNull())
     }
 }
