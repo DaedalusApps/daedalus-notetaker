@@ -28,10 +28,9 @@ object AdbActions {
 
     /**
      * Withheld from [REGISTERED] on purpose: AudioRepairEngine.repairMp3File truncates audio
-     * after the first detected gap and overwrites the original file with no backup — a data-loss
-     * bug found in a parallel #99 follow-up audit. Arming this trigger would let
-     * `adb shell am broadcast` destroy a user's only copy of a recording. Remove an action from
-     * here only in the same change that fixes the underlying engine.
+     * after the first detected gap and overwrites the original file with no backup — see #100.
+     * Arming this trigger would let `adb shell am broadcast` destroy a user's only copy of a
+     * recording. Remove an action from here only in the same change that fixes #100.
      */
     val QUARANTINED: Set<String> = setOf(REPAIR_FILE)
 

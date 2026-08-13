@@ -23,9 +23,9 @@ import org.w3c.dom.Element
  * out of step with it, fails one of these for a real reason.
  *
  * The one intentional exception is `REPAIR_FILE`: AudioRepairEngine.repairMp3File destructively
- * truncates audio with no backup (see the #99 follow-up audit), so that handler must stay
- * reachable in source (for a future fix) but unreachable via the receiver — "quarantined" via
- * [AdbActions.QUARANTINED] rather than silently dropped.
+ * truncates audio with no backup (see #100), so that handler must stay reachable in source (for
+ * a future fix) but unreachable via the receiver — "quarantined" via [AdbActions.QUARANTINED]
+ * rather than silently dropped.
  */
 class AdbActionRegistrationTest {
 
@@ -33,8 +33,13 @@ class AdbActionRegistrationTest {
     private val mainActivitySource: String by lazy {
         File(moduleRoot, "src/main/java/com/daedalus/notes/MainActivity.kt").readText()
     }
+    /** Comments stripped so a comment claiming to do the right thing can't satisfy a
+     *  `.contains(...)` check that was meant to verify real code. See HIGH-1 in the #99 review. */
+    private val strippedMainActivitySource: String by lazy { stripComments(mainActivitySource) }
     private val receiverWhenBlock: String by lazy { extractReceiverWhenBlock(mainActivitySource) }
-    private val onCreateSource: String by lazy { mainActivitySource.substringAfter("override fun onCreate") }
+    private val onCreateSource: String by lazy {
+        strippedMainActivitySource.substringAfter("override fun onCreate")
+    }
 
     private val registeredManifestActions: Set<String> by lazy {
         parseManifestAdbReceiverActions(File(moduleRoot, "src/main/AndroidManifest.xml"))
@@ -67,10 +72,61 @@ class AdbActionRegistrationTest {
 
     @Test
     fun `onCreate builds the dynamic IntentFilter from AdbActions REGISTERED`() {
+        // A comment mentioning AdbActions.REGISTERED must not satisfy this — see HIGH-1 in the
+        // #99 review, which broke a `.contains(...)`-only version of this check with exactly
+        // that comment plus a hand-typed addAction("...") list underneath it.
         assertTrue(
             "onCreate must build the debug IntentFilter by iterating AdbActions.REGISTERED " +
-                "(the single source of truth) rather than a separately hand-typed action list.",
+                "(the single source of truth) rather than a separately hand-typed action list. " +
+                "(Checked on comment-stripped source.)",
             onCreateSource.contains("AdbActions.REGISTERED")
+        )
+    }
+
+    @Test
+    fun `MainActivity contains no hand-typed addAction string literal`() {
+        // The IntentFilter must be built exclusively from AdbActions.REGISTERED. A hand-typed
+        // addAction("com.daedalus.notes.X") anywhere in the file — even alongside a correct
+        // AdbActions.REGISTERED loop — reopens the #99 hole: it can register an action (like
+        // the quarantined REPAIR_FILE) that AdbActions never sanctioned.
+        val literalAddActionCalls = Regex("""addAction\(\s*"[^"]*"""")
+            .findAll(strippedMainActivitySource)
+            .map { it.value }
+            .toList()
+        assertTrue(
+            "MainActivity.kt must call addAction(...) only via AdbActions.REGISTERED.forEach — " +
+                "found hand-typed literal call(s): $literalAddActionCalls",
+            literalAddActionCalls.isEmpty()
+        )
+    }
+
+    @Test
+    fun `the REPAIR_FILE action string appears in MainActivity only via the AdbActions constant`() {
+        // MainActivity's REPAIR_FILE `when` branch must be reached through AdbActions.REPAIR_FILE,
+        // never through the raw string — a raw string can't be caught by the "no hand-typed
+        // addAction literal" check above if someone builds the literal via concatenation or a
+        // local val instead of calling addAction(...) directly.
+        val rawOccurrences = Regex(Regex.escape("\"com.daedalus.notes.REPAIR_FILE\""))
+            .findAll(strippedMainActivitySource)
+            .count()
+        assertEquals(
+            "MainActivity.kt must reference REPAIR_FILE only as AdbActions.REPAIR_FILE, never as " +
+                "the raw action string — found $rawOccurrences raw occurrence(s).",
+            0,
+            rawOccurrences
+        )
+    }
+
+    @Test
+    fun `the debug IntentFilter registration is gated by BuildConfig DEBUG`() {
+        // Deleting the `if (BuildConfig.DEBUG)` wrapper would ship every ADB trigger —
+        // including hardware DELETE_FILE — to production users on an exported receiver.
+        val debugGateBlock = extractDebugGateBlock(strippedMainActivitySource)
+        assertTrue(
+            "The BuildConfig.DEBUG-gated block in onCreate must build the filter from " +
+                "AdbActions.REGISTERED and register adbReceiver with it.",
+            debugGateBlock.contains("AdbActions.REGISTERED") &&
+                debugGateBlock.contains("registerReceiver(this, adbReceiver, filter")
         )
     }
 
@@ -103,11 +159,33 @@ class AdbActionRegistrationTest {
         /** "com.daedalus.notes.SET_SPEED" -> "SET_SPEED", matching AdbActions' own naming. */
         private fun constantNameOf(action: String): String = action.substringAfterLast('.')
 
+        /**
+         * Strips `//` line comments and `/* */` block comments from Kotlin source so source-text
+         * assertions can't be satisfied by a comment instead of real code. Safe for MainActivity.kt
+         * specifically: it contains no string literal with `//` inside it (verified by inspection),
+         * so a naive "everything after `//` on a line" strip does not corrupt any string.
+         */
+        private fun stripComments(source: String): String {
+            val noBlockComments = source.replace(Regex("""/\*[\s\S]*?\*/"""), "")
+            return noBlockComments.lineSequence().joinToString("\n") { line ->
+                val idx = line.indexOf("//")
+                if (idx >= 0) line.substring(0, idx) else line
+            }
+        }
+
         /** Slices out just the adbReceiver's `onReceive` `when` block, so a match can't
          *  accidentally pick up an unrelated `when` elsewhere in the file. */
         private fun extractReceiverWhenBlock(source: String): String {
             val start = source.indexOf("when (intent?.action)")
             require(start >= 0) { "Could not find 'when (intent?.action)' in MainActivity.kt" }
+            return balancedBraceBlock(source, source.indexOf('{', start))
+        }
+
+        /** Slices out the `if (BuildConfig.DEBUG) { ... }` block in onCreate. Throws (failing the
+         *  test) if that gate has been removed entirely. */
+        private fun extractDebugGateBlock(source: String): String {
+            val start = source.indexOf("if (BuildConfig.DEBUG)")
+            require(start >= 0) { "Could not find 'if (BuildConfig.DEBUG)' in MainActivity.kt" }
             return balancedBraceBlock(source, source.indexOf('{', start))
         }
 

@@ -118,15 +118,20 @@ class MainActivity : ComponentActivity() {
                 }
                 AdbActions.REPAIR_FILE -> {
                     // Quarantined — see AdbActions.QUARANTINED. AudioRepairEngine.repairMp3File
-                    // currently truncates audio at the first gap with no backup, so this branch
-                    // is deliberately unreachable: it has no IntentFilter registration and never
-                    // will until that data-loss bug is fixed on its own branch.
+                    // currently truncates audio at the first gap with no backup (#100), so this
+                    // branch is deliberately unreachable: it has no IntentFilter registration and
+                    // never will until #100 is fixed.
                     val filename = intent?.getStringExtra("filename") ?: ""
                     Log.i("DaedalusADB", "Repair file triggered for '$filename'")
-                    if (filename.isNotBlank()) {
+                    // Same filename allowlist as RecordingViewModel's sync path — this branch is
+                    // unreachable today (see above), but whoever re-arms it must not inherit a
+                    // path-traversal hole via --es filename "../../...".
+                    if (filename.isNotBlank() && filename.matches(Regex("[A-Za-z0-9._-]+"))) {
                         val file = File(getExternalFilesDir(null), "Recordings/$filename")
                         val ok = com.daedalus.notes.data.model.AudioRepairEngine.repairMp3File(file)
                         Log.i("DaedalusADB", "Audio repair result for '$filename': $ok")
+                    } else if (filename.isNotBlank()) {
+                        Log.w("DaedalusADB", "Rejected suspicious filename: '$filename'")
                     }
                 }
                 AdbActions.SET_SPEED -> {
@@ -134,7 +139,10 @@ class MainActivity : ComponentActivity() {
                     Log.i("DaedalusADB", "Set speed triggered: $speed")
                     if (speed > 0f) {
                         recordingViewModel.setPlaybackSpeed(speed)
-                        Log.i("DaedalusADB", "Playback speed set to $speed")
+                        // setPlaybackSpeed() clamps — log what was actually applied, not the
+                        // raw request, so an out-of-range value (e.g. --ef speed 500) doesn't
+                        // read as having taken effect.
+                        Log.i("DaedalusADB", "Playback speed set to ${recordingViewModel.playbackSpeed.value}")
                     }
                 }
                 AdbActions.FORMAT_SPEAKER -> {

@@ -72,6 +72,11 @@ const val MAX_RECORDING_MINUTES_UNLIMITED = -1
 /** Recordings longer than this are split into parts, each transcribed and analyzed independently. */
 internal const val PART_DURATION_MS = 15L * 60 * 1000  // 15 minutes
 
+/** Sane bounds for [RecordingViewModel.setPlaybackSpeed] — covers the UI's 1.0x-2.0x toggle
+ *  range with headroom, while rejecting nonsense values like a stray ADB `--ef speed 500`. */
+private const val MIN_PLAYBACK_SPEED = 0.25f
+private const val MAX_PLAYBACK_SPEED = 4.0f
+
 /** Titles the split path generates itself; matching ones are regenerated, not preserved. */
 private val SPLIT_PLACEHOLDER_TITLE = Regex("""Long Recording( \(\d+ parts?\))?""")
 
@@ -199,7 +204,11 @@ class RecordingViewModel @JvmOverloads constructor(
     private val _playbackSpeed = MutableStateFlow(1.0f)
     val playbackSpeed: StateFlow<Float> = _playbackSpeed
 
-    fun setPlaybackSpeed(speed: Float) { _playbackSpeed.value = speed }
+    /** Clamped so a stray ADB value (e.g. `--ef speed 500`) can't set a nonsense rate that then
+     *  persists into normal UI playback until the user manually cycles the speed toggle. */
+    fun setPlaybackSpeed(speed: Float) {
+        _playbackSpeed.value = speed.coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
+    }
 
     val filteredRecordings: StateFlow<List<Recording>> = _searchQuery
         .flatMapLatest { q ->
