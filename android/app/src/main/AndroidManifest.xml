@@ -55,13 +55,19 @@
              `-n com.daedalus.notes/.AdbReceiver` form, which bypasses filter matching entirely,
              and an intent-filter here would let any other installed app reach this receiver
              (including hardware-destructive com.daedalus.notes.DELETE_FILE) via an IMPLICIT
-             broadcast. This closes the implicit path only: on a debug build, exported="true" still
-             lets another app deliver an EXPLICIT-component broadcast straight at this receiver,
-             which forwards in-package and reaches the same hardware delete. That residual is
-             tracked in #104, not fixed by this manifest change. -->
+             broadcast. This closes the implicit path, but exported="true" alone still lets any
+             other app on a debug build deliver an EXPLICIT-component broadcast straight at this
+             receiver, which forwards in-package and reaches the same hardware delete (#104).
+             android:permission="android.permission.DUMP" closes that residual: it requires the
+             SENDER to hold DUMP, not us — we declare no matching <uses-permission>. DUMP's
+             protection level is signature|privileged|development, so com.android.shell (adb
+             shell, uid 2000) holds it and this receiver stays reachable via
+             `adb shell am broadcast`, but a normal third-party app cannot be granted DUMP without
+             `pm grant` over adb, at which point the attacker already has adb access anyway. -->
         <receiver
             android:name=".AdbReceiver"
-            android:exported="true" />
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

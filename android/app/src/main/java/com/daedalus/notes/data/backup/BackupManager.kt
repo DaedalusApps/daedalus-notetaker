@@ -234,11 +234,10 @@ class BackupManager(
 
     /**
      * Directory-traversal guard shared by the parent-exists check and the main import loop.
-     * Layers an extra `.`/`..` rejection on top of [SafeFilename] — those two both match the
-     * shared allowlist (dots are legal filename characters) but must still be rejected here.
+     * [SafeFilename.isSafe] itself now rejects `.`/`..`/dot-only names, so this is just an alias
+     * kept for call-site readability at the import boundary.
      */
-    private fun isValidBackupFilename(filename: String): Boolean =
-        SafeFilename.isSafe(filename) && filename != "." && filename != ".."
+    private fun isValidBackupFilename(filename: String): Boolean = SafeFilename.isSafe(filename)
 
     private suspend fun importTodos(todosArr: JSONArray?) {
         if (todosArr == null) return
