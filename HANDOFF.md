@@ -104,7 +104,7 @@ The scratchpad holding it is session-scoped and is gone — re-pull your own bas
 badly damaged. Ground truth: `ffmpeg -v error -i FILE -f null -`.
 
 **ADB triggers** (debug build only; app must be foregrounded). Single source of truth is
-`AdbActions.kt`; a test enforces that handlers, the dynamic `IntentFilter`, and the manifest agree.
+`AdbActions.kt`; a test enforces that handlers and the dynamic `IntentFilter` agree.
 ```
 adb shell am broadcast -a com.daedalus.notes.SYNC -n com.daedalus.notes/.AdbReceiver
 adb shell am broadcast -a com.daedalus.notes.ANALYZE --es filename "20260812113220" -n com.daedalus.notes/.AdbReceiver

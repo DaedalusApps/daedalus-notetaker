@@ -49,27 +49,19 @@
             </intent-filter>
         </activity>
 
+        <!-- exported="true" is required: a non-exported manifest receiver is never reachable from
+             another uid on any Android version, including adb shell's (uid 2000). No
+             <intent-filter> on purpose: every documented invocation uses the explicit
+             `-n com.daedalus.notes/.AdbReceiver` form, which bypasses filter matching entirely,
+             and an intent-filter here would let any other installed app reach this receiver
+             (including hardware-destructive com.daedalus.notes.DELETE_FILE) via an IMPLICIT
+             broadcast. This closes the implicit path only: on a debug build, exported="true" still
+             lets another app deliver an EXPLICIT-component broadcast straight at this receiver,
+             which forwards in-package and reaches the same hardware delete. That residual is
+             tracked in #104, not fixed by this manifest change. -->
         <receiver
             android:name=".AdbReceiver"
-            android:exported="true">
-            <!-- Kept in sync with AdbActions.REGISTERED (com.daedalus.notes.AdbActions). -->
-            <intent-filter>
-                <action android:name="com.daedalus.notes.SYNC" />
-                <action android:name="com.daedalus.notes.PROBE" />
-                <action android:name="com.daedalus.notes.PROBE2" />
-                <action android:name="com.daedalus.notes.PROBE_DELETE" />
-                <action android:name="com.daedalus.notes.PROBE_UPLOAD" />
-                <action android:name="com.daedalus.notes.START_RECORDING" />
-                <action android:name="com.daedalus.notes.STOP_RECORDING" />
-                <action android:name="com.daedalus.notes.ANALYZE" />
-                <action android:name="com.daedalus.notes.REDOWNLOAD" />
-                <action android:name="com.daedalus.notes.DELETE_FILE" />
-                <action android:name="com.daedalus.notes.ADD_CALENDAR" />
-                <action android:name="com.daedalus.notes.SET_SPEED" />
-                <action android:name="com.daedalus.notes.FORMAT_SPEAKER" />
-                <action android:name="com.daedalus.notes.SEARCH_FTS" />
-            </intent-filter>
-        </receiver>
+            android:exported="true" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

@@ -40,14 +40,16 @@ class MainActivity : ComponentActivity() {
 
     private val adbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            // This receiver is dynamically registered RECEIVER_EXPORTED, so an implicit
-            // `-a ACTION` broadcast (no -n) matches it directly AND matches AdbReceiver's
-            // manifest intent-filter in parallel — AdbReceiver then forwards its own copy with
-            // "_forwarded"=true, which would double-dispatch every action. Only ever act on the
-            // forwarded copy: `-n .../.AdbReceiver` (every documented command) never reaches this
-            // receiver directly at all — explicit-component targeting cannot match a dynamically
-            // registered receiver — so it only ever arrives here via AdbReceiver's forward, which
-            // always sets this flag. See #99 review, MEDIUM-1.
+            // The original reason for this guard — an implicit `-a ACTION` broadcast matching
+            // both AdbReceiver's manifest intent-filter and this dynamically registered receiver
+            // in parallel, double-dispatching every action — is now structurally impossible: the
+            // manifest carries no intent-filter (#104) and this receiver is registered
+            // RECEIVER_NOT_EXPORTED. The guard still must stay: it is the only thing enforcing
+            // that this receiver only ever acts on AdbReceiver's in-package forward, since
+            // explicit-component targeting cannot match a dynamically registered receiver, so
+            // every legitimate arrival here comes via that forward. It is NOT a security control —
+            // AdbReceiver's own forward code sets "_forwarded"=true unconditionally, so anything
+            // that reaches AdbReceiver gets this flag for free. See #99 review, MEDIUM-1.
             if (intent == null || !intent.getBooleanExtra("_forwarded", false)) return
             when (intent.action) {
                 AdbActions.SYNC -> {
@@ -170,15 +172,17 @@ class MainActivity : ComponentActivity() {
 
         if (BuildConfig.DEBUG) {
             // Built from AdbActions.REGISTERED — the single source of truth shared with the
-            // `when` block above and AndroidManifest.xml's .AdbReceiver — so a handler can't
-            // silently end up with no registration (see #99).
+            // `when` block above — so a handler can't silently end up with no registration
+            // (see #99).
             val filter = IntentFilter().apply {
                 AdbActions.REGISTERED.forEach { addAction(it) }
             }
-            // ADB shell (uid 2000) broadcasts are not delivered to RECEIVER_NOT_EXPORTED
-            // receivers on Android 14+; this receiver is debug-only and exists solely so
-            // `adb shell am broadcast` can trigger it during development.
-            ContextCompat.registerReceiver(this, adbReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+            // That uid-2000/RECEIVER_NOT_EXPORTED constraint applies to the manifest-declared
+            // .AdbReceiver, which stays exported. This dynamic receiver only ever receives the
+            // in-package forward from AdbReceiver (sendBroadcast(...).setPackage(packageName)),
+            // which IS delivered to a RECEIVER_NOT_EXPORTED receiver, so it must not be exported
+            // or any app on the device could reach it directly. See #104.
+            ContextCompat.registerReceiver(this, adbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         }
 
         // Auto-sync on first BLE connect and when hardware recording finishes.
