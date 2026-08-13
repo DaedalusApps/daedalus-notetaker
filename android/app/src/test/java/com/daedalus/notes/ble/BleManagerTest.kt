@@ -12,11 +12,15 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkStatic
 import io.mockk.verify
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.File
 import java.util.UUID
 
 class BleManagerTest {
@@ -161,5 +165,32 @@ class BleManagerTest {
         val result = responseChannel().tryReceive().getOrNull()
         assertTrue("Expected AudioChunk, got $result", result is ParsedResponse.AudioChunk)
         assertEquals(null, responseChannel().tryReceive().getOrNull())
+    }
+
+    // --- #117: downloadFile must not leave a 0-byte file behind on a zero-byte transfer ------
+
+    /**
+     * downloadFile() reads a live GATT connection's response stream driven by real wall-clock
+     * timeouts (System.currentTimeMillis(), not virtual test time), so a *silent* zero-byte
+     * stall — the real hardware failure mode from #117, where the device acks CMD 0x0B and then
+     * sends nothing else — can only be reproduced in a unit test by actually waiting out the
+     * real 10s idle timeout. To keep this test fast and non-flaky, we instead drive the same
+     * totalBytes==0 exit path via Ack(cmd=0x07), a real, independently-handled branch in
+     * downloadFile's loop (`0x07 -> break@outer`) that ends the transfer immediately regardless
+     * of bytes received. This is a genuine protocol path already in the code, not a fake — it
+     * lets us reach the exact post-loop cleanup logic under test without a 10-second sleep.
+     */
+    @Test
+    fun downloadFile_zeroByteTransfer_deletesTheEmptyFileAndReturnsNull() {
+        val tempDir = java.nio.file.Files.createTempDirectory("ble_manager_test").toFile()
+        every { context.getExternalFilesDir(null) } returns tempDir
+
+        responseChannel().trySend(ParsedResponse.Ack(0x07))
+
+        val result = runBlocking { manager.downloadFile("zerobyte") {} }
+
+        assertNull(result)
+        val expectedFile = File(File(tempDir, "Recordings"), "zerobyte.mp3")
+        assertFalse("expected $expectedFile to have been deleted", expectedFile.exists())
     }
 }

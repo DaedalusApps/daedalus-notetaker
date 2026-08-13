@@ -811,6 +811,13 @@ class BleManager(private val context: Context) {
                 ", first60=" + first60ChunkSizes.joinToString(",") +
                 frameScanSuffix
         )
+        if (totalBytes == 0L) {
+            // fos is already closed (finally block above ran before we get here), so it's safe
+            // to delete now. Leaving this 0-byte file behind would occupy the filename and be
+            // mistaken for a real (if empty) recording by anything that just checks existence.
+            val deleted = localFile.delete()
+            Log.w("BleManager", "downloadFile: zero-byte transfer for '$cleanName', deleted empty file (success=$deleted)")
+        }
         return if (totalBytes > 0) localFile else null
     }
 
