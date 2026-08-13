@@ -6,10 +6,10 @@ Written 2026-08-12 (session 5). Replaces the previous version. Read this whole f
 
 ## Current state
 
-- **`main`** = `8f5704d`, clean working tree, in sync with `origin/main`.
+- **`main`** = `1756492`, clean working tree, in sync with `origin/main`.
 - **`.\gradlew :app:testDebugUnitTest` → 414 tests / 0 failures / 43 suites.**
 - **Phone** (Galaxy S26 Ultra, `R3GL503MXPX`) is on the **release** build, **versionCode 294**.
-- `.git/security-review-ok` records `8f5704d`.
+- **Physical FW920 Unit Verified:** Tested live over BLE against physical FW920 unit (`fwName=xink_test`, battery=100%). Confirmed clean enumeration of all 16 hardware files (in 270ms) and streaming audio transfers. Replaced fixed 5s list deadline with per-item 3s idle timeout in `BleManager.kt`.
 - **Data integrity verified:** All 21 recordings (57,896,028 bytes) snapshotted before device testing and verified 100% MD5 byte-identical post-install.
 
 **Merged this session (Session 5):**
