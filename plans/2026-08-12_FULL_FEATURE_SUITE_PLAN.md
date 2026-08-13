@@ -125,7 +125,15 @@
    - Re-writes clean MP3 file and updates duration in Room DB.
 
 ### ADB User Story Verification
-- **User Story 1:** Trigger audio repair on a file via ADB:
+> ⚠️ **QUARANTINED — DO NOT RUN THE COMMAND BELOW (see #99, tracked in #100).**
+> `AudioRepairEngine.repairMp3File` truncates the recording at the first detected gap and
+> overwrites the *only* copy on disk, with no backup. As of #99, `REPAIR_FILE` is deliberately
+> **not** registered on MainActivity's dynamic `IntentFilter` or on the manifest's `.AdbReceiver`
+> `<intent-filter>` — see `AdbActions.QUARANTINED` — so the broadcast below is currently a
+> silent no-op (one `AdbReceiver forwarding:` logcat line, nothing else). That is intentional,
+> not a bug: **do not "fix" it by re-adding the action to the IntentFilter or manifest.** Re-arm
+> this trigger only after #100 fixes the underlying data-loss bug in `AudioRepairEngine`.
+- **User Story 1:** Trigger audio repair on a file via ADB (quarantined — see warning above):
   ```powershell
   adb shell am broadcast -a com.daedalus.notes.REPAIR_FILE --es filename "20260812113220" -n com.daedalus.notes/.AdbReceiver
   ```

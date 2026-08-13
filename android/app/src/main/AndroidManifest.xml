@@ -51,6 +51,8 @@
         <receiver
             android:name=".AdbReceiver"
             android:exported="true">
+            <!-- Kept in sync with AdbActions.REGISTERED (com.daedalus.notes.AdbActions) —
+                 REPAIR_FILE is intentionally absent; see AdbActions.QUARANTINED. -->
             <intent-filter>
                 <action android:name="com.daedalus.notes.SYNC" />
                 <action android:name="com.daedalus.notes.PROBE" />
@@ -60,7 +62,12 @@
                 <action android:name="com.daedalus.notes.START_RECORDING" />
                 <action android:name="com.daedalus.notes.STOP_RECORDING" />
                 <action android:name="com.daedalus.notes.ANALYZE" />
+                <action android:name="com.daedalus.notes.REDOWNLOAD" />
                 <action android:name="com.daedalus.notes.DELETE_FILE" />
+                <action android:name="com.daedalus.notes.ADD_CALENDAR" />
+                <action android:name="com.daedalus.notes.SET_SPEED" />
+                <action android:name="com.daedalus.notes.FORMAT_SPEAKER" />
+                <action android:name="com.daedalus.notes.SEARCH_FTS" />
             </intent-filter>
         </receiver>
 

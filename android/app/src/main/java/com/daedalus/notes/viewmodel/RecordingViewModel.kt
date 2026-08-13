@@ -21,6 +21,7 @@ import com.daedalus.notes.ai.expandWithTopicSiblings
 import com.daedalus.notes.ai.EmbeddingService
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.MarkdownExporter
+import com.daedalus.notes.ai.SpeakerDiarizer
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.isWhisperReady
 import com.daedalus.notes.ai.isTranscriptReadable
@@ -38,6 +39,7 @@ import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.recording.AudioRecorder
 import com.daedalus.notes.ui.mindmap.GlobalGraph
 import com.daedalus.notes.ui.mindmap.GraphBuilder
+import com.daedalus.notes.util.SafeFilename
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -70,6 +72,11 @@ const val MAX_RECORDING_MINUTES_UNLIMITED = -1
 
 /** Recordings longer than this are split into parts, each transcribed and analyzed independently. */
 internal const val PART_DURATION_MS = 15L * 60 * 1000  // 15 minutes
+
+/** Sane bounds for [RecordingViewModel.setPlaybackSpeed] — covers the UI's 1.0x-2.0x toggle
+ *  range with headroom, while rejecting nonsense values like a stray ADB `--ef speed 500`. */
+private const val MIN_PLAYBACK_SPEED = 0.25f
+private const val MAX_PLAYBACK_SPEED = 4.0f
 
 /** Titles the split path generates itself; matching ones are regenerated, not preserved. */
 private val SPLIT_PLACEHOLDER_TITLE = Regex("""Long Recording( \(\d+ parts?\))?""")
@@ -191,6 +198,18 @@ class RecordingViewModel @JvmOverloads constructor(
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery
+
+    // Shared playback speed for NoteDetailScreen's ExoPlayer — lets the debug-only
+    // com.daedalus.notes.SET_SPEED ADB trigger (MainActivity) drive the same player the UI's
+    // speed toggle controls, since both go through this single ViewModel instance.
+    private val _playbackSpeed = MutableStateFlow(1.0f)
+    val playbackSpeed: StateFlow<Float> = _playbackSpeed
+
+    /** Clamped so a stray ADB value (e.g. `--ef speed 500`) can't set a nonsense rate that then
+     *  persists into normal UI playback until the user manually cycles the speed toggle. */
+    fun setPlaybackSpeed(speed: Float) {
+        _playbackSpeed.value = speed.coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
+    }
 
     val filteredRecordings: StateFlow<List<Recording>> = _searchQuery
         .flatMapLatest { q ->
@@ -393,7 +412,7 @@ class RecordingViewModel @JvmOverloads constructor(
             // before autoAnalyzePending() below, which re-acquires per recording.
             heavyWork.withLock {
             files.forEach { entry ->
-                if (!entry.filename.matches(Regex("[A-Za-z0-9._-]+"))) {
+                if (!SafeFilename.isSafe(entry.filename)) {
                     Log.w("DaedalusSync", "Skipping suspicious filename: ${entry.filename}")
                     return@forEach
                 }
@@ -649,6 +668,24 @@ class RecordingViewModel @JvmOverloads constructor(
 
     /** Returns all child parts for a recording that was split, empty if it wasn't split. */
     suspend fun getPartsOf(filename: String): List<Recording> = repo.getPartsOf(filename)
+
+    /**
+     * Debug ADB support for com.daedalus.notes.FORMAT_SPEAKER: runs [SpeakerDiarizer] over the
+     * stored transcript for [filename] and returns the formatted result, or null if the
+     * recording or its transcript doesn't exist.
+     */
+    suspend fun formatSpeakerPreview(filename: String): String? {
+        val transcript = repo.get(filename)?.transcript?.takeIf { it.isNotBlank() } ?: return null
+        return SpeakerDiarizer.formatTranscript(transcript)
+    }
+
+    /**
+     * Debug ADB support for com.daedalus.notes.SEARCH_FTS: runs [query] through the same
+     * search path the library screen's search bar uses (RecordingDao.searchFlow — a `LIKE`
+     * match, not a Room FTS4 index; the FTS4 pillar itself was never implemented) and returns
+     * the matching filenames.
+     */
+    suspend fun searchPreview(query: String): List<String> = repo.search(query).first().map { it.filename }
 
     fun analyze(filename: String) {
         viewModelScope.launch { doAnalyze(filename) }
