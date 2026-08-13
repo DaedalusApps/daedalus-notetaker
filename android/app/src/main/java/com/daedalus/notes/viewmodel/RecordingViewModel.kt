@@ -711,9 +711,8 @@ class RecordingViewModel @JvmOverloads constructor(
 
     /**
      * Debug ADB support for com.daedalus.notes.SEARCH_FTS: runs [query] through the same
-     * search path the library screen's search bar uses (RecordingDao.searchFlow — a `LIKE`
-     * match, not a Room FTS4 index; the FTS4 pillar itself was never implemented) and returns
-     * the matching filenames.
+     * search path the library screen's search bar uses (RecordingDao.searchFtsFlow — a Room
+     * FTS4 index, see #101) and returns the matching filenames.
      */
     suspend fun searchPreview(query: String): List<String> = repo.search(query).first().map { it.filename }
 

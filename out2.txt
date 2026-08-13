@@ -1,0 +1,7 @@
+recursive_triggers default: (0,)
+after first insert: [(1, 'a.mp3', 'empty', '')]
+fts after first insert: [(1, 'a.mp3', 'empty', '')]
+after REPLACE: [(2, 'a.mp3', 'the real transcript about budget', 'sum')]
+fts after REPLACE (raw table): [(2, 'a.mp3', 'the real transcript about budget', 'sum')]
+search budget via join: [('a.mp3',)]
+search empty (stale) via join: []

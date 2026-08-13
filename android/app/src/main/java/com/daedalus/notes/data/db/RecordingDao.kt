@@ -17,13 +17,15 @@ interface RecordingDao {
     @Query("SELECT * FROM recordings WHERE filename = :filename")
     suspend fun get(filename: String): Recording?
 
-    @Query("""SELECT * FROM recordings WHERE
-    (filename LIKE '%' || :q || '%' OR
-    transcript LIKE '%' || :q || '%' OR
-    summary LIKE '%' || :q || '%') AND
+    // #101: FTS4-backed search. [ftsQuery] is a pre-built, already-escaped MATCH expression --
+    // see RecordingRepository.buildFtsMatchQuery -- never raw user input, so it can't be
+    // misinterpreted as FTS operator syntax (", *, -, OR, NEAR, ...).
+    @Query("""SELECT recordings.* FROM recordings
+    JOIN recordings_fts ON recordings.rowid = recordings_fts.rowid
+    WHERE recordings_fts MATCH :ftsQuery AND
     pendingDelete = 0 AND parentFilename IS NULL
     ORDER BY createdAt DESC""")
-    fun searchFlow(q: String): Flow<List<Recording>>
+    fun searchFtsFlow(ftsQuery: String): Flow<List<Recording>>
 
     @Query("SELECT * FROM recordings WHERE parentFilename = :parent ORDER BY partIndex ASC")
     suspend fun getPartsOf(parent: String): List<Recording>
