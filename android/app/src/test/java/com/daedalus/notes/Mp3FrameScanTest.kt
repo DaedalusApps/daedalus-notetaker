@@ -160,6 +160,80 @@ class Mp3FrameScanTest {
         assertEquals(0, result.gapCount)
     }
 
+    // ---- #100 follow-up H1: benign trailing padding must not be reported as a gap ----
+    //
+    // A device that zero-pads the unused tail of its last flash sector produces a short,
+    // homogeneous run of filler bytes after the last real frame. Nothing decodes those bytes as
+    // a frame, so an unresyncable-to-EOF check that flags *any* unresyncable tail as corruption
+    // (the literal #100 fix) also flags this completely benign, expected trailer — a false
+    // "corrupted" signal that can drive a user to NoteDetailScreen's "Re-fetch audio" button,
+    // which deletes the local file first, against a device copy that is often already gone.
+
+    @Test
+    fun shortTrailingZeroPadding_afterCleanFrames_isNotReportedAsGap() {
+        // 10 clean frames + 3 zero bytes: too short to be a frame, never resyncs before EOF.
+        val data = stream(10) + ByteArray(3) { 0x00 }
+        val result = Mp3FrameScan.scan(data)
+        assertEquals(
+            "a short homogeneous trailing run must not be reported as data loss",
+            0,
+            result.gapCount
+        )
+        assertEquals(10, result.framesOk)
+    }
+
+    @Test
+    fun longTrailingZeroPadding_afterCleanFrames_isNotReportedAsGap() {
+        // A larger homogeneous run (e.g. a whole unused flash page) must also be treated as
+        // benign — it carries no audio information regardless of length.
+        val data = stream(10) + ByteArray(4096) { 0x00 }
+        val result = Mp3FrameScan.scan(data)
+        assertEquals(0, result.gapCount)
+        assertEquals(10, result.framesOk)
+    }
+
+    @Test
+    fun trailingErasePadding_0xFF_isNotReportedAsGap() {
+        // Erased flash is conventionally 0xFF, not 0x00 — the benign-trailer check must not be
+        // zero-specific.
+        val data = stream(10) + ByteArray(50) { 0xFF.toByte() }
+        val result = Mp3FrameScan.scan(data)
+        assertEquals(0, result.gapCount)
+    }
+
+    @Test
+    fun trailingApeV2Footer_isNotReportedAsGap() {
+        val footer = "APETAGEX".toByteArray() + ByteArray(24) { 0x01 } // 32-byte APEv2 footer
+        val data = stream(10) + footer
+        val result = Mp3FrameScan.scan(data)
+        assertEquals(0, result.gapCount)
+    }
+
+    @Test
+    fun trailingLyrics3v2Footer_isNotReportedAsGap() {
+        val footer = ByteArray(6) { '0'.code.toByte() } + "LYRICS200".toByteArray()
+        val data = stream(10) + footer
+        val result = Mp3FrameScan.scan(data)
+        assertEquals(0, result.gapCount)
+    }
+
+    @Test
+    fun heterogeneousUnresyncableTrailingCorruption_isStillReportedAsGap() {
+        // Real damage — varied, non-repeating bytes that never resync — must still be caught.
+        // This is the actual #100 defect the H1 fix targets; the benign-trailer carve-out must
+        // not swallow genuine corruption along with the false positives.
+        val junk = byteArrayOf(
+            0x12, 0x34, 0x56, 0x78,
+            0x9A.toByte(), 0xBC.toByte(), 0xDE.toByte(), 0xF0.toByte(),
+        )
+        val data = stream(10) + junk
+        val result = Mp3FrameScan.scan(data)
+        assertTrue(
+            "heterogeneous unresyncable trailing bytes are real damage and must be reported",
+            result.gapCount > 0
+        )
+    }
+
     // ---- Real-file cross-check ---------------------------------------------------
     // Gated on -Dmp3.fixtures=<dir>. Skips cleanly (no failure) when absent, matching
     // exact numbers validated against ffmpeg ground truth on real device recordings.

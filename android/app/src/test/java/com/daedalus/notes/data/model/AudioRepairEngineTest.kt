@@ -173,8 +173,14 @@ class AudioRepairEngineTest {
         val testFile = tempFolder.newFile("trailing_corrupt.mp3")
 
         val clean = mpeg2Stream(10)
-        // Corrupt junk that can never resync to a valid header before EOF (no 0xFF byte at all).
-        val trailingJunk = ByteArray(60) { 0x00 }
+        // Real damage: varied, non-repeating bytes that never resync before EOF and don't match
+        // any recognized trailer format. A homogeneous run here would be (correctly) treated as
+        // benign padding — see repairMp3File_mpeg2_benignTrailingZeroPadding_isNotTouched below
+        // and the #100 follow-up H1 note in Mp3FrameScanTest.
+        val trailingJunk = byteArrayOf(
+            0x12, 0x34, 0x56, 0x78,
+            0x9A.toByte(), 0xBC.toByte(), 0xDE.toByte(), 0xF0.toByte(),
+        ) + ByteArray(52) { (it * 7 + 1).toByte() }
         val fullData = clean + trailingJunk
         testFile.writeBytes(fullData)
 
@@ -196,6 +202,30 @@ class AudioRepairEngineTest {
         // pre-existing, documented scanner characteristic, not introduced by this fix.
         assertEquals(AudioRepairEngine.RepairResult.Repaired(60 + MPEG2_FRAME_LEN), result)
         assertArrayEquals(clean.copyOfRange(0, clean.size - MPEG2_FRAME_LEN), testFile.readBytes())
+    }
+
+    // ---- #100 follow-up H1: benign trailing padding must not trigger repair/false "corrupted" ----
+
+    @Test
+    fun repairMp3File_mpeg2_benignTrailingZeroPadding_isNotTouched() {
+        val testFile = tempFolder.newFile("trailing_padding.mp3")
+
+        // Simulates an unused flash-sector tail: homogeneous filler after clean audio. This must
+        // never be reported as damage, and the engine must never rewrite the file over it.
+        val fullData = mpeg2Stream(10) + ByteArray(37) { 0x00 }
+        testFile.writeBytes(fullData)
+
+        val result = AudioRepairEngine.repairMp3File(testFile)
+
+        assertTrue(
+            "benign homogeneous trailing padding must be reported Clean, not Repaired, got $result",
+            result is AudioRepairEngine.RepairResult.Clean
+        )
+        assertArrayEquals(
+            "the engine must not rewrite a file whose only 'defect' is benign trailing padding",
+            fullData,
+            testFile.readBytes()
+        )
     }
 
     // ---- Boolean-return regression: renameTo/move failure must not be reported as success ----
