@@ -895,14 +895,16 @@ class BleManager(private val context: Context) {
         Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")
         sendPacket(PKT_LIST_FILES)
         val collected = mutableListOf<FileEntry>()
-        val timeoutMs = 5000L
-        val deadline  = System.currentTimeMillis() + timeoutMs
+        val perItemTimeoutMs = 3000L
 
-        while (System.currentTimeMillis() < deadline) {
-            val remaining = deadline - System.currentTimeMillis()
-            val response  = withTimeoutOrNull(remaining) {
+        while (true) {
+            val response = withTimeoutOrNull(perItemTimeoutMs) {
                 awaitResponse(expectedCmd = 0x0A)
-            } ?: break
+            }
+            if (response == null) {
+                Log.w("BleManager", "collectFileList: idle timeout waiting for file entry after ${collected.size} files")
+                break
+            }
 
             when (response) {
                 is ParsedResponse.FileList -> {
