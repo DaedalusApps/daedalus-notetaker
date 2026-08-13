@@ -2,9 +2,8 @@ package com.daedalus.notes.data.db
 
 import androidx.room.Dao
 import androidx.room.Delete
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Upsert
 import com.daedalus.notes.data.model.Recording
 import kotlinx.coroutines.flow.Flow
 
@@ -57,7 +56,22 @@ interface RecordingDao {
     @Query("UPDATE recordings SET pendingDelete = :pendingDelete WHERE filename = :filename")
     suspend fun updatePendingDelete(filename: String, pendingDelete: Boolean)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    // #125: @Insert(onConflict = REPLACE) compiled to INSERT OR REPLACE, which on this TEXT
+    // PRIMARY KEY table deletes-then-reinserts on conflict, reassigning the row's rowid on
+    // every save. That rowid churn is real and pragma-independent.
+    //
+    // The FTS index survives it today only because Room's InvalidationTracker unconditionally
+    // sets `PRAGMA recursive_triggers=ON` on every database open (production and Robolectric
+    // alike), which makes REPLACE's implicit delete fire the room_fts_content_sync BEFORE_DELETE
+    // trigger. Relying on that undocumented Room implementation detail for index integrity is
+    // fragile -- a future Room release (e.g. the 2.7+/KMP InvalidationTracker rewrite) could
+    // change it and silently orphan FTS rows.
+    //
+    // @Upsert performs a real UPDATE in place on conflict: rowid stays stable, the write is
+    // roughly half the cost (no delete+reinsert of the base row), and FTS integrity no longer
+    // depends on that pragma. This is defence-in-depth plus a correctness improvement, not a
+    // fix for an observed production corruption.
+    @Upsert
     suspend fun upsert(recording: Recording)
 
     @Query("UPDATE recordings SET title = :title, shortSummary = :shortSummary WHERE filename = :filename")

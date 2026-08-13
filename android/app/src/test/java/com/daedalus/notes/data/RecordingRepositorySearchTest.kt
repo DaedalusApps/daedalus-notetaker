@@ -165,9 +165,11 @@ class RecordingRepositorySearchTest {
     @Test
     fun search_resavingExistingFilename_replacesIndexEntry() = runBlocking {
         // The app's real analyze-after-recording flow: repo.save on an existing filename goes
-        // through dao.upsert (@Insert(onConflict = REPLACE)). This is covered separately from
-        // the raw-UPDATE test above; the known REPLACE-orphaning issue does not cause false
-        // hits (rowids are never reused), so search must still be correct here.
+        // through dao.upsert (@Upsert, #125). This is covered separately from the raw-UPDATE
+        // test above; see RecordingUpsertRowidTest for the rowid-stability and FTS-integrity
+        // properties of that upsert -- rowids on this table are NOT permanently retired (no
+        // AUTOINCREMENT, so a freed rowid can be reused by a later insert), so search must still
+        // be correct here regardless.
         repo.save(Recording(filename = "a.mp3", transcript = "epsilon old text", createdAt = 1))
         assertEquals(listOf("a.mp3"), search("epsilon"))
 
