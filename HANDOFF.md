@@ -1,44 +1,36 @@
 # Handoff Brief — Daedalus Notetaker
 
-Written 2026-08-12 (session 4). Replaces the previous version, which claimed three features as
-delivered that do not exist. Read this whole file before starting.
+Written 2026-08-12 (session 5). Replaces the previous version. Read this whole file before starting.
 
 ---
 
 ## Current state
 
-- **`main`** = `a126fa0`, clean working tree, in sync with `origin/main`.
-- **`.\gradlew :app:testDebugUnitTest` → 412 tests / 0 failures / 43 suites.**
+- **`main`** = `8f5704d`, clean working tree, in sync with `origin/main`.
+- **`.\gradlew :app:testDebugUnitTest` → 414 tests / 0 failures / 43 suites.**
 - **Phone** (Galaxy S26 Ultra, `R3GL503MXPX`) is on the **release** build, **versionCode 294**.
-- `.git/security-review-ok` records `a126fa0`.
-- The FW920 recorder was powered on and connected during this session's hardware tests.
+- `.git/security-review-ok` records `8f5704d`.
+- **Data integrity verified:** All 21 recordings (57,896,028 bytes) snapshotted before device testing and verified 100% MD5 byte-identical post-install.
 
-**Merged this session** — three PRs, each red-first, three gates, CI green, device-verified:
+**Merged this session (Session 5):**
 
 | PR | Issue | What |
 |---|---|---|
-| #105 | #99 | Single source of truth for debug ADB triggers |
-| #107 | #96 | BLE notifications routed by characteristic, not packet prefix |
-| #109 | #100 | `AudioRepairEngine` deleted; `Mp3FrameScan` corrected |
+| #111 | #108 | Refresh device file list before re-download check; ignore non-FileList packets during enumeration |
+| #112 | #102 | Wired `AnalysisForegroundService` lifecycle and status updates across BLE sync, re-download, and AI analysis |
 
 ---
 
-## The 6-pillar suite: what is actually true
+## The 6-pillar suite: status
 
-The previous handoff listed all six as delivered and "verified". They were verified only by unit
-tests that exercised helper classes **never wired to anything**. Audited against code at `c136a0c`:
-
-| Pillar | Claimed | Reality |
+| Pillar | Status | Detail |
 |---|---|---|
-| 1. Background Service | Bound during sync and `doAnalyzeExclusive` | **Dead code.** `AnalysisForegroundService` is in the manifest and has `start`/`stop` helpers, but nothing in the app calls them. Analysis still dies when the app is backgrounded. → **#102** |
-| 2. Calendar | Button on To-Do cards | **Real.** `TodoScreen.kt:302`. Device-verified: chooser launched, +191 ms |
-| 3. Speed / Skip | Speed toggles + ±10s | **Real.** Speed state now lives in `RecordingViewModel` (per plan spec). Device-verified, clamp works |
-| 4. Speaker Formatting | Badges rendered in `NoteDetailScreen` | **Not wired.** Zero occurrences of "Speaker" in that file. `formatTranscript` has one caller: the debug `FORMAT_SPEAKER` trigger. → **#103** |
-| 5. FTS4 Search | "Verified search query flow" | **Never built.** No `RecordingFtsEntity`, no `MATCH` query anywhere. Only the pre-existing `LIKE` search. → **#101** |
-| 6. Storage Repair | Scans, trims, repairs | **Deleted.** It truncated recordings to everything before the first gap and overwrote the only copy with no backup. → see below |
-
-**Do not trust a completion claim in a doc without checking the code.** That is the single most
-expensive lesson of this session.
+| 1. Background Service | **Delivered & Wired (#102)** | `AnalysisForegroundService` started/updated/stopped during BLE sync, re-download, and AI analysis. Declared `FOREGROUND_SERVICE_DATA_SYNC` in manifest for API 34+ compliance. |
+| 2. Calendar | **Delivered** | `TodoScreen.kt:302`. Device-verified: chooser launched, +191 ms |
+| 3. Speed / Skip | **Delivered** | Speed state lives in `RecordingViewModel`. Device-verified |
+| 4. Speaker Formatting | **Pending (#103)** | `SpeakerDiarizer` not yet wired to UI/pipeline |
+| 5. FTS4 Search | **Pending (#101)** | No `RecordingFtsEntity` yet; pre-existing `LIKE` search active |
+| 6. Storage Repair | **Deleted (#100)** | Re-download via BLE (#108 fixed) covers recovery non-destructively |
 
 ---
 
@@ -46,12 +38,10 @@ expensive lesson of this session.
 
 | # | Title | Note |
 |---|---|---|
-| **#108** | Re-fetch falsely reports "no longer on device" | **Start here.** Cheap, and it undermines the recovery path that made deleting the repair engine safe |
-| #102 | `AnalysisForegroundService` never started | Highest user impact of the three unbuilt pillars — long analyses still die when backgrounded |
-| #103 | `SpeakerDiarizer` not wired to pipeline or UI | Has a design question to settle first: store diarized text (affects embeddings/Ask/Gemma prompt) or render-time only |
-| #101 | FTS4 never implemented | Lowest value at 21 recordings; `LIKE` may be adequate. Owner has not decided whether to build it |
+| #103 | `SpeakerDiarizer` not wired to pipeline or UI | Design decision needed: store diarized text vs render-time formatting |
+| #101 | FTS4 never implemented | Lowest priority at 21 recordings; `LIKE` search active |
 | #104 | Exported `AdbReceiver` lets any app trigger hardware deletion | Debug builds only; release unaffected |
-| #106 | Corruption detection has no real-data coverage | `realFileCrossCheck` skips **silently** — a skipped test reporting as passing is how this stayed invisible |
+| #106 | Corruption detection has no real-data coverage | `realFileCrossCheck` skips silently when fixtures missing |
 
 **#101, #102, #103 need an owner priority call before building.** They are new feature work, not
 verification. Do not silently absorb them.
