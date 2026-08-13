@@ -151,8 +151,172 @@ class Mp3FrameScanTest {
         tag[2] = 'G'.code.toByte()
         val data = clean + tag
         val result = Mp3FrameScan.scan(data)
-        assertEquals(49, result.framesOk)
+        // All 50 frames are valid audio preceding the tag. Previously this asserted 49: the
+        // scanner used to under-count the very last frame before a trailing tag because its
+        // chain-confirmation lookahead ran into the tag bytes instead of true EOF. The trailing
+        // ID3v1 tag is now excluded from the scanned region (mirrors the leading ID3v2 handling
+        // above), so the last real frame is correctly confirmed instead of penalized.
+        assertEquals(50, result.framesOk)
         assertEquals(0, result.gapCount)
+    }
+
+    // ---- #100 follow-up round 3, HIGH-1: unbounded homogeneous-run carve-out is a data-loss
+    // ---- blind spot, not a fix — it must NOT exist. (Round 2 added it; this reverts that.)
+    //
+    // MP3 audio, including digital silence, is never a constant byte run. A classifier that
+    // treats any same-value trailing span as "benign" cannot be protecting real audio from a
+    // false positive — it can only be hiding the ABSENCE of audio. NoteDetailScreen.kt gates its
+    // corruption banner on gapCount > 0 && gapBytes > 0: two valid frames (72ms) followed by
+    // megabytes of zero-fill must show the banner, not report clean, even though the device copy
+    // may still be recoverable via a re-fetch the user is never offered because nothing looked
+    // wrong. Round 2's own empirical finding stands unchanged: across all 19 real device-file
+    // copies, this carve-out never affected the result — the false positive it targeted was
+    // theoretical on real data; the false negative it introduces is not.
+
+    @Test
+    fun massiveTrailingZeroRun_afterFewFrames_IS_reportedAsGap() {
+        // 2 valid frames (288 bytes / 72ms) followed by 100KB of zero-fill: almost the entire
+        // recording is missing. This must be reported as damage.
+        val data = stream(2) + ByteArray(100_000) { 0x00 }
+        val result = Mp3FrameScan.scan(data)
+        assertTrue(
+            "a huge trailing zero-run after only a couple of real frames hides near-total audio " +
+                "loss and MUST be reported as a gap, not treated as benign padding",
+            result.gapCount > 0
+        )
+        assertTrue("gapBytes must be nonzero so NoteDetailScreen's banner gate fires", result.gapBytes > 0)
+    }
+
+    @Test
+    fun trailingErasePadding_0xFF_isAlsoReportedAsGap() {
+        // 0xFF (conventional erased-flash fill) must not get special treatment either — same
+        // reasoning as the zero-fill case above.
+        val data = stream(2) + ByteArray(50_000) { 0xFF.toByte() }
+        val result = Mp3FrameScan.scan(data)
+        assertTrue(result.gapCount > 0)
+    }
+
+    // ---- #100 follow-up round 4, HIGH: total loss (zero decodable frames) must not read clean ----
+    //
+    // massiveTrailingZeroRun_afterFewFrames_IS_reportedAsGap above only proves the >=1-surviving-
+    // frame case (it uses stream(2)). Removing the homogeneous-run carve-out closed the
+    // partial-loss blind spot but left total loss untouched: when NO frame chains anywhere,
+    // scan() took an entirely separate early-return path that still reports Mp3ScanResult(0, 0,
+    // 0L, ...) — perfectly clean — for a file that is completely worthless. That is the one case
+    // where the FW920 copy is most likely still recoverable and the banner is most needed.
+
+    @Test
+    fun totalLoss_noFrameAnywhere_isReportedAsGapNotClean() {
+        // Pure junk with no 0xFF byte anywhere: zero frames found, same as a 920KB transfer of
+        // all-zero bytes or a shifted/garbled stream that never happens to sync.
+        val data = ByteArray(920_000) { 0x00 }
+        val result = Mp3FrameScan.scan(data)
+        assertEquals("nothing decoded, so framesOk must be 0", 0, result.framesOk)
+        assertTrue(
+            "total loss must be reported as a gap so NoteDetailScreen's banner (gapCount > 0 && " +
+                "gapBytes > 0) actually fires and offers a re-fetch",
+            result.gapCount > 0
+        )
+        assertTrue("gapBytes must be nonzero too — the banner gate requires both", result.gapBytes > 0)
+    }
+
+    // ---- #100 follow-up round 4, MEDIUM: a trailing gap must not overcharge its boundary frame ----
+    //
+    // The frame immediately before a genuinely unresyncable trailing span can be real,
+    // independently-decodable audio whose lookahead confirmation failed only because nothing
+    // valid follows it — the benign-trailer branch already excludes it from the loss count
+    // (framesOk++ at :256/:279), but the real-corruption branch two lines below charged it as
+    // lost bytes anyway, inflating the reported loss by a whole frame length on every trailing
+    // gap (~50x on a 10-frame + 3-byte fixture: 147 bytes reported lost instead of 3).
+
+    @Test
+    fun trailingGapAfterFewFrames_doesNotOverchargeTheBoundaryFrameAsLoss() {
+        val junk = byteArrayOf(0x12, 0x34, 0x56) // heterogeneous, no 0xFF, never resyncs
+        val data = stream(10) + junk
+        val result = Mp3FrameScan.scan(data)
+        assertEquals("the 10th frame is real, decodable audio, not part of the gap", 10, result.framesOk)
+        assertEquals(
+            "only the 3 genuinely unresyncable junk bytes should be charged as loss, not the " +
+                "144-byte real frame in front of them",
+            3L,
+            result.gapBytes
+        )
+    }
+
+    // ---- #100 follow-up round 3, HIGH-2: tag recognition must be bounded to the tag itself ----
+    //
+    // An APEv2 footer's own size field must be used to verify the unresyncable span is EXACTLY
+    // the tag and nothing else. Matching only the last 32 bytes' "APETAGEX" preamble — ignoring
+    // whatever precedes it — lets real corruption hide behind a legitimate-looking footer.
+
+    private fun apeV2Footer(tagSize: Int): ByteArray {
+        // 32-byte APEv2 footer: "APETAGEX"(8) + version LE(4) + size LE(4) + item count LE(4) +
+        // flags LE(4) + reserved(8). [tagSize] is the on-disk size the footer itself claims,
+        // including the footer's own 32 bytes (the common footer-only-tag convention).
+        val footer = ByteArray(32)
+        "APETAGEX".toByteArray().copyInto(footer, 0)
+        // version = 2000
+        footer[8] = 0xD0.toByte(); footer[9] = 0x07
+        // size field, little-endian
+        footer[12] = (tagSize and 0xFF).toByte()
+        footer[13] = ((tagSize shr 8) and 0xFF).toByte()
+        footer[14] = ((tagSize shr 16) and 0xFF).toByte()
+        footer[15] = ((tagSize shr 24) and 0xFF).toByte()
+        return footer
+    }
+
+    @Test
+    fun trailingApeV2Footer_withCorrectSizeField_isNotReportedAsGap() {
+        // A well-formed, footer-only (no items) APEv2 tag: size field == 32, and the tag really
+        // is exactly those 32 bytes — nothing precedes it but real audio.
+        val data = stream(10) + apeV2Footer(tagSize = 32)
+        val result = Mp3FrameScan.scan(data)
+        assertEquals(0, result.gapCount)
+    }
+
+    @Test
+    fun trailingApeV2Footer_precededByGenuineCorruption_isStillReportedAsGap() {
+        // The HIGH-2 counterexample: real damage immediately before a real, well-formed footer.
+        // The footer's own size field (32 — footer-only, no items) proves the tag is only the
+        // last 32 bytes, so the corruption before it must still be reported.
+        val corruption = ByteArray(5000) { (it * 31 + 7).toByte() }.also {
+            // Guarantee no accidental 0xFF sync byte anywhere in the corruption span.
+            for (i in it.indices) if (it[i] == 0xFF.toByte()) it[i] = 0x01
+        }
+        val data = stream(10) + corruption + apeV2Footer(tagSize = 32)
+        val result = Mp3FrameScan.scan(data)
+        assertTrue(
+            "corruption preceding a legitimate APEv2 footer must still be reported — the tag's " +
+                "own size field proves the tag is only the last 32 bytes",
+            result.gapCount > 0
+        )
+        assertTrue(result.gapBytes >= 5000)
+    }
+
+    @Test
+    fun trailingApeV2Footer_withSizeFieldNotMatchingSpan_isReportedAsGap() {
+        // A footer whose size field claims a tag larger than what's actually between it and the
+        // last confirmed frame (or a bogus/implausible value) must not be trusted as benign.
+        val data = stream(10) + apeV2Footer(tagSize = 1_000_000)
+        val result = Mp3FrameScan.scan(data)
+        assertTrue(result.gapCount > 0)
+    }
+
+    @Test
+    fun heterogeneousUnresyncableTrailingCorruption_isStillReportedAsGap() {
+        // Real damage — varied, non-repeating bytes that never resync — must still be caught.
+        // This is the actual #100 defect the H1 fix targets; the benign-trailer carve-out must
+        // not swallow genuine corruption along with the false positives.
+        val junk = byteArrayOf(
+            0x12, 0x34, 0x56, 0x78,
+            0x9A.toByte(), 0xBC.toByte(), 0xDE.toByte(), 0xF0.toByte(),
+        )
+        val data = stream(10) + junk
+        val result = Mp3FrameScan.scan(data)
+        assertTrue(
+            "heterogeneous unresyncable trailing bytes are real damage and must be reported",
+            result.gapCount > 0
+        )
     }
 
     // ---- Real-file cross-check ---------------------------------------------------

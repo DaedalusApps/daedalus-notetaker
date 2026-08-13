@@ -21,11 +21,6 @@ import org.w3c.dom.Element
  * and that AndroidManifest.xml (a separate file, parsed independently) lists exactly
  * [AdbActions.REGISTERED]. A handler added without updating [AdbActions], or a manifest edited
  * out of step with it, fails one of these for a real reason.
- *
- * The one intentional exception is `REPAIR_FILE`: AudioRepairEngine.repairMp3File destructively
- * truncates audio with no backup (see #100), so that handler must stay reachable in source (for
- * a future fix) but unreachable via the receiver — "quarantined" via [AdbActions.QUARANTINED]
- * rather than silently dropped.
  */
 class AdbActionRegistrationTest {
 
@@ -87,8 +82,9 @@ class AdbActionRegistrationTest {
     fun `MainActivity contains no hand-typed addAction string literal`() {
         // The IntentFilter must be built exclusively from AdbActions.REGISTERED. A hand-typed
         // addAction("com.daedalus.notes.X") anywhere in the file — even alongside a correct
-        // AdbActions.REGISTERED loop — reopens the #99 hole: it can register an action (like
-        // the quarantined REPAIR_FILE) that AdbActions never sanctioned.
+        // AdbActions.REGISTERED loop — reopens the #99 hole: it can register an action that
+        // AdbActions never sanctioned, silently drifting the receiver out of sync with the
+        // single source of truth the other checks in this file assume it matches.
         val literalAddActionCalls = Regex("""addAction\(\s*"[^"]*"""")
             .findAll(strippedMainActivitySource)
             .map { it.value }
@@ -97,23 +93,6 @@ class AdbActionRegistrationTest {
             "MainActivity.kt must call addAction(...) only via AdbActions.REGISTERED.forEach — " +
                 "found hand-typed literal call(s): $literalAddActionCalls",
             literalAddActionCalls.isEmpty()
-        )
-    }
-
-    @Test
-    fun `the REPAIR_FILE action string appears in MainActivity only via the AdbActions constant`() {
-        // MainActivity's REPAIR_FILE `when` branch must be reached through AdbActions.REPAIR_FILE,
-        // never through the raw string — a raw string can't be caught by the "no hand-typed
-        // addAction literal" check above if someone builds the literal via concatenation or a
-        // local val instead of calling addAction(...) directly.
-        val rawOccurrences = Regex(Regex.escape("\"com.daedalus.notes.REPAIR_FILE\""))
-            .findAll(strippedMainActivitySource)
-            .count()
-        assertEquals(
-            "MainActivity.kt must reference REPAIR_FILE only as AdbActions.REPAIR_FILE, never as " +
-                "the raw action string — found $rawOccurrences raw occurrence(s).",
-            0,
-            rawOccurrences
         )
     }
 
@@ -165,20 +144,6 @@ class AdbActionRegistrationTest {
                 "MainActivity actually handles.",
             AdbActions.REGISTERED.toSet(),
             registeredManifestActions
-        )
-    }
-
-    @Test
-    fun `REPAIR_FILE is quarantined and not registered anywhere`() {
-        assertTrue(AdbActions.REPAIR_FILE in AdbActions.QUARANTINED)
-        assertTrue(
-            "REPAIR_FILE must not be on AdbActions.REGISTERED (AudioRepairEngine is unsafe; " +
-                "see class doc)",
-            AdbActions.REPAIR_FILE !in AdbActions.REGISTERED
-        )
-        assertTrue(
-            "REPAIR_FILE must not be on the manifest's AdbReceiver intent-filter either",
-            AdbActions.REPAIR_FILE !in registeredManifestActions
         )
     }
 

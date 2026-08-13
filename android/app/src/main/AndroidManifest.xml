@@ -51,8 +51,7 @@
         <receiver
             android:name=".AdbReceiver"
             android:exported="true">
-            <!-- Kept in sync with AdbActions.REGISTERED (com.daedalus.notes.AdbActions) —
-                 REPAIR_FILE is intentionally absent; see AdbActions.QUARANTINED. -->
+            <!-- Kept in sync with AdbActions.REGISTERED (com.daedalus.notes.AdbActions). -->
             <intent-filter>
                 <action android:name="com.daedalus.notes.SYNC" />
                 <action android:name="com.daedalus.notes.PROBE" />

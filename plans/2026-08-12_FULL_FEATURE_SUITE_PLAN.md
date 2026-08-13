@@ -119,24 +119,32 @@
 - Scan MP3 frame headers (`Mp3FrameScan.kt`), trim truncated trailing bytes, rebuild sync frames, and repair duration headers.
 
 ### Implementation
-1. **`AudioRepairEngine.kt`** (`com.daedalus.notes.data.model`):
-   - Scans MP3 byte stream for valid frame headers (`0xFF 0xFB` / `0xFF 0xF3`).
-   - Removes zero-padding or corrupted chunks from interrupted BLE downloads.
-   - Re-writes clean MP3 file and updates duration in Room DB.
+1. **`AudioRepairEngine.kt`** (`com.daedalus.notes.data.model`) — **deleted, see warning below**:
+   - Scanned MP3 byte stream for valid frame headers (`0xFF 0xFB` / `0xFF 0xF3`).
+   - Removed zero-padding or corrupted chunks from interrupted BLE downloads.
+   - Re-wrote the MP3 file in place and (in principle; never actually implemented) updated
+     duration in Room DB.
 
 ### ADB User Story Verification
-> ⚠️ **QUARANTINED — DO NOT RUN THE COMMAND BELOW (see #99, tracked in #100).**
-> `AudioRepairEngine.repairMp3File` truncates the recording at the first detected gap and
-> overwrites the *only* copy on disk, with no backup. As of #99, `REPAIR_FILE` is deliberately
-> **not** registered on MainActivity's dynamic `IntentFilter` or on the manifest's `.AdbReceiver`
-> `<intent-filter>` — see `AdbActions.QUARANTINED` — so the broadcast below is currently a
-> silent no-op (one `AdbReceiver forwarding:` logcat line, nothing else). That is intentional,
-> not a bug: **do not "fix" it by re-adding the action to the IntentFilter or manifest.** Re-arm
-> this trigger only after #100 fixes the underlying data-loss bug in `AudioRepairEngine`.
-- **User Story 1:** Trigger audio repair on a file via ADB (quarantined — see warning above):
-  ```powershell
-  adb shell am broadcast -a com.daedalus.notes.REPAIR_FILE --es filename "20260812113220" -n com.daedalus.notes/.AdbReceiver
-  ```
+> ⚠️ **REMOVED — Pillar 6 no longer exists in the codebase (see #99, #100).**
+> `AudioRepairEngine.repairMp3File` was quarantined behind `AdbActions.QUARANTINED` after #99
+> found it truncated a recording at the first detected gap and overwrote the *only* copy on disk
+> with no backup. #100 attempted a fix, and two adversarial cold reviews of that fix each
+> surfaced a new, distinct data-integrity hazard: the first forced a backup-path collision fix
+> (it collided with the re-download flow's own backup) and a scanner rework; the second found an
+> unbounded "benign trailer" classifier that could hide total audio loss as clean, an unbounded
+> tag-recognition carve-out that could hide real corruption behind a 32-byte footer, and no
+> ceiling on how much of a file a single repair could excise. The owner's conclusion
+> was that the engine came from a feature plan rather than a reported problem, it operates on
+> files that are frequently the user's only copy, and the non-destructive `redownloadAndAnalyze`
+> re-fetch path already covers the same recovery need without rewriting audio bytes in place.
+> `AudioRepairEngine.kt`, its test, the `REPAIR_FILE` action, and its `MainActivity` handler were
+> deleted rather than further hardened. `Mp3FrameScan` (the detector Pillar 6 was built on) was
+> kept — it also drives the corruption banner in `NoteDetailScreen` — with the genuine detector
+> bugs #100 found (an unresyncable trailing span silently reported clean; a trailing ID3v1 tag
+> miscounting the last real frame) fixed and the two carve-outs that caused new false negatives
+> removed.
+- **User Story 1:** ~~Trigger audio repair on a file via ADB~~ — removed; no longer applicable.
 
 ---
 
