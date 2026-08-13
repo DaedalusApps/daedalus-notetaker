@@ -126,7 +126,7 @@ class MainActivity : ComponentActivity() {
                     // Same filename allowlist as RecordingViewModel's sync path — this branch is
                     // unreachable today (see above), but whoever re-arms it must not inherit a
                     // path-traversal hole via --es filename "../../...".
-                    if (filename.isNotBlank() && filename.matches(Regex("[A-Za-z0-9._-]+"))) {
+                    if (com.daedalus.notes.util.SafeFilename.isSafe(filename)) {
                         val file = File(getExternalFilesDir(null), "Recordings/$filename")
                         val ok = com.daedalus.notes.data.model.AudioRepairEngine.repairMp3File(file)
                         Log.i("DaedalusADB", "Audio repair result for '$filename': $ok")

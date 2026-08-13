@@ -12,6 +12,7 @@ import com.daedalus.notes.data.db.AppDatabase
 import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.data.model.TodoItem
 import com.daedalus.notes.ui.screens.TODO_LOOKBACK_HOURS_DEFAULT
+import com.daedalus.notes.util.SafeFilename
 import com.daedalus.notes.viewmodel.MAX_RECORDING_MINUTES_DEFAULT
 import org.json.JSONArray
 import org.json.JSONObject
@@ -231,10 +232,13 @@ class BackupManager(
         return importedCount
     }
 
-    /** Directory-traversal guard shared by the parent-exists check and the main import loop. */
+    /**
+     * Directory-traversal guard shared by the parent-exists check and the main import loop.
+     * Layers an extra `.`/`..` rejection on top of [SafeFilename] — those two both match the
+     * shared allowlist (dots are legal filename characters) but must still be rejected here.
+     */
     private fun isValidBackupFilename(filename: String): Boolean =
-        filename.isNotBlank() && filename.matches(Regex("[A-Za-z0-9._-]+")) &&
-            filename != "." && filename != ".."
+        SafeFilename.isSafe(filename) && filename != "." && filename != ".."
 
     private suspend fun importTodos(todosArr: JSONArray?) {
         if (todosArr == null) return

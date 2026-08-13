@@ -39,6 +39,7 @@ import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.recording.AudioRecorder
 import com.daedalus.notes.ui.mindmap.GlobalGraph
 import com.daedalus.notes.ui.mindmap.GraphBuilder
+import com.daedalus.notes.util.SafeFilename
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -411,7 +412,7 @@ class RecordingViewModel @JvmOverloads constructor(
             // before autoAnalyzePending() below, which re-acquires per recording.
             heavyWork.withLock {
             files.forEach { entry ->
-                if (!entry.filename.matches(Regex("[A-Za-z0-9._-]+"))) {
+                if (!SafeFilename.isSafe(entry.filename)) {
                     Log.w("DaedalusSync", "Skipping suspicious filename: ${entry.filename}")
                     return@forEach
                 }

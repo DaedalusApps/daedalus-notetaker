@@ -317,7 +317,9 @@ fun NoteDetailScreen(
                                     }
 
                                     player.setMediaItem(mediaItem)
-                                    player.setPlaybackSpeed(playbackSpeed)
+                                    // Speed is applied by the LaunchedEffect(playbackSpeed) above,
+                                    // which has already run by the time this can be clicked, and
+                                    // ExoPlayer's PlaybackParameters persist across setMediaItem/prepare.
                                     player.prepare()
                                     player.play()
                                     playbackDuration = if (isPart) partDuration else (note?.durationMillis ?: 0L)
