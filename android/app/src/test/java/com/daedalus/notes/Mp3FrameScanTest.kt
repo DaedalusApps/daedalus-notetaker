@@ -4,6 +4,7 @@ import com.daedalus.notes.data.model.Mp3FrameScan
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import java.io.File
 import org.junit.Test
 
@@ -27,6 +28,60 @@ class Mp3FrameScanTest {
                 frame().copyInto(out, i * FRAME_LEN)
             }
             return out
+        }
+
+        // ---- #106 structural guard helpers -----------------------------------------------
+        // Comments stripped so a comment claiming to do the right thing can't satisfy a
+        // `.contains(...)` check that was meant to verify real code. See HIGH-1 in the #99 review.
+        private fun stripComments(source: String): String {
+            val noBlockComments = source.replace(Regex("""/\*[\s\S]*?\*/"""), "")
+            return noBlockComments.lineSequence().joinToString("\n") { line ->
+                val idx = line.indexOf("//")
+                if (idx >= 0) line.substring(0, idx) else line
+            }
+        }
+
+        /** Returns the text between a `{` at [openBraceIndex] and its matching `}`.
+         *  NOTE: brace-counts only, no awareness of string literals — an unpaired `{`/`}` inside
+         *  a string literal in the scanned method body would corrupt this extraction. */
+        private fun balancedBraceBlock(source: String, openBraceIndex: Int): String {
+            var depth = 0
+            for (i in openBraceIndex until source.length) {
+                when (source[i]) {
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return source.substring(openBraceIndex, i + 1)
+                    }
+                }
+            }
+            error("Unbalanced braces starting at index $openBraceIndex")
+        }
+
+        /** Walks up from the test JVM's working directory to find the `:app` module root
+         *  (the directory containing this very test file). */
+        private fun findModuleRoot(): File {
+            var dir: File? = File(".").canonicalFile
+            repeat(6) {
+                val candidate = dir?.let { File(it, "src/test/java/com/daedalus/notes/Mp3FrameScanTest.kt") }
+                if (candidate != null && candidate.exists()) return dir!!
+                dir = dir?.parentFile
+            }
+            error(
+                "Could not locate the :app module root (looked for " +
+                    "src/test/java/com/daedalus/notes/Mp3FrameScanTest.kt) from ${File(".").canonicalPath}"
+            )
+        }
+
+        private fun extractRealFileCrossCheckBody(): String {
+            val file = File(findModuleRoot(), "src/test/java/com/daedalus/notes/Mp3FrameScanTest.kt")
+            val source = stripComments(file.readText())
+            // Built via concatenation, not as one contiguous literal, so this marker doesn't
+            // match itself when this very file's source text is scanned below.
+            val marker = "fun " + "realFileCrossCheck() {"
+            val start = source.indexOf(marker)
+            require(start >= 0) { "Could not find the realFileCrossCheck() declaration in Mp3FrameScanTest.kt" }
+            return balancedBraceBlock(source, source.indexOf('{', start))
         }
     }
 
@@ -319,9 +374,23 @@ class Mp3FrameScanTest {
         )
     }
 
+    // ---- Known coverage gap (#106) -------------------------------------------------------
+    // The trailing-span branches exercised only above by synthetic fixtures — recordGap on an
+    // unresyncable EOF, isBenignTrailer, and isBoundedApeV2Footer — are NOT exercised by any file
+    // in the real device corpus below. realFileCrossCheck's six recordings never take those paths.
+    // This is a known, deliberate non-exercise gap, not an oversight: a fixture authored from the
+    // same mental model as the parser can agree with it and both be wrong (this project already
+    // lost a cadence-based loss detector that passed 10 red-first tests and two reviews while
+    // being completely wrong about the hardware). Closing this gap needs genuinely damaged real
+    // captures (e.g. a deliberately interrupted BLE transfer), not more synthetic fixtures.
+    // Tracked in #106.
+
     // ---- Real-file cross-check ---------------------------------------------------
-    // Gated on -Dmp3.fixtures=<dir>. Skips cleanly (no failure) when absent, matching
-    // exact numbers validated against ffmpeg ground truth on real device recordings.
+    // Gated on -Dmp3.fixtures=<dir>. Reports SKIPPED (via Assume.assumeTrue, never a bare
+    // `return`) when the property is absent or points at a bad path, so an unrun cross-check can
+    // never be mistaken for a passing one. When a fixture directory IS supplied, every file in
+    // expectedResults must be present — a missing file is a hard failure, not a silent skip —
+    // and the numbers are matched exactly against ffmpeg ground truth on real device recordings.
 
     private data class Expected(
         val fileName: String,
@@ -339,20 +408,87 @@ class Mp3FrameScanTest {
         Expected("20260804141258.mp3", 920440, gapCount = 221, gapBytes = 48476),
     )
 
+    // ---- #106 follow-up, MEDIUM-1: expectedResults itself must not be silently emptied ----
+    // expectedResults IS this test's entire definition of coverage: if a future edit ever empties
+    // or truncates it (bad rebase, merge-conflict resolution, entries commented out), then in
+    // realFileCrossCheck missingFiles becomes empty, the for-loop runs zero times, and
+    // checked == expectedResults.size trivially holds at 0 == 0 — a genuine JUnit PASS having
+    // validated nothing, reproducing the #106 defect through a different vector.
+    //
+    // This is a plain @Test, not part of realFileCrossCheck, so it runs unconditionally —
+    // including in CI, where the cross-check itself is always skipped (no mp3.fixtures property).
+    // That means CI guards the coverage definition even though CI never runs the cross-check.
+    // The count is pinned exactly (not just "non-empty") so a legitimate-looking *shrink* is
+    // caught too, not only a full wipe. When fixtures are deliberately added or removed, update
+    // this constant deliberately alongside expectedResults.
+    @Test
+    fun `expectedResults size is pinned so it cannot be silently emptied or truncated`() {
+        val pinnedFixtureCount = 6
+        assertEquals(
+            "expectedResults defines the entire coverage of realFileCrossCheck: if this count " +
+                "shrinks unexpectedly, some real device recording silently stopped being " +
+                "validated (see #106). If fixtures were legitimately added or removed, update " +
+                "this pinned count deliberately.",
+            pinnedFixtureCount,
+            expectedResults.size
+        )
+    }
+
     @Test
     fun realFileCrossCheck() {
         val dirProp = System.getProperty("mp3.fixtures")
-        if (dirProp.isNullOrBlank()) return
-        val dir = File(dirProp)
-        if (!dir.isDirectory) return
+        assumeTrue("mp3.fixtures system property not set; skipping real-file cross-check", !dirProp.isNullOrBlank())
+        val dir = File(dirProp!!)
+        assumeTrue("mp3.fixtures ($dirProp) is not a directory; skipping real-file cross-check", dir.isDirectory)
 
+        val missingFiles = expectedResults.filterNot { File(dir, it.fileName).exists() }
+        assertTrue(
+            "mp3.fixtures directory ($dirProp) is missing expected fixture file(s): " +
+                "${missingFiles.map { it.fileName }} — every file in expectedResults must be " +
+                "present so this test actually validates all of them, not just whichever happen " +
+                "to exist",
+            missingFiles.isEmpty()
+        )
+
+        var checked = 0
         for (expected in expectedResults) {
             val file = File(dir, expected.fileName)
-            if (!file.exists()) continue
             assertEquals("${expected.fileName} size", expected.size, file.length())
             val result = Mp3FrameScan.scan(file)
             assertEquals("${expected.fileName} gapCount", expected.gapCount, result.gapCount)
             assertEquals("${expected.fileName} gapBytes", expected.gapBytes, result.gapBytes)
+            checked++
         }
+        assertEquals(
+            "did not check every expected fixture — coverage is incomplete",
+            expectedResults.size,
+            checked
+        )
     }
+
+    // ---- #106 structural guard: realFileCrossCheck must skip, never silently pass -----------
+    // A bare `return` inside a @Test method makes JUnit report it PASSED, indistinguishable from
+    // a real, fully-validated run. This guard reads this file's own (comment-stripped) source and
+    // asserts realFileCrossCheck's body contains no bare `return` — it must use
+    // org.junit.Assume.assumeTrue(...) to skip instead, which JUnit reports as SKIPPED.
+
+    @Test
+    fun `realFileCrossCheck body has no bare early-return gating`() {
+        val body = extractRealFileCrossCheckBody()
+        assertTrue(
+            "realFileCrossCheck must not contain a bare 'return' — that makes JUnit report a " +
+                "silently-skipped run as PASSED. Use org.junit.Assume.assumeTrue(...) instead, " +
+                "which JUnit reports as SKIPPED.",
+            // (?!@) excludes labeled returns like `return@forEach` / `return@label`: those exit
+            // only the enclosing lambda, not the test method, so they don't cause the silent-pass
+            // this guard exists to prevent.
+            !Regex("""\breturn\b(?!@)""").containsMatchIn(body)
+        )
+        assertTrue(
+            "realFileCrossCheck must use org.junit.Assume.assumeTrue(...) to skip when fixtures " +
+                "are unavailable.",
+            body.contains("assumeTrue")
+        )
+    }
+
 }
