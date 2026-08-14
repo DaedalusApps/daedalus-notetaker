@@ -51,6 +51,7 @@ class RecordingViewModelMaxDurationTest {
     private val db = mockk<AppDatabase>(relaxed = true)
     private val fakePrefs = mockk<SharedPreferences>(relaxed = true)
     private val fakeAudioRecorder = mockk<AudioRecorder>(relaxed = true)
+    private val transcriber = mockk<TranscriptionService>(relaxed = true)
 
     private lateinit var viewModel: RecordingViewModel
     private val testDispatcher = StandardTestDispatcher()
@@ -83,8 +84,6 @@ class RecordingViewModelMaxDurationTest {
         every { fakeAudioRecorder.start(any(), any()) } answers {
             (firstArg() as File).writeBytes(byteArrayOf(1, 2, 3))
         }
-
-        val transcriber = mockk<TranscriptionService>(relaxed = true)
 
         viewModel = RecordingViewModel(
             application = application,
@@ -221,5 +220,31 @@ class RecordingViewModelMaxDurationTest {
         advanceUntilIdle()
 
         assertEquals(45_000L, savedSlot.captured.durationMillis)
+    }
+
+    // #150 review round 1: stopLocalRecording()'s auto_process-gated doAnalyze(name) call is a
+    // second live instance of the queued-then-superseded race the issue describes — a manual
+    // analyze can fill in the summary while this call is still queued behind heavyWork, so it
+    // too must pass autoTriggered = true and be skipped when raced (mirrors
+    // RecordingViewModelTest's autoAnalyzePending_skipsWhenSummaryWasFilledInWhileQueuedBehindTheLock).
+    @Test
+    fun stopLocalRecording_autoProcessRacedByManualAnalyze_skipsReRunningTranscription() = runTest {
+        every { fakePrefs.getBoolean("auto_process", false) } returns true
+        // A real, existing "audio" file so a broken guard would sail past the
+        // localFile.exists() check and reach transcriber.transcribe() for real.
+        val existingAudio = File(tempDir, "already-analyzed.m4a").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        // By the time doAnalyze's precheck runs (after acquiring heavyWork), a manual analyze
+        // has already summarised the just-saved recording — simulating the race.
+        coEvery { repo.get(any()) } returns Recording(
+            filename = "raced", localPath = existingAudio.absolutePath, durationMillis = 1000L,
+            summary = "Already summarised by the manual run that won the race"
+        )
+
+        viewModel.startLocalRecording()
+        advanceTimeBy(1_000L)
+        viewModel.stopLocalRecording()
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { transcriber.transcribe(any()) }
     }
 }
