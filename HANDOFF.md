@@ -1,13 +1,13 @@
 # Handoff Brief — Daedalus Notetaker
 
-Written 2026-08-13 (session 6, including a live-device phase). Replaces the previous version. Read
-this whole file before starting.
+Written 2026-08-14, closing session 6 (which included a live-device phase). Replaces the previous
+version. Read this whole file before starting — it is written to be the only context you need.
 
 ---
 
 ## Current state
 
-- **`main`** = `5103e5b`, clean working tree, in sync with `origin/main`.
+- **`main`** = `7968b62`, clean working tree, in sync with `origin/main`, **green on CI**.
 - **`.\gradlew :app:testDebugUnitTest` → 474 tests / 0 failures / 1 skipped.**
   The skip is `Mp3FrameScanTest.realFileCrossCheck` and it is **by design**. A skip there is
   correct; a *pass* would mean something regressed.
@@ -35,10 +35,6 @@ this whole file before starting.
   before any work, after each of five installs, and after every interrupted transfer. Baseline was
   pulled with `adb pull` and proven identical to the device with per-file MD5 comparison.
   The db, `-wal` and `-shm` were also pulled byte-exact via `adb exec-out`.
-- **Data verified: 22 recordings, 58,658,554 bytes, MD5 byte-identical at seven checkpoints** —
-  before any work, after each of five installs, and after every interrupted transfer. Baseline was
-  pulled with `adb pull` and proven identical to the device with per-file MD5 comparison.
-  The db, `-wal` and `-shm` were also pulled byte-exact via `adb exec-out`.
 
 > **One file on the phone is NOT the owner's data:** `20260813084543.mp3` (337,148 bytes, MD5
 > `a0e25951817b9161008bd0a8b9aae194`) and its matching FW920 entry are a throwaway test recording
@@ -53,20 +49,21 @@ this whole file before starting.
 | #115 | — | Handoff |
 | #118 | **#104 closed** | `.AdbReceiver` gated on `android.permission.DUMP`; `SafeFilename` guards on all three destructive ADB handlers; dot-only names rejected centrally |
 | #120 | #106 | Real interrupted-BLE-transfer fixtures (structure-only, audio zeroed), pinned against ffmpeg ground truth |
-
+| #121 | — | Handoff |
 | #123 | #119 | Re-download that comes back shorter than the copy it replaced is rejected and the backup restored; two latent data-loss defects in `restoreBackup` fixed |
 | #124 | **#117 closed** | Zero-byte transfer no longer leaves a 0-byte file; failed downloads are logged, counted and surfaced |
 | #127 | **#101 closed** | FTS4 search, schema 12→13 with back-fill; hand-written sync triggers removed in favour of Room's |
 | #128 | — | Removed stray scratch files swept into #127 by a broad `git add -A` |
-
+| #129, #133, #135 | — | Handoff |
 | #130 | #125 | `@Upsert` for rowid stability (issue re-scoped — see below) |
 | #131 | **#126 closed** | 13→12 downgrade migration, so an older APK opens instead of throwing |
 | #132 | **#122 closed** | `heavyWork` widened to the whole re-download critical section |
 | #134 | **#103 closed** | Transcripts render as paragraphs; the speaker fiction is deleted |
 
-**#104, #117, #101, #126 and #122 are closed. #106 was closed by the owner.** #119 stays open — its guard
-shipped, but the root cause of the short transfer is unexplained and needs hardware. **#103 was
-deliberately NOT built** — see below.
+**Closed in session 6: #104, #117, #101, #126, #122, #103.** #106 was closed by the owner.
+**#119 stays open** — its guard shipped, but the root cause of the short transfer is unexplained and
+needs hardware. **#125 stays open and was re-scoped** — its stated mechanism does not exist (see
+below). **#116, #136** were filed and remain open.
 
 ### #103 is CLOSED — shipped as paragraph formatting (PR #134)
 
@@ -77,14 +74,12 @@ the stored transcript is untouched, so FTS search and markdown export still read
 Whisper produced.
 
 One thing worth knowing if you touch the transcript view: `highlightMatches` is now
-**whitespace-insensitive**. It has to be — search matches the raw stored text, but highlighting runs
-over the reformatted text where every third sentence boundary became `
+**whitespace-insensitive**, via a two-pointer scan. It has to be — search matches the raw stored
+text, but highlighting runs over the reformatted text where every third sentence boundary became a
+blank line, so a query spanning one of those matched globally and then silently failed to highlight
+in the note. **Do not "simplify" it back to `indexOf`.**
 
-`, so a query spanning
-one of those matched globally and silently failed to highlight in the note. Do not "simplify" it back
-to `indexOf`.
-
-The historical reasoning below is kept because the lesson generalises.
+The reasoning below is kept because the lesson generalises.
 
 ### Why #103 was refused as originally scoped
 
@@ -95,14 +90,18 @@ only the transcript string. On a solo memo it invents a second participant; on a
 it collapses everyone into two; wherever a real speaker change happens it is right only by
 coincidence.
 
-Wiring it into `NoteDetailScreen` as speaker badges would present fabricated attribution as fact in
-the owner's own meeting notes. The owner's decision was **do not wire it**; the issue now carries
-three honest options (drop the speaker claim and ship it as paragraph formatting; do real
-audio-based diarization; or delete it as #100 did with `AudioRepairEngine`). **This is a product
-call, not a wiring task.**
+Wiring it into `NoteDetailScreen` as speaker badges would have presented fabricated attribution as
+fact in the owner's own meeting notes. The owner was given three options — drop the speaker claim and
+ship it as paragraph formatting; do real audio-based diarization; or delete it as #100 did with
+`AudioRepairEngine` — and chose the first.
 
-Its unit tests pass and always did — they pin the formatting mechanics and *cannot fail for the
-reason that matters*. Same shape as D30's cadence detector.
+Its unit tests passed and always did: they pinned the formatting mechanics and *could not fail for
+the reason that mattered*. Same shape as D30's cadence detector.
+
+**The generalisable lesson: refuse the false part, deliver the true part.** The literal ask ("wire it
+up") would have shipped a lie. Refusing it was right, but refusing is not the same as delivering
+nothing — the component did one genuinely useful thing, and shipping exactly that, with the false
+claim removed and the name corrected, closed the pillar honestly.
 
 ---
 
@@ -113,8 +112,8 @@ reason that matters*. Same shape as D30's cadence detector.
 | 1. Background Service | **Delivered & Wired (#102)** | `AnalysisForegroundService` started/updated/stopped during BLE sync, re-download, and AI analysis. Declared `FOREGROUND_SERVICE_DATA_SYNC` in manifest for API 34+ compliance. |
 | 2. Calendar | **Delivered** | `TodoScreen.kt:302`. Device-verified: chooser launched, +191 ms |
 | 3. Speed / Skip | **Delivered** | Speed state lives in `RecordingViewModel`. Device-verified |
-| 4. Speaker Formatting | **Pending (#103)** | `SpeakerDiarizer` not yet wired to UI/pipeline |
-| 5. FTS4 Search | **Pending (#101)** | No `RecordingFtsEntity` yet; pre-existing `LIKE` search active |
+| 4. Speaker Formatting | **Re-scoped & delivered (#103)** | Shipped as paragraph formatting, not speaker attribution. `SpeakerDiarizer` deleted; `TranscriptFormatter` renders paragraphs at display time |
+| 5. FTS4 Search | **Delivered (#101)** | `RecordingFts` (`@Fts4(contentEntity)`), schema 12→13 with back-fill. **Migration has never run on the real DB** — see the warning at the top |
 | 6. Storage Repair | **Deleted (#100)** | Re-download via BLE (#108 fixed) covers recovery non-destructively |
 
 ---
@@ -126,11 +125,40 @@ reason that matters*. Same shape as D30's cadence detector.
 | **#119** | Root cause: why a transfer after an interrupted one comes back short | **Start here.** The guard shipped; the cause is unexplained. Needs a clean-start hardware repro |
 | #125 | **Re-scoped.** Its stated mechanism does not exist — see below | Needs a device read of the live write-connection pragma and trigger list |
 | #116 | Delete/download packets omit the 14-byte filename clamp | Needs a throwaway-file hardware delete to verify |
+| #136 | `RecordingViewModelTest` intermittently red on Linux CI (`UncaughtExceptionsBeforeTest`) | **The only issue that does NOT need the phone.** See below |
 
-**Every remaining issue needs the phone.** There is no further ADB-free work on the board — #116
-needs a hardware delete against a throwaway file, #119 needs a clean-start transfer reproduction,
-and #125 needs a read of the live write-connection pragma and trigger list. Pick up hardware work
-first next session, or triage new work.
+### Where to start
+
+**#136 is the only issue that does not need the phone**, and it is the one that will bite CI. The
+rest (#116, #119, #125) all require hardware.
+
+### #136 — the CI flake, and the concrete lead
+
+Symptom, seen on a **documentation-only** PR so the change cannot have caused it:
+
+```
+RecordingViewModelTest > splitAnalysis_cleanFourOfFourParts_shortSummaryUnchanged FAILED
+    kotlinx.coroutines.test.UncaughtExceptionsBeforeTest: There were uncaught exceptions
+    before the test started.
+```
+
+`UncaughtExceptionsBeforeTest` **does not indicate a fault in the test it names.** A coroutine from
+an *earlier* test escaped onto a real background thread, threw after that test finished, and the
+exception was attributed to whichever test started next. The named test is the victim, so it will
+appear to move between runs.
+
+**The cause is almost certainly raw `Dispatchers.IO` in `RecordingViewModel`.** This mechanism was
+established precisely during the #119 work: production code using raw `Dispatchers.IO` inside a
+method under test does not synchronise with `advanceUntilIdle()` under `StandardTestDispatcher`, so
+the coroutine continues on a real thread after the test asserted and returned. `redownloadAndAnalyze`
+and `restoreBackup` were converted to the injectable `ioDispatcher`; **several methods were not** —
+roughly the `init` block, `fullAutoSync`, `syncFiles`, `doAnalyzeExclusive`, `exportNote`,
+`exportLibraryAnswer`.
+
+**Start with `doAnalyzeExclusive`** — the failing test is on the split-analysis path.
+
+Reproduce deliberately, not by luck: a single green run proves nothing for an intermittent. Establish
+a failure rate in CI before and after (CI is the only Linux available; see the constraint below).
 
 ### #125 was filed on a mechanism that does not exist — read before acting on it
 
@@ -329,11 +357,32 @@ this session and `am` parsed a fragment as the package (`pkg=action`), so the br
 
 ## Working process
 
-Load the **`apply-working-process`** skill first. Orchestrator delegates and never edits directly;
+Load the **`apply-working-process`** skill first — and **sync it from
+`~/projects/fable-quality-library/skills/apply-working-process/` before loading**, since the owner
+maintains it there and the installed copy can lag. Orchestrator delegates and never edits directly;
 fresh equal-or-better reviewer on every diff; three gates (`/simplify` → `/security-review` →
 `/code-review`) with every finding fixed; issues before branches; decisions logged to
-`prd/DECISIONS.md` **the same session**. `prd/` is gitignored — read `DECISIONS.md` D22–D33 for the
+`prd/DECISIONS.md` **the same session**. `prd/` is gitignored — read `DECISIONS.md` D22–D40 for the
 full reasoning behind everything above.
+
+### Two operational traps that cost time in session 6
+
+**Check the CI *conclusion*, not just that it stopped being pending.** A merge-wait loop of the form
+"poll until the output no longer says `pending`, then merge" will happily merge a **failed** build.
+That happened once (harmlessly — docs-only change, flaky test, `main` stayed green), but it was wrong
+every time it ran. Gate on `pass`/`success` explicitly.
+
+**Write `.git/security-review-ok` as its own command.** The push gate reads the marker file, and
+chaining `git rev-parse HEAD > .git/security-review-ok && git push` fails — the gate sees the old
+value. Same for `git add && git commit <<heredoc && ...`, which silently did not commit at all once.
+Run them as separate invocations and verify with `git log --oneline -1`.
+
+**CI is the only Linux available.** Development is Windows; `.github/workflows/ci.yml` on
+`ubuntu-latest` is the sole way to see Linux behaviour. Iteration is ~2.5 minutes and whole-suite
+only, with no debugger and no local reproduction. `gh run rerun <id>` re-runs the *same commit*,
+which is the right tool for characterising a flake. Because that window is so narrow, `testOptions`
+now enables **full exception output** in test logging — a Linux-only failure used to print only
+`AssertionError at Foo.kt:840` with no message, which made it undiagnosable. Do not remove that.
 
 **Budget.** Session 5's three levers are now baked into the installed `apply-working-process` skill
 itself (verified identical to `~/projects/fable-quality-library` HEAD at session-6 start), so they no
@@ -352,6 +401,26 @@ a review. #106 is test infrastructure; a top-tier adversarial pass on it would h
 ---
 
 ## Judgment lessons worth inheriting
+
+**Review the justification, not just the diff.** Four times in session 6 adversarial review
+overturned a *premise* rather than finding a bug: #104's `RECEIVER_EXPORTED` history, #101's
+hand-written FTS triggers, #125's `recursive_triggers` mechanism, and #103's worry about existing DB
+rows. In every case the code was defensible and the explanation was wrong — and the explanation is
+what the next person inherits. Two issues (#117, #125) were filed on mechanisms that do not exist.
+**Before building on "this used to be different" or "this happens because X", check it:** `git log -p`
+disproved one in a single command, and grepping a library's bytecode disproved another.
+
+**A correct fix can create a new user-facing problem.** Twice: #122's in-flight guard left the
+re-fetch button enabled but rejecting for the length of a sync pass, and #103's paragraph formatting
+silently broke in-note search highlighting. Neither was findable by tests — both needed someone to
+trace an interaction between two pieces of correct code. **When a fix changes which paths are hot,
+review the newly-hot paths.**
+
+**Test quality is verified by breaking the implementation, not by counting assertions.** Replace the
+function body with `return input` and see which tests survive; reinstate the removed guard and
+confirm the test that documents its removal goes red. Several tests that looked like pins turned out
+to pass against an identity implementation.
+
 
 **A measurement against real data beats a reviewer's model.** A reviewer flagged a trailing-tag
 false positive; the implementer measured it against all 19 real recordings and found **zero** effect;
