@@ -684,7 +684,9 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     suspend fun refreshStatus() {
-        sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
+        fileListMutex.withLock {
+            sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
+        }
     }
 
     suspend fun deleteFile(filename: String): Boolean {
@@ -912,18 +914,42 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     /**
-     * Guards collectFileList's send+collect critical section. Five call sites (runInitSequence,
-     * deleteFile, listFiles, probeDeleteCmds, probeUploadCmds) can invoke this with nothing else
-     * serialising them; without this mutex two overlapping calls both drain the single shared
-     * responseChannel, splitting and duplicating the FW920's file entries between them (#141,
-     * measured on hardware as a 9/23 split with 32 entry lines for 16 unique files). None of the
-     * five call sites invoke collectFileList() while already holding this mutex (no call site is
-     * itself reached from inside another collectFileList() critical section), so a plain
-     * non-reentrant Mutex cannot deadlock here.
+     * Guards collectFileList's send+collect critical section, and refreshStatus's
+     * send+await — both drain the single shared responseChannel with no other correlation
+     * mechanism. Five call sites (runInitSequence, deleteFile, listFiles, probeDeleteCmds,
+     * probeUploadCmds) can invoke collectFileList with nothing else serialising them; without
+     * this mutex two overlapping calls both drain responseChannel, splitting and duplicating the
+     * FW920's file entries between them (#141, measured on hardware as a 9/23 split with 32
+     * entry lines for 16 unique files). refreshStatus is also guarded because the 15s
+     * status poller (startPoller) runs it in its own coroutine independent of any enumeration —
+     * transferInProgress does not cover this, since only downloadFile sets it — so an unguarded
+     * refreshStatus would drain and discard FileList entries meant for an in-flight
+     * collectFileList (#141 finding 1). This is a per-instance property (not in a companion
+     * object), so two BleManager instances never contend on the same lock — that would
+     * over-synchronise unrelated devices (e.g. during a device swap).
+     *
+     * None of the guarded call sites invoke another guarded call while already holding this
+     * mutex (no call site is itself reached from inside another critical section here), so a
+     * plain non-reentrant Mutex cannot deadlock.
+     *
+     * NOT covered: downloadFile() reads responseChannel directly (its audio stream has no
+     * request-correlation id either) and is not guarded by this mutex — a concurrent
+     * collectFileList() or refreshStatus() can still steal or interleave with an in-progress
+     * download. That is a pre-existing, separate issue (out of scope here; tracked separately).
      */
     private val fileListMutex = Mutex()
 
     private suspend fun collectFileList() = fileListMutex.withLock {
+        // Drain any residue left behind by a PREVIOUS call that hit its per-item idle timeout:
+        // responseChannel has unlimited capacity and nothing else drains it between calls, so
+        // that call's still-arriving entries — and its eventual end-of-list sentinel — would
+        // otherwise be consumed here as if they were the response to THIS call's own request
+        // below, corrupting this call's result with stale data (#141 finding 2). 0x0A carries no
+        // request-correlation id, so an unconditional drain is the only mechanism available.
+        while (responseChannel.tryReceive().isSuccess) {
+            Log.d("BleManager", "collectFileList: draining stale residue from responseChannel")
+        }
+
         Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")
         sendPacket(PKT_LIST_FILES)
         val collected = mutableListOf<FileEntry>()

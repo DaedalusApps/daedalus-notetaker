@@ -247,13 +247,21 @@ class BleManagerTest {
                 // The second call must NOT also send its own CMD 0x0A while the first is still
                 // enumerating — if it does, both loops are now consuming the same response
                 // stream and entries will be split/duplicated between them (the measured bug).
-                delay(150)
-                assertEquals(
-                    "a second collectFileList() call sent its own request while the first " +
-                        "call's enumeration was still in flight — responses will now be split " +
-                        "between the two loops",
-                    1, writeCount.get()
-                )
+                // A single point-in-time check after a fixed sleep (e.g. delay(150) then check
+                // once) is a wall-clock heuristic: on a saturated CI box the second coroutine
+                // might simply not have been scheduled yet within that window, giving a false
+                // pass. Poll continuously over a longer window instead — any transition to 2
+                // fails immediately, and a full 500ms of the second call staying quiescent is
+                // far stronger evidence than one sample at 150ms.
+                repeat(20) {
+                    assertEquals(
+                        "a second collectFileList() call sent its own request while the first " +
+                            "call's enumeration was still in flight — responses will now be " +
+                            "split between the two loops",
+                        1, writeCount.get()
+                    )
+                    delay(25)
+                }
 
                 // Satisfy the first call's enumeration with a complete, duplicate-free 16-entry
                 // list (the FW920 answers each outstanding request with the full list).
@@ -281,6 +289,69 @@ class BleManagerTest {
             "duplicate filenames present in final file list",
             files.map { it.filename }.distinct().size, files.size
         )
+    }
+
+    // --- #141 finding 5: the mutex must be per-instance, not shared across instances --------
+
+    /**
+     * Moving fileListMutex into a companion object would over-synchronise across BleManager
+     * instances — a real bug during a device swap, where a fresh BleManager for the new device
+     * would block on a stale enumeration left in flight by the OLD instance. A single-instance
+     * test (like the one above) cannot distinguish a per-instance mutex from a static one, since
+     * it never has two instances to compare. This test does: two independent BleManager
+     * instances, each wired to its own mocked GATT, must both be able to send their own CMD 0x0A
+     * and start enumerating without waiting on each other.
+     */
+    @Test
+    fun collectFileList_mutexIsPerInstance_secondManagerIsNotBlockedByFirst() {
+        val prefs2 = mockk<SharedPreferences>(relaxed = true)
+        val context2 = mockk<Context>(relaxed = true)
+        every { context2.getSharedPreferences(any(), any()) } returns prefs2
+        every { prefs2.getString(any(), any()) } returns null
+        val manager2 = BleManager(context2)
+
+        val writeCount1 = AtomicInteger(0)
+        val writeCount2 = AtomicInteger(0)
+        val gatt1 = mockk<BluetoothGatt>(relaxed = true)
+        val gatt2 = mockk<BluetoothGatt>(relaxed = true)
+        val writeChar1 = mockk<BluetoothGattCharacteristic>(relaxed = true)
+        val writeChar2 = mockk<BluetoothGattCharacteristic>(relaxed = true)
+        every { gatt1.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writeCount1.incrementAndGet(); true
+        }
+        every { gatt2.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writeCount2.incrementAndGet(); true
+        }
+        setPrivateField(manager, "bluetoothGatt", gatt1)
+        setPrivateField(manager, "writeChar", writeChar1)
+        setPrivateField(manager2, "bluetoothGatt", gatt2)
+        setPrivateField(manager2, "writeChar", writeChar2)
+
+        @Suppress("UNCHECKED_CAST")
+        fun channelOf(target: BleManager) = privateField(target, "responseChannel") as Channel<ParsedResponse>
+
+        runBlocking {
+            // If this ever hangs until timeout, that itself is evidence of a shared/static
+            // mutex (instance 2 blocked on instance 1's still-open enumeration below).
+            withTimeout(5000) {
+                // Instance 1 starts enumerating and is deliberately left unsatisfied.
+                val job1 = async(Dispatchers.Default) { manager.listFiles() }
+                while (writeCount1.get() < 1) delay(5)
+
+                // Instance 2 must be able to start its own enumeration right away.
+                val job2 = async(Dispatchers.Default) { manager2.listFiles() }
+                while (writeCount2.get() < 1) delay(5)
+
+                // Both did — release both so the coroutines complete cleanly.
+                channelOf(manager).trySend(ParsedResponse.FileList(null))
+                channelOf(manager2).trySend(ParsedResponse.FileList(null))
+                job1.await()
+                job2.await()
+            }
+        }
+
+        assertEquals(1, writeCount1.get())
+        assertEquals(1, writeCount2.get())
     }
 
     // --- #141 finding 1: a concurrent status poll must not steal enumeration entries ---------
@@ -359,17 +430,30 @@ class BleManagerTest {
     fun collectFileList_residueFromTimedOutPriorCall_pollutesTheNextCall() {
         val gatt = mockk<BluetoothGatt>(relaxed = true)
         val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
-        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } returns true
+        val writeCount = AtomicInteger(0)
+        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writeCount.incrementAndGet()
+            true
+        }
         setPrivateField(manager, "bluetoothGatt", gatt)
         setPrivateField(manager, "writeChar", writeCharMock)
 
-        // First enumeration: the device answers only 9 of 16 entries before going quiet. The
-        // 3s per-item idle timeout fires and collectFileList() gives up with a partial list.
-        val timedOutNames = (1..9).map { "REC%02d".format(it) }
-        timedOutNames.forEach { name ->
-            responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+        runBlocking {
+            withTimeout(8000) {
+                // First enumeration: the device answers only 9 of 16 entries before going
+                // quiet. The 3s per-item idle timeout fires and collectFileList() gives up with
+                // a partial list. The entries are sent only after the request itself goes out,
+                // otherwise the fix's own drain-before-send step (correctly) discards them as
+                // pre-existing residue before this scenario is even set up.
+                val timedOutNames = (1..9).map { "REC%02d".format(it) }
+                val jobA = async(Dispatchers.Default) { manager.listFiles() }
+                while (writeCount.get() < 1) delay(5)
+                timedOutNames.forEach { name ->
+                    responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+                }
+                jobA.await()
+            }
         }
-        runBlocking { manager.listFiles() }
         assertEquals(9, manager.bleState.value.files.size)
 
         // The straggler entries + end-of-list sentinel from the FIRST call arrive late and now
@@ -380,14 +464,21 @@ class BleManagerTest {
         }
         responseChannel().trySend(ParsedResponse.FileList(null))
 
-        // The fresh response to the SECOND call's own CMD 0x0A request.
+        // The fresh response to the SECOND call's own CMD 0x0A request — again sent only after
+        // that call's own request goes out (writeCount reaching 2), so it lands after this
+        // call's drain-then-send step rather than being drained away itself.
         val freshNames = (1..5).map { "NEW%02d".format(it) }
-        freshNames.forEach { name ->
-            responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+        runBlocking {
+            withTimeout(8000) {
+                val jobB = async(Dispatchers.Default) { manager.listFiles() }
+                while (writeCount.get() < 2) delay(5)
+                freshNames.forEach { name ->
+                    responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+                }
+                responseChannel().trySend(ParsedResponse.FileList(null))
+                jobB.await()
+            }
         }
-        responseChannel().trySend(ParsedResponse.FileList(null))
-
-        runBlocking { manager.listFiles() }
 
         val files = manager.bleState.value.files
         assertEquals(
