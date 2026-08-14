@@ -486,10 +486,13 @@ class BleManager(private val context: Context) {
     private var b0b3EverObserved = false
 
     /**
-     * Set while a file transfer owns the link. The FW920 streams audio in response to one
-     * CMD 0x0B and has no way to multiplex; sending it an unrelated command mid-transfer makes
-     * it answer that instead — observed killing a download outright (Ack(0x0B) "ready" followed
-     * by no audio at all), and a 45-minute recording takes long enough to collect ~16 of these.
+     * Set while a file transfer owns the link, cleared inside the same [withLink]-guarded
+     * critical section. linkMutex is what actually prevents a command from reaching the FW920
+     * mid-transfer now (#144) — this flag is no longer load-bearing for correctness, it exists
+     * purely so the 15s status poller can skip a poll outright (see [startPoller]) instead of
+     * suspending on linkMutex and queueing behind a multi-minute download. `linkMutex.isLocked`
+     * (checked alongside this flag, see [startPoller]) generalises the same skip-instead-of-queue
+     * optimisation to every held link operation, not just transfers.
      */
     @Volatile
     private var transferInProgress = false
@@ -507,6 +510,15 @@ class BleManager(private val context: Context) {
                     Log.d("BleManager", "poller: transfer in progress, skipping status")
                     continue
                 }
+                // linkMutex now serialises EVERY link operation (#144), not just transfers —
+                // without this check a poll would still get in, it would just suspend on
+                // linkMutex and queue up behind whatever is holding it (see withLink's KDoc).
+                // A status poll is disposable (the next one is 15s away regardless), so skip
+                // outright rather than adding an indefinite wait to the poller's coroutine.
+                if (linkMutex.isLocked) {
+                    Log.d("BleManager", "poller: link busy, skipping status")
+                    continue
+                }
                 refreshStatus()
             }
         }
@@ -522,12 +534,21 @@ class BleManager(private val context: Context) {
         refreshStatus()
     }
 
-    /** Debug-only: tell the FW920 to start a live recording on its own mic (CMD 0x06). */
+    /**
+     * Debug-only: tell the FW920 to start a live recording on its own mic (CMD 0x06). Like every
+     * [withLink]-guarded op, this suspends until the link is free — e.g. it will queue behind an
+     * in-flight downloadFile() rather than run concurrently with it. That's the intended
+     * tradeoff: before #144 an unguarded send here during a download killed the transfer outright
+     * (the FW920 answered this instead of the audio stream); queueing is strictly better.
+     */
     suspend fun startDeviceRecording(): Unit = withLink {
         Log.i("BleManager", "startDeviceRecording: ${sendAndAwait(PKT_START_RECORDING, expectedCmd = 0x06)}")
     }
 
-    /** Debug-only: tell the FW920 to stop the live recording and persist the file (CMD 0x08). */
+    /**
+     * Debug-only: tell the FW920 to stop the live recording and persist the file (CMD 0x08).
+     * Queues behind any in-flight link operation, same tradeoff as [startDeviceRecording].
+     */
     suspend fun stopDeviceRecording(): Unit = withLink {
         Log.i("BleManager", "stopDeviceRecording: ${sendAndAwait(PKT_STOP_RECORDING, expectedCmd = 0x08)}")
     }
@@ -692,6 +713,20 @@ class BleManager(private val context: Context) {
         // Two-phase delete: first 0x0D stages (payload=[0]), second 0x0D commits (payload=[1])
         val stage = sendAndAwait(buildDeleteFile(filename), expectedCmd = 0x0D)
         Log.i("BleManager", "deleteFile: stage=$stage")
+        if (stage == null) {
+            // The stage exchange timed out. Sending the commit packet anyway would race a
+            // late-arriving stage ack (payload=[0]) against the real commit ack: if the stage ack
+            // finally arrives after commit is sent, the commit's own awaitResponse(0x0D) would
+            // return it instead, misreading a stage ack's payload=[0] as a FAILED commit and
+            // reporting deleted=false even though the device actually deleted the file. Bail out
+            // instead of racing it.
+            Log.w("BleManager", "deleteFile: stage timed out, not sending commit")
+            return@withLink false
+        }
+        // Defence in depth for a stage ack that arrives late but still before commit is sent
+        // (e.g. a device retransmit) — a duplicate cmd=0x0D response sitting in the channel would
+        // otherwise be misread as the commit response the same way a truly-late one would be.
+        drainResidue()
         val commit = sendAndAwait(buildDeleteFile(filename), expectedCmd = 0x0D)
         Log.i("BleManager", "deleteFile: commit=$commit")
         val deleted = commit is ParsedResponse.Unknown &&
@@ -966,6 +1001,15 @@ class BleManager(private val context: Context) {
      * to every link operation by #144). None of the responses on this channel carry a
      * request-correlation id, so an unconditional drain at the gate is the only mechanism
      * available.
+     *
+     * Queueing: because linkMutex is a single per-instance gate, any user-initiated op called
+     * while another is in flight suspends until the link frees — e.g. a delete requested during
+     * an in-flight multi-minute download waits for that download to finish before it even sends
+     * its first packet. This is inherent to the FW920 being single-command-at-a-time, not a
+     * regression: pre-#144, sending during a transfer didn't queue, it corrupted the link (see
+     * [transferInProgress]'s KDoc). This function intentionally adds no timeout of its own — a
+     * caller that needs to bound how long it waits (e.g. to show the user a "busy" state) has to
+     * do that at the UI layer, out of scope here.
      */
     private suspend fun <T> withLink(block: suspend () -> T): T = linkMutex.withLock {
         drainResidue()
@@ -982,8 +1026,16 @@ class BleManager(private val context: Context) {
         }
     }
 
-    /** Must only be called while [linkMutex] is already held (see [withLink]). */
+    /**
+     * Must only be called while [linkMutex] is already held (see [withLink]). Also drains
+     * residue itself, not just at the enclosing [withLink]'s entry: probeDeleteCmds and
+     * probeUploadCmds call this in a LOOP under a single lock hold, so without a drain here too,
+     * iteration N timing out with stragglers still in flight would have them consumed by
+     * iteration N+1's enumeration as if they were its own response, corrupting it exactly like
+     * the cross-call residue this same drain already prevents at the [withLink] boundary.
+     */
     private suspend fun collectFileListLocked() {
+        drainResidue()
         Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")
         sendPacket(PKT_LIST_FILES)
         val collected = mutableListOf<FileEntry>()
