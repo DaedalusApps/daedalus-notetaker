@@ -932,22 +932,40 @@ class BleManager(private val context: Context) {
      * mutex (no call site is itself reached from inside another critical section here), so a
      * plain non-reentrant Mutex cannot deadlock.
      *
-     * NOT covered: downloadFile() reads responseChannel directly (its audio stream has no
-     * request-correlation id either) and is not guarded by this mutex — a concurrent
-     * collectFileList() or refreshStatus() can still steal or interleave with an in-progress
-     * download. That is a pre-existing, separate issue (out of scope here; tracked separately).
+     * This mutex only covers enumeration-vs-enumeration and enumeration-vs-status-poll
+     * contention (collectFileList and refreshStatus). Other responseChannel consumers remain
+     * UNGUARDED and can still be stolen from or interleaved with:
+     *   - downloadFile() (its audio stream has no request-correlation id either).
+     *   - deleteFile()'s own two sendAndAwait(..., expectedCmd = 0x0D) exchanges — only its
+     *     trailing collectFileList() call is guarded. Concretely: the 15s poller's
+     *     refreshStatus() can acquire this mutex uncontended while deleteFile is mid-0x0D
+     *     exchange, and its awaitResponse(0x05) discards the Unknown(cmd=0x0D) commit ack —
+     *     so deleteFile times out, returns false, and the UI reports "Failed to delete" for a
+     *     file the device actually deleted.
+     *   - runInitSequence()'s six sendAndAwait calls, including its own raw
+     *     sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05) — it does not route through the
+     *     now-guarded refreshStatus().
+     * Widening the guard to cover these is a larger change, tracked separately (out of scope
+     * here).
      */
     private val fileListMutex = Mutex()
 
     private suspend fun collectFileList() = fileListMutex.withLock {
-        // Drain any residue left behind by a PREVIOUS call that hit its per-item idle timeout:
-        // responseChannel has unlimited capacity and nothing else drains it between calls, so
-        // that call's still-arriving entries — and its eventual end-of-list sentinel — would
-        // otherwise be consumed here as if they were the response to THIS call's own request
-        // below, corrupting this call's result with stale data (#141 finding 2). 0x0A carries no
-        // request-correlation id, so an unconditional drain is the only mechanism available.
+        // Drain any residue left behind by a PREVIOUS collectFileList() call that hit its
+        // per-item idle timeout: responseChannel has unlimited capacity and nothing else drains
+        // it between one collectFileList() call and the next (downloadFile, runServiceProbe,
+        // probeUploadCmds and runProbe all read responseChannel directly, but not in a way that
+        // drains stale enumeration residue between enumerations), so that call's still-arriving
+        // entries — and its eventual end-of-list sentinel — would otherwise be consumed here as
+        // if they were the response to THIS call's own request below, corrupting this call's
+        // result with stale data (#141 finding 2). 0x0A carries no request-correlation id, so an
+        // unconditional drain is the only mechanism available.
+        var drainedCount = 0
         while (responseChannel.tryReceive().isSuccess) {
-            Log.d("BleManager", "collectFileList: draining stale residue from responseChannel")
+            drainedCount++
+        }
+        if (drainedCount > 0) {
+            Log.d("BleManager", "collectFileList: drained $drainedCount stale residue item(s) from responseChannel")
         }
 
         Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")

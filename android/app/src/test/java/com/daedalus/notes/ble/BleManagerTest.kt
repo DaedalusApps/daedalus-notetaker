@@ -301,6 +301,14 @@ class BleManagerTest {
      * it never has two instances to compare. This test does: two independent BleManager
      * instances, each wired to its own mocked GATT, must both be able to send their own CMD 0x0A
      * and start enumerating without waiting on each other.
+     *
+     * A static mutex does NOT make this test hang until the outer withTimeout budget: instance
+     * 1's enumeration is left deliberately unsatisfied, but collectFileList()'s own 3s per-item
+     * idle timeout fires, releases the lock, and instance 2 proceeds well inside a generous
+     * outer timeout — so the test would stay green under that mutation. The outer budget must
+     * therefore be tighter than that 3s escape hatch (measured: unmutated path completes in
+     * ~0.07s, so 1200ms leaves ample headroom without flaking) so that the mutation is actually
+     * caught by a timeout failure instead of slipping through underneath it.
      */
     @Test
     fun collectFileList_mutexIsPerInstance_secondManagerIsNotBlockedByFirst() {
@@ -331,9 +339,11 @@ class BleManagerTest {
         fun channelOf(target: BleManager) = privateField(target, "responseChannel") as Channel<ParsedResponse>
 
         runBlocking {
-            // If this ever hangs until timeout, that itself is evidence of a shared/static
-            // mutex (instance 2 blocked on instance 1's still-open enumeration below).
-            withTimeout(5000) {
+            // Tighter than collectFileList's 3s per-item idle timeout escape hatch: under a
+            // static/shared mutex, instance 1's still-open enumeration below would eventually
+            // time out and release the lock, letting instance 2 proceed inside a 5000ms budget
+            // and passing incorrectly. A 1200ms budget forces a genuine failure instead.
+            withTimeout(1200) {
                 // Instance 1 starts enumerating and is deliberately left unsatisfied.
                 val job1 = async(Dispatchers.Default) { manager.listFiles() }
                 while (writeCount1.get() < 1) delay(5)
