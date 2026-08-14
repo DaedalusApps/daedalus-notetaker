@@ -143,13 +143,13 @@ class MainActivity : ComponentActivity() {
                         Log.i("DaedalusADB", "Playback speed set to ${recordingViewModel.playbackSpeed.value}")
                     }
                 }
-                AdbActions.FORMAT_SPEAKER -> {
+                AdbActions.FORMAT_PARAGRAPHS -> {
                     val filename = intent?.getStringExtra("filename") ?: ""
-                    Log.i("DaedalusADB", "Format speaker triggered for '$filename'")
+                    Log.i("DaedalusADB", "Format paragraphs triggered for '$filename'")
                     if (filename.isNotBlank()) {
                         lifecycleScope.launch {
-                            val formatted = recordingViewModel.formatSpeakerPreview(filename)
-                            Log.i("DaedalusADB", "Speaker format result for '$filename': ${formatted ?: "no transcript"}")
+                            val formatted = recordingViewModel.formatParagraphsPreview(filename)
+                            Log.i("DaedalusADB", "Paragraph format result for '$filename': ${formatted ?: "no transcript"}")
                         }
                     }
                 }
