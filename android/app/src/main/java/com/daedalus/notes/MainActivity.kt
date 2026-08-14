@@ -23,7 +23,9 @@ import androidx.lifecycle.Lifecycle
 import com.daedalus.notes.ble.ConnectionState
 import com.daedalus.notes.data.backup.BackupPrefs
 import com.daedalus.notes.data.backup.BackupWorker
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.daedalus.notes.ui.NavGraph
 import com.daedalus.notes.ui.theme.DaedalusTheme
 import com.daedalus.notes.viewmodel.ConversationViewModel
@@ -161,6 +163,22 @@ class MainActivity : ComponentActivity() {
                             val results = recordingViewModel.searchPreview(query)
                             Log.i("DaedalusADB", "Search result for '$query': ${results.size} match(es) -> $results")
                         }
+                    }
+                }
+                AdbActions.DB_PRAGMA -> {
+                    Log.i("DaedalusADB", "DB pragma probe triggered")
+                    lifecycleScope.launch {
+                        // #125: debugPragmaProbe() reads via openHelper.writableDatabase -- Room's
+                        // own write connection, the same one DAO writes and InvalidationTracker
+                        // use. Dispatch off the main thread: these are blocking disk reads.
+                        val result = withContext(Dispatchers.IO) {
+                            com.daedalus.notes.data.db.AppDatabase.getInstance(applicationContext)
+                                .debugPragmaProbe()
+                        }
+                        Log.i("DaedalusADB", "DB_PRAGMA recursive_triggers=${result.recursiveTriggers}")
+                        Log.i("DaedalusADB", "DB_PRAGMA temp_store=${result.tempStore}")
+                        Log.i("DaedalusADB", "DB_PRAGMA triggers=${result.triggers}")
+                        Log.i("DaedalusADB", "DB_PRAGMA user_version=${result.userVersion}")
                     }
                 }
             }
