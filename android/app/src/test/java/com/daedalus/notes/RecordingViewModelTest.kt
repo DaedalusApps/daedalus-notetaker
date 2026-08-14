@@ -18,6 +18,7 @@ import com.daedalus.notes.viewmodel.RecordingViewModel
 import io.mockk.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -42,8 +43,16 @@ import kotlin.coroutines.CoroutineContext
  * ignores the injected `ioDispatcher` and uses a raw `Dispatchers.IO` instead, this count
  * stays at 0 no matter how long we wait — it does not depend on real-thread timing, so it
  * can't be a flake in either direction.
+ *
+ * Delegates [Delay] to the wrapped dispatcher (always a [StandardTestDispatcher] in this file)
+ * so virtual time is preserved. Without this, a `delay()` call while this dispatcher is the
+ * interceptor would fall back to real wall-clock `DefaultDelay`, `advanceUntilIdle()` would
+ * return early, and the coroutine could outlive the test.
  */
-private class DispatchCountingDispatcher(private val delegate: CoroutineDispatcher) : CoroutineDispatcher() {
+@OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
+private class DispatchCountingDispatcher(
+    private val delegate: CoroutineDispatcher
+) : CoroutineDispatcher(), Delay by (delegate as Delay) {
     var dispatchCount = 0
         private set
 
@@ -72,6 +81,11 @@ class RecordingViewModelTest {
 
     private lateinit var viewModel: RecordingViewModel
     private val testDispatcher = StandardTestDispatcher()
+
+    // Production code creates a Recordings/ subdirectory inside temp dirs handed out as
+    // getExternalFilesDir(null), so File.deleteOnExit() (which only removes EMPTY directories)
+    // can't clean them up. Track them here and delete the whole tree in tearDown() instead.
+    private val tempDirsToClean = mutableListOf<File>()
 
     @Before
     fun setup() {
@@ -112,6 +126,8 @@ class RecordingViewModelTest {
     fun tearDown() {
         Dispatchers.resetMain()
         unmockkStatic(Log::class)
+        tempDirsToClean.forEach { it.deleteRecursively() }
+        tempDirsToClean.clear()
     }
 
     @Test
@@ -1460,18 +1476,21 @@ class RecordingViewModelTest {
         every { application.getSystemService(android.os.storage.StorageManager::class.java) } returns storageManager
         every { storageManager.storageVolumes } returns emptyList()
         every { application.getExternalFilesDir(null) } returns
-            java.nio.file.Files.createTempDirectory("d136_fullautosync").toFile().also { it.deleteOnExit() }
+            java.nio.file.Files.createTempDirectory("d136_fullautosync").toFile().also { tempDirsToClean += it }
 
         val vm = RecordingViewModel(
             application = application, db = db, repo = repo, llm = llm,
             transcriber = mockk(relaxed = true), embedder = embedder, ioDispatcher = counting
         )
+        advanceUntilIdle()
+        val before = counting.dispatchCount
+
         vm.fullAutoSync()
         advanceUntilIdle()
 
         assertTrue(
             "fullAutoSync's volume scan must route through the injected ioDispatcher, not a real Dispatchers.IO thread",
-            counting.dispatchCount > 0
+            counting.dispatchCount > before
         )
     }
 
@@ -1479,18 +1498,25 @@ class RecordingViewModelTest {
     fun syncFiles_processesUris_routesOnInjectedIoDispatcher() = runTest {
         val counting = DispatchCountingDispatcher(testDispatcher)
         every { application.getExternalFilesDir(null) } returns
-            java.nio.file.Files.createTempDirectory("d136_syncfiles").toFile().also { it.deleteOnExit() }
+            java.nio.file.Files.createTempDirectory("d136_syncfiles").toFile().also { tempDirsToClean += it }
 
         val vm = RecordingViewModel(
             application = application, db = db, repo = repo, llm = llm,
             transcriber = mockk(relaxed = true), embedder = embedder, ioDispatcher = counting
         )
+        advanceUntilIdle()
+        val before = counting.dispatchCount
+
+        // NOTE: passes an empty URI list, so this only pins entry into `withContext(ioDispatcher)`,
+        // not the copy loop body (DocumentFile.fromSingleUri is a static call that would require
+        // heavy mocking, plus the mocked InputStream.read() risks looping forever in copyTo). Per
+        // the review finding, this gap is intentionally left uncovered and called out here.
         vm.syncFiles(emptyList())
         advanceUntilIdle()
 
         assertTrue(
             "syncFiles' copy loop must route through the injected ioDispatcher, not a real Dispatchers.IO thread",
-            counting.dispatchCount > 0
+            counting.dispatchCount > before
         )
     }
 
@@ -1507,13 +1533,15 @@ class RecordingViewModelTest {
         coEvery { repo.get(filename) } returns Recording(
             filename = filename, localPath = audio.absolutePath, durationMillis = 0L
         )
+        advanceUntilIdle()
+        val before = counting.dispatchCount
 
         vm.analyze(filename)
         advanceUntilIdle()
 
         assertTrue(
             "doAnalyzeExclusive's duration heal must route through the injected ioDispatcher, not a real Dispatchers.IO thread",
-            counting.dispatchCount > 0
+            counting.dispatchCount > before
         )
     }
 }
