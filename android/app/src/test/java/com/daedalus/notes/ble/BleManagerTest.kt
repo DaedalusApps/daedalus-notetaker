@@ -3,6 +3,7 @@ package com.daedalus.notes.ble
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
@@ -105,6 +106,37 @@ class BleManagerTest {
         val before = negotiatedMtu()
         gattCallback.onMtuChanged(gatt, 512, /* status = */ 133)
         assertEquals(before, negotiatedMtu())
+    }
+
+    // --- #148: a stale (superseded) GATT callback reporting STATE_CONNECTED must be torn down ---
+
+    @Test
+    fun onConnectionStateChange_staleGattReportsConnected_disconnectsAndClosesThatGattOnly() {
+        val currentGatt = mockk<BluetoothGatt>(relaxed = true)
+        setPrivateField(manager, "bluetoothGatt", currentGatt)
+        val stateBefore = manager.bleState.value.connectionState
+
+        val staleGatt = mockk<BluetoothGatt>(relaxed = true)
+        gattCallback.onConnectionStateChange(
+            staleGatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
+        )
+
+        verify { staleGatt.disconnect() }
+        verify { staleGatt.close() }
+        assertEquals(currentGatt, privateField(manager, "bluetoothGatt"))
+        assertEquals(stateBefore, manager.bleState.value.connectionState)
+    }
+
+    // --- #151 (folded into #148): a failed-status STATE_CONNECTED must not request an MTU -------
+
+    @Test
+    fun onConnectionStateChange_currentConnectionFailedStatus_doesNotRequestMtu() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        setPrivateField(manager, "bluetoothGatt", gatt)
+
+        gattCallback.onConnectionStateChange(gatt, /* status = */ 133, BluetoothProfile.STATE_CONNECTED)
+
+        verify(exactly = 0) { gatt.requestMtu(any()) }
     }
 
     // --- #96: handleIncoming's characteristic-UUID -> isAudioChannel routing -----------------
