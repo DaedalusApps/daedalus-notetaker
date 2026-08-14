@@ -139,6 +139,20 @@ class BleManagerTest {
         verify(exactly = 0) { gatt.requestMtu(any()) }
     }
 
+    // --- #151 fold-in defect: a failed-status STATE_CONNECTED must not strand the connection at -
+    // --- CONNECTING forever — it must surface as ERROR, mirroring onServicesDiscovered's idiom --
+
+    @Test
+    fun onConnectionStateChange_currentConnectionFailedStatus_surfacesErrorInsteadOfStrandingAtConnecting() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        setPrivateField(manager, "bluetoothGatt", gatt)
+
+        gattCallback.onConnectionStateChange(gatt, /* status = */ 133, BluetoothProfile.STATE_CONNECTED)
+
+        assertEquals(ConnectionState.ERROR, manager.bleState.value.connectionState)
+        assertTrue(manager.bleState.value.errorMessage.contains("133"))
+    }
+
     // --- #96: handleIncoming's characteristic-UUID -> isAudioChannel routing -----------------
 
     @Suppress("UNCHECKED_CAST")

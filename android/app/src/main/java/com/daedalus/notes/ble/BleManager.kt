@@ -232,11 +232,13 @@ class BleManager(private val context: Context) {
             if (gatt != bluetoothGatt) {
                 // Stale callback from a connection superseded by a newer connect()/disconnect()
                 // (e.g. a device swap) — release its resources but don't touch current state.
-                if (newState == BluetoothProfile.STATE_DISCONNECTED) gatt.close()
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    Log.w("BleManager", "Superseded connection reported STATE_CONNECTED — tearing it down")
-                    gatt.disconnect()
-                    gatt.close()
+                when (newState) {
+                    BluetoothProfile.STATE_DISCONNECTED -> gatt.close()
+                    BluetoothProfile.STATE_CONNECTED -> {
+                        Log.w("BleManager", "Superseded connection reported STATE_CONNECTED — tearing it down")
+                        gatt.disconnect()
+                        gatt.close()
+                    }
                 }
                 return
             }
@@ -244,8 +246,22 @@ class BleManager(private val context: Context) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     // #151 (closed as unsubstantiated, folded in here): only request the MTU on a
                     // genuinely successful connect — some OEM/version combos can report
-                    // STATE_CONNECTED with a failure status.
-                    if (status == BluetoothGatt.GATT_SUCCESS) gatt.requestMtu(512)
+                    // STATE_CONNECTED with a failure status. On failure, don't strand the
+                    // connection at CONNECTING forever — tear it down and surface an error,
+                    // mirroring onServicesDiscovered's failure handling below.
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        gatt.requestMtu(512)
+                    } else {
+                        gatt.close()
+                        bluetoothGatt = null
+                        writeChar = null
+                        _bleState.update {
+                            it.copy(
+                                connectionState = ConnectionState.ERROR,
+                                errorMessage    = "Connect failed: $status"
+                            )
+                        }
+                    }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     stopPoller()
