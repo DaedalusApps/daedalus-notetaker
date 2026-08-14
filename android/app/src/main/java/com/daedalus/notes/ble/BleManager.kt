@@ -430,10 +430,23 @@ class BleManager(private val context: Context) {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
-            // No `gatt != bluetoothGatt` staleness guard needed here (unlike onServicesDiscovered/
-            // onMtuChanged/onConnectionStateChange, #148): descriptorCompletions is cleared on
-            // disconnect() and at every init-loop start, so a callback from a superseded connection
-            // already finds no registered waiter below and is dropped harmlessly.
+            // Two distinct mechanisms guard this callback, for two distinct staleness cases:
+            // 1. Cross-connection: both FW920 units expose IDENTICAL characteristic UUIDs, so a
+            //    UUID-keyed lookup alone cannot tell connection A's callback from connection B's —
+            //    a callback from a gatt superseded by a newer connect()/disconnect() (device swap)
+            //    could otherwise resolve the CURRENT connection's live deferred for the same UUID
+            //    with the stale connection's result. This `gatt != bluetoothGatt` guard (mirroring
+            //    onServicesDiscovered/onMtuChanged/onConnectionStateChange, #148) drops it before
+            //    that can happen. No teardown here — onConnectionStateChange already owns tearing
+            //    down a superseded gatt.
+            // 2. Same-connection: a callback that arrives after ITS OWN waiter already timed out
+            //    (and removed its entry, see awaitDescriptorCompletion) is still handled below by
+            //    the unregistered-waiter drop, since UUID correlation is sufficient once staleness
+            //    across connections is ruled out by guard 1.
+            if (gatt != bluetoothGatt) {
+                Log.w("BleManager", "onDescriptorWrite from a superseded connection — dropped (char=${descriptor.characteristic.uuid}, status=$status)")
+                return
+            }
             val charUuid = descriptor.characteristic.uuid
             val deferred = descriptorCompletions.remove(charUuid)
             if (deferred == null) {

@@ -880,6 +880,7 @@ class BleManagerTest {
     @Test
     fun onDescriptorWrite_failureStatus_doesNotSignalSuccess() {
         val gatt = mockk<BluetoothGatt>(relaxed = true)
+        setPrivateField(manager, "bluetoothGatt", gatt)
         val characteristic = characteristicWithUuid("0000b0b2-0000-1000-8000-00805f9b34fb")
         val descriptor = mockk<BluetoothGattDescriptor>(relaxed = true)
         every { descriptor.characteristic } returns characteristic
@@ -904,6 +905,7 @@ class BleManagerTest {
     @Test
     fun onDescriptorWrite_successStatus_signalsSuccess() {
         val gatt = mockk<BluetoothGatt>(relaxed = true)
+        setPrivateField(manager, "bluetoothGatt", gatt)
         val characteristic = characteristicWithUuid("0000b0b2-0000-1000-8000-00805f9b34fb")
         val descriptor = mockk<BluetoothGattDescriptor>(relaxed = true)
         every { descriptor.characteristic } returns characteristic
@@ -914,6 +916,60 @@ class BleManagerTest {
 
         assertEquals(
             "a successful descriptor write must resolve its deferred to true",
+            true, deferred.getCompleted()
+        )
+    }
+
+    /**
+     * RED-FIRST: cross-connection descriptor-callback poisoning. Both FW920 units expose
+     * IDENTICAL characteristic UUIDs, so a UUID-keyed lookup alone cannot distinguish connection
+     * A's callback from connection B's. Concrete race: connection A's writeDescriptor callback
+     * sits queued through disconnect() and connection B's registration for the SAME UUID; when it
+     * finally delivers, the UUID lookup finds and resolves B's live deferred with A's stale
+     * result — and B's real callback then arrives to find nothing registered, dropped as
+     * "unregistered" even though it's the one that actually matters.
+     *
+     * Simulated here directly (no real disconnect()/reconnect() sequencing needed): the CURRENT
+     * connection is `gattB`, with a deferred registered for B0B2. A callback arrives from a
+     * DIFFERENT gatt instance (`gattA`, modelling the stale connection) for the same B0B2 UUID,
+     * reporting FAILURE — it must be dropped, not resolve B's deferred. B's deferred must still be
+     * pending afterward, and B's own subsequent real callback (SUCCESS) must be the one that
+     * resolves it.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun onDescriptorWrite_fromSupersededConnection_doesNotResolveCurrentConnectionsDeferred() {
+        val gattA = mockk<BluetoothGatt>(relaxed = true)  // stale, superseded connection
+        val gattB = mockk<BluetoothGatt>(relaxed = true)  // current connection
+        setPrivateField(manager, "bluetoothGatt", gattB)
+
+        // Both units expose identical UUIDs — same characteristic UUID, deliberately separate
+        // mock characteristic/descriptor objects per "connection" to model that faithfully.
+        val characteristicB = characteristicWithUuid(NOTIFY_B0B2_UUID)
+        val descriptorFromA = mockk<BluetoothGattDescriptor>(relaxed = true).also {
+            every { it.characteristic } returns characteristicWithUuid(NOTIFY_B0B2_UUID)
+        }
+        val descriptorFromB = mockk<BluetoothGattDescriptor>(relaxed = true).also {
+            every { it.characteristic } returns characteristicB
+        }
+
+        val deferred = CompletableDeferred<Boolean>()
+        descriptorCompletions()[characteristicB.uuid] = deferred
+
+        // Connection A's late, stale callback — must be dropped, not resolve B's deferred.
+        gattCallback.onDescriptorWrite(gattA, descriptorFromA, /* status = */ 133)
+
+        assertFalse(
+            "a descriptor callback from a superseded connection must not resolve the CURRENT " +
+                "connection's deferred for the same characteristic UUID",
+            deferred.isCompleted
+        )
+
+        // B's own real callback — this is the one that must resolve it.
+        gattCallback.onDescriptorWrite(gattB, descriptorFromB, BluetoothGatt.GATT_SUCCESS)
+
+        assertEquals(
+            "the current connection's own callback must be the one that resolves its deferred",
             true, deferred.getCompleted()
         )
     }
