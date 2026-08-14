@@ -420,6 +420,63 @@ class RecordingViewModelTest {
         coVerify(exactly = 0) { repo.get("written-off") }
     }
 
+    // #150: autoAnalyzePending() snapshots blank-summary recordings, then each doAnalyze() call
+    // queues behind heavyWork. A manual analyze can finish first and fill in the summary while
+    // the auto-triggered call is still waiting — repo.get(filename) inside doAnalyzeExclusive is
+    // the re-check under the lock, and it must see the now-non-blank summary and skip rather than
+    // re-running Whisper+Gemma and overwriting the manual result.
+    @Test
+    fun autoAnalyzePending_skipsWhenSummaryWasFilledInWhileQueuedBehindTheLock() = runTest {
+        val audio = File.createTempFile("raced-auto", ".mp3").also { it.deleteOnExit() }
+        val transcriber = mockk<TranscriptionService>(relaxed = true)
+        val vm = RecordingViewModel(
+            application = application, db = db, repo = repo, llm = llm,
+            transcriber = transcriber, embedder = embedder, ioDispatcher = testDispatcher
+        )
+        val prefs = mockk<android.content.SharedPreferences>(relaxed = true)
+        every { application.getSharedPreferences(any(), any()) } returns prefs
+        every { prefs.getBoolean("auto_process", false) } returns true
+
+        // Snapshot taken by autoAnalyzePending() still shows a blank summary...
+        every { repo.allRecordings } returns flowOf(
+            listOf(Recording(filename = "raced", localPath = audio.absolutePath, durationMillis = 1000))
+        )
+        // ...but by the time doAnalyzeExclusive's repo.get() runs (after acquiring heavyWork), a
+        // manual analyze has already written a summary — simulating the queued-then-superseded race.
+        coEvery { repo.get("raced") } returns Recording(
+            filename = "raced", localPath = audio.absolutePath, durationMillis = 1000,
+            summary = "Already summarised by the manual run that won the race"
+        )
+
+        vm.autoAnalyzePending()
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { transcriber.transcribe(any()) }
+        coVerify(exactly = 0) { transcriber.transcribeRange(any(), any(), any()) }
+    }
+
+    // Companion to the skip test above: a manual (non-auto-triggered) analyze on the same
+    // already-summarised recording is a deliberate re-analysis and must still run.
+    @Test
+    fun analyze_manualCallStillRunsEvenWhenSummaryAlreadyExists() = runTest {
+        val audio = File.createTempFile("manual-reanalyze", ".mp3").also { it.deleteOnExit() }
+        val transcriber = mockk<TranscriptionService>(relaxed = true)
+        val vm = RecordingViewModel(
+            application = application, db = db, repo = repo, llm = llm,
+            transcriber = transcriber, embedder = embedder, ioDispatcher = testDispatcher
+        )
+        coEvery { repo.get("already-summarised") } returns Recording(
+            filename = "already-summarised", localPath = audio.absolutePath, durationMillis = 1000,
+            summary = "Existing summary"
+        )
+        coEvery { transcriber.transcribe(any()) } returns "a readable transcript with enough words"
+
+        vm.analyze("already-summarised")
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { transcriber.transcribe(any()) }
+    }
+
     // A recording flagged unanalyzable, then re-synced with a clean transfer (local file pruned
     // in between), must be eligible for auto-analysis again — the flag described the old, bad
     // copy of the audio, and saveSyncedRecording only ever runs when fresh audio just landed.
