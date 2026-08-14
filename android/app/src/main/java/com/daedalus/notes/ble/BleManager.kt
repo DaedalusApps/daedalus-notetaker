@@ -105,8 +105,12 @@ class BleManager(private val context: Context) {
     /** Single-consumer channel; responses flow here from onCharacteristicChanged. */
     private val responseChannel = Channel<ParsedResponse>(capacity = Channel.UNLIMITED)
 
-    /** Signals completion of each writeDescriptor call (one per notification enable). */
-    private val descriptorChannel = Channel<Unit>(capacity = Channel.UNLIMITED)
+    /**
+     * Signals completion of each writeDescriptor call (one per notification enable) — `true` if
+     * onDescriptorWrite reported GATT_SUCCESS, `false` otherwise (#147: previously Channel<Unit>,
+     * unconditionally signalled regardless of status).
+     */
+    private val descriptorChannel = Channel<Boolean>(capacity = Channel.UNLIMITED)
 
     // Descriptor UUID required to enable notifications on Android
     private val CCC_DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -334,13 +338,36 @@ class BleManager(private val context: Context) {
             // mark the new connection CONNECTED prematurely at the tail of its own sequence.
             initJob?.cancel()
             initJob = scope.launch {
+                // Owner decision (#147): a failed notify channel does not abort the init sequence
+                // — the device may still be partially usable — but it must not proceed silently.
+                // Every failure is logged per-channel, and if ANY of the three failed, that is
+                // surfaced once in BleState.errorMessage.
+                var anyNotifyFailed = false
                 for (notifyUuid in listOf(NOTIFY_B0B2_UUID, NOTIFY_B0B3_UUID, NOTIFY_B0B4_UUID)) {
                     val notifyChar = service.getCharacteristic(UUID.fromString(notifyUuid)) ?: continue
-                    enableNotification(gatt, notifyChar)
+                    val initiated = enableNotification(gatt, notifyChar)
+                    if (!initiated) {
+                        Log.w("BleManager", "notify setup failed to initiate for $notifyUuid")
+                        anyNotifyFailed = true
+                        continue
+                    }
                     // Wait up to 2s for onDescriptorWrite before continuing to the next one
-                    withTimeoutOrNull(2000L) { descriptorChannel.receive() }
+                    val completedOk = withTimeoutOrNull(2000L) { descriptorChannel.receive() }
+                    if (completedOk != true) {
+                        Log.w("BleManager", "notify setup failed for $notifyUuid (result=$completedOk)")
+                        anyNotifyFailed = true
+                    }
                 }
-                Log.i("BleManager", "All notifications enabled, starting init sequence")
+                if (anyNotifyFailed) {
+                    _bleState.update {
+                        it.copy(errorMessage = "One or more notification channels failed to enable — some data may not update")
+                    }
+                }
+                Log.i("BleManager", if (anyNotifyFailed) {
+                    "Notification setup finished with failures, starting init sequence anyway"
+                } else {
+                    "All notifications enabled, starting init sequence"
+                })
                 runInitSequence()
             }
             initJob?.invokeOnCompletion { initJob = null }
@@ -369,8 +396,13 @@ class BleManager(private val context: Context) {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
-            Log.d("BleManager", "onDescriptorWrite status=$status char=${descriptor.characteristic.uuid}")
-            descriptorChannel.trySend(Unit)
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d("BleManager", "onDescriptorWrite status=$status char=${descriptor.characteristic.uuid}")
+                descriptorChannel.trySend(true)
+            } else {
+                Log.w("BleManager", "onDescriptorWrite FAILED status=$status char=${descriptor.characteristic.uuid}")
+                descriptorChannel.trySend(false)
+            }
         }
 
         @Deprecated("Used for API < 33")
@@ -395,17 +427,35 @@ class BleManager(private val context: Context) {
     // Notification helper
     // ------------------------------------------------------------------
 
-    private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic) {
-        gatt.setCharacteristicNotification(char, true)
-        val descriptor = char.getDescriptor(CCC_DESCRIPTOR_UUID) ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+    /**
+     * Returns whether the notification-enable request was successfully INITIATED — i.e.
+     * setCharacteristicNotification succeeded AND writeDescriptor's own initiation succeeded on
+     * whichever API branch runs. This does NOT mean the descriptor write completed; that is
+     * reported later, asynchronously, via [descriptorChannel] (#147).
+     */
+    private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic): Boolean {
+        val notificationSet = gatt.setCharacteristicNotification(char, true)
+        if (!notificationSet) {
+            Log.w("BleManager", "enableNotification: setCharacteristicNotification failed for ${char.uuid}")
+        }
+        val descriptor = char.getDescriptor(CCC_DESCRIPTOR_UUID)
+        if (descriptor == null) {
+            Log.w("BleManager", "enableNotification: CCC descriptor not found for ${char.uuid}")
+            return false
+        }
+        val writeInitiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
+                BluetoothGatt.GATT_SUCCESS
         } else {
             @Suppress("DEPRECATION")
             descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             @Suppress("DEPRECATION")
             gatt.writeDescriptor(descriptor)
         }
+        if (!writeInitiated) {
+            Log.w("BleManager", "enableNotification: writeDescriptor failed to initiate for ${char.uuid}")
+        }
+        return notificationSet && writeInitiated
     }
 
     // ------------------------------------------------------------------
