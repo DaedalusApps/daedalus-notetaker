@@ -201,4 +201,66 @@ class FW920ProtocolTest {
         val name = payload.toString(Charsets.US_ASCII).trimEnd(' ')
         assertEquals("Note-20260812102746", name)
     }
+
+    // --- #116: single-byte length field must never desync from the actual payload -------------
+
+    /**
+     * buildPacket() encodes the payload length as `payload.size.toByte()`. For a payload larger
+     * than 255 bytes this silently wraps (e.g. 300 -> 44), producing a packet whose declared
+     * length byte no longer matches the number of payload bytes actually written to the wire —
+     * a mid-session GATT protocol desync with no exception thrown. buildPacket must refuse to
+     * build such a packet instead of silently corrupting the length field.
+     */
+    @Test
+    fun buildPacket_payloadOver255Bytes_throwsInsteadOfCorruptingLengthByte() {
+        val oversizedPayload = ByteArray(300) { 0x41 }
+        try {
+            com.daedalus.notes.ble.buildPacket(0x0D, oversizedPayload)
+            org.junit.Assert.fail(
+                "buildPacket silently accepted a 300-byte payload; " +
+                    "the length byte cannot represent this and will desync the wire protocol"
+            )
+        } catch (e: IllegalArgumentException) {
+            // expected
+        }
+    }
+
+    /**
+     * Imported recordings keep their original extensions and are not constrained to the FW920's
+     * 14-digit naming scheme, so a filename can legitimately be much longer than 14 characters —
+     * and, unclamped, long enough to push buildDeleteFile's payload past 255 bytes. When that
+     * happens the declared length byte (read back the same way a real FW920 would: unsigned,
+     * `and 0xFF`) must equal the number of payload bytes actually sent, or the device desyncs
+     * mid-session without either side raising an error.
+     */
+    @Test
+    fun buildDeleteFile_pathologicallyLongFilename_declaredLengthMatchesActualPayload() {
+        val longName = "N".repeat(300)
+        val pkt = com.daedalus.notes.ble.buildDeleteFile(longName)
+
+        val declaredLen = pkt[4].toInt() and 0xFF
+        val actualPayloadLen = pkt.size - 5 - 2 // header(5) .. payload .. crc(2)
+
+        assertEquals(
+            "declared length byte must equal the actual payload length actually written",
+            actualPayloadLen,
+            declaredLen
+        )
+    }
+
+    /** Same invariant for downloadFile's CMD 0x0B packet construction (buildDownloadFile). */
+    @Test
+    fun buildDownloadFile_pathologicallyLongFilename_declaredLengthMatchesActualPayload() {
+        val longName = "N".repeat(300)
+        val pkt = com.daedalus.notes.ble.buildDownloadFile(longName)
+
+        val declaredLen = pkt[4].toInt() and 0xFF
+        val actualPayloadLen = pkt.size - 5 - 2
+
+        assertEquals(
+            "declared length byte must equal the actual payload length actually written",
+            actualPayloadLen,
+            declaredLen
+        )
+    }
 }
