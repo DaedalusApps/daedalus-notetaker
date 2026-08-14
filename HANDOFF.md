@@ -19,7 +19,7 @@ this whole file before starting — it is written to be the only context you nee
 - **The app's own search returns 12 for that same query, not 24 — this is correct, not a bug.**
   It is the parent/part split: 12 parent rows + 12 `_pN` part rows both match, and the UI shows
   parents. Do not re-investigate this.
-- **#119 is the only open issue.** #136, #116, #125 are all closed this session (see below).
+- **#119 and #141 are the open issues.** #136, #116, #125 are all closed this session (see below).
 
 ### Device access: release is not debuggable — read this before trying to pull the db
 
@@ -63,14 +63,15 @@ reproduced; see below.
 
 | # | Title | Note |
 |---|---|---|
-| **#119** | Root cause: why a transfer after an interrupted one comes back short | **Start here — the only open issue.** Extensively retested this session; still unexplained, and the leading hypothesis is now weaker, not stronger. Needs a fresh hardware repro asset (the old one is deleted off the FW920 — see below) |
+| **#119** | Root cause: why a transfer after an interrupted one comes back short | **Start here.** Extensively retested this session; still unexplained, and the leading hypothesis is now weaker, not stronger. Needs a fresh hardware repro asset (the old one is deleted off the FW920 — see below) |
+| **#141** | Concurrent `collectFileList()` enumerations interleave, producing a wrong device file list | Pre-existing, found incidentally on hardware this session. See below |
 
 ### #119 — still open, not reproduced, and the leading hypothesis took a hit
 
-Seven controlled transfers of the throwaway file this session: 2 clean-start, 1 after a single
-mid-transfer force-stop, and 1 after **three consecutive** mid-transfer force-stops (partials at
-12,776 / 65,024 / 73,704 bytes). **Every one of the seven returned the full 337,148 bytes,
-MD5-identical.**
+Seven transfers of the throwaway file this session: **four completed re-downloads** (2 clean-start,
+1 after a single mid-transfer force-stop, 1 after **three consecutive** mid-transfer force-stops)
+and **three deliberately interrupted transfers** (the partials at 12,776 / 65,024 / 73,704 bytes).
+**All four completed re-downloads returned the full 337,148 bytes, MD5-identical.**
 
 This matters because the previous handoff's leading hypothesis — a stale FW920 stream position
 after repeated interruptions — is exactly the scenario these seven transfers tested, and it held
@@ -93,6 +94,37 @@ new throwaway recording must be made and pushed before the next attempt.
 There is still no end-to-end integrity check on a transfer, and the device's `sizeBytes` is still
 unusable for one (wrong unit). The EOF ack remains the only completion signal, and this issue is
 exactly the case where it lied.
+
+### #106's residual, and why more captures will not close it (closed, but keep this)
+
+`recordGap`-on-unresyncable-EOF, `isBenignTrailer` and `isBoundedApeV2Footer` are exercised only by
+synthetic fixtures; #120's real captures only ever hit `recordGap` with a **non-null** resync
+position (mid-stream loss), 28 and 70 times. **An interrupted BLE transfer truncates cleanly at a
+frame boundary — it does not garble to EOF** — so capturing more interrupted transfers can never
+reach the trailing-span paths, however many you take. That needs a different failure mode. Do not
+"fix" it by adding synthetic fixtures — considered and rejected by the owner (D35). Corroborated by
+session 7: three deliberate mid-transfer interruptions produced clean truncations at 12,776 /
+65,024 / 73,704 bytes, consistent with clean frame-boundary truncation.
+
+### #141 — new, pre-existing, found incidentally on hardware this session
+
+Filed 2026-08-14, release build 356. `BleManager.collectFileList()` sends `PKT_LIST_FILES` then
+loops `awaitResponse(expectedCmd = 0x0A)` into a **local** `collected` list. It is called from five
+sites (`BleManager.kt:465, 703, 834, 858, 899`) with nothing serialising them. When two enumerations
+overlap, both loops consume the same notification stream, so entries get split between them and can
+be delivered to both.
+
+Measured on hardware: the FW920 holds **16** files. A non-overlapping pass reported 16/16 correctly.
+An overlapping pair reported **9** and **23** — the 23 collector logged 32 entry lines for 16 unique
+filenames (duplicates), the 9 collector was missing files. Consequence: last writer wins
+`_bleState.update { it.copy(files = collected) }`, so `BleState.files` can hold duplicates or omit
+real files.
+
+**Limit of what's known:** it is NOT yet verified whether this causes harm beyond the device-list
+UI — specifically whether any sync path double-processes or skips a recording. Also flag that
+`collectFileList` is used at `BleManager.kt:703` for the `stillPresent` delete-confirmation re-list,
+so a truncated list could in principle report a file deleted when it was not (the delete verified
+correctly by hand this session, so this is a concern to check, not an observed failure).
 
 ### #125 — CLOSED, verified on hardware, no code change needed
 
