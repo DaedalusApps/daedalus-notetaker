@@ -523,12 +523,12 @@ class BleManager(private val context: Context) {
     }
 
     /** Debug-only: tell the FW920 to start a live recording on its own mic (CMD 0x06). */
-    suspend fun startDeviceRecording() = withLink {
+    suspend fun startDeviceRecording(): Unit = withLink {
         Log.i("BleManager", "startDeviceRecording: ${sendAndAwait(PKT_START_RECORDING, expectedCmd = 0x06)}")
     }
 
     /** Debug-only: tell the FW920 to stop the live recording and persist the file (CMD 0x08). */
-    suspend fun stopDeviceRecording() = withLink {
+    suspend fun stopDeviceRecording(): Unit = withLink {
         Log.i("BleManager", "stopDeviceRecording: ${sendAndAwait(PKT_STOP_RECORDING, expectedCmd = 0x08)}")
     }
 
@@ -683,9 +683,8 @@ class BleManager(private val context: Context) {
     // Public suspend methods
     // ------------------------------------------------------------------
 
-    suspend fun refreshStatus() = withLink {
+    suspend fun refreshStatus(): Unit = withLink {
         sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
-        Unit
     }
 
     suspend fun deleteFile(filename: String): Boolean = withLink {
@@ -710,7 +709,15 @@ class BleManager(private val context: Context) {
         !stillPresent
     }
 
-    suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? = withLink {
+    /** Local-only stats handed out of downloadFile's [withLink] block for post-lock logging. */
+    private data class DownloadOutcome(
+        val totalBytes: Long,
+        val chunkCount: Int,
+        val chunkSizes: Map<Int, Int>,
+        val first60ChunkSizes: List<Int>
+    )
+
+    suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? {
         val context = this.context
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
 
@@ -718,85 +725,94 @@ class BleManager(private val context: Context) {
         val safeName = File(cleanName).name + ".mp3"
         val localFile = File(localDir, safeName).also { it.delete() }
 
-        var totalBytes = 0L
-        var chunkCount = 0
-        val chunkSizes = mutableMapOf<Int, Int>()
-        // Ordering the histogram loses is what makes the block structure invisible in logs; this
-        // keeps the first 60 chunk sizes in arrival order so the structure can be confirmed
-        // directly, capped so the log line stays bounded regardless of file size.
-        val first60ChunkSizes = mutableListOf<Int>()
-        val fos = FileOutputStream(localFile)
-        transferInProgress = true
+        // Only the wire transfer itself needs linkMutex — everything after fos.close() below
+        // (frame-scan re-read, log-string building, zero-byte cleanup) is pure local disk/CPU
+        // work with no responseChannel traffic, and running it inside the lock would block every
+        // other queued link consumer for as long as it takes.
+        val outcome = withLink {
+            var totalBytes = 0L
+            var chunkCount = 0
+            val chunkSizes = mutableMapOf<Int, Int>()
+            // Ordering the histogram loses is what makes the block structure invisible in logs; this
+            // keeps the first 60 chunk sizes in arrival order so the structure can be confirmed
+            // directly, capped so the log line stays bounded regardless of file size.
+            val first60ChunkSizes = mutableListOf<Int>()
+            val fos = FileOutputStream(localFile)
+            transferInProgress = true
 
-        // Protocol: send CMD 0x0B → device responds Ack(0x0B) "ready" → streams AudioChunks →
-        // signals Ack(0x0B) again when done. We treat the second Ack(0x0B) (after data) as EOF.
-        //
-        // buildDownloadFile() below can theoretically throw (buildPacket's require), and doing
-        // so here would skip the `totalBytes == 0L` cleanup further down, orphaning the 0-byte
-        // localFile just created above. That is guarded, not by ordering, but by
-        // MAX_PROTOCOL_FILENAME_CHARS + FW920Protocol.kt's init-time bound check keeping every
-        // possible payload under buildPacket's 255-byte ceiling (#116 finding 2) — so this can
-        // never actually throw. If that guarantee ever changes, this call site needs to move
-        // ahead of the file creation above.
-        try {
-            val pkt = buildDownloadFile(filename)
-            Log.i("BleManager", "downloadFile: CMD 0x0B '$cleanName'")
-            sendPacket(pkt)
+            // Protocol: send CMD 0x0B → device responds Ack(0x0B) "ready" → streams AudioChunks →
+            // signals Ack(0x0B) again when done. We treat the second Ack(0x0B) (after data) as EOF.
+            //
+            // buildDownloadFile() below can theoretically throw (buildPacket's require), and doing
+            // so here would skip the `totalBytes == 0L` cleanup further down, orphaning the 0-byte
+            // localFile just created above. That is guarded, not by ordering, but by
+            // MAX_PROTOCOL_FILENAME_CHARS + FW920Protocol.kt's init-time bound check keeping every
+            // possible payload under buildPacket's 255-byte ceiling (#116 finding 2) — so this can
+            // never actually throw. If that guarantee ever changes, this call site needs to move
+            // ahead of the file creation above.
+            try {
+                val pkt = buildDownloadFile(filename)
+                Log.i("BleManager", "downloadFile: CMD 0x0B '$cleanName'")
+                sendPacket(pkt)
 
-            var readyReceived = false
-            val timeoutMs = 10000L
-            var lastDataTime = System.currentTimeMillis()
+                var readyReceived = false
+                val timeoutMs = 10000L
+                var lastDataTime = System.currentTimeMillis()
 
-            outer@ while (System.currentTimeMillis() - lastDataTime < timeoutMs) {
-                val response = withTimeoutOrNull(2000) { responseChannel.receive() }
-                if (response == null) {
-                    Log.d("BleManager", "downloadFile: 2s idle, totalBytes=$totalBytes")
-                    continue
-                }
-
-                when (response) {
-                    is ParsedResponse.AudioChunk -> {
-                        // An empty chunk must not latch readyReceived: if it arrived between
-                        // CMD 0x0B and the ready Ack(0x0B), latching here would make that ready
-                        // ack read as the end-of-file ack below, ending the download at 0 bytes.
-                        if (response.data.isNotEmpty()) readyReceived = true
-
-                        fos.write(response.data)
-                        // The histogram these feed was previously logged from variables nothing
-                        // ever wrote to, so every transfer reported "0 chunks" and an empty map.
-                        chunkCount++
-                        chunkSizes[response.data.size] = (chunkSizes[response.data.size] ?: 0) + 1
-                        if (first60ChunkSizes.size < 60) first60ChunkSizes.add(response.data.size)
-                        totalBytes += response.data.size
-                        onProgress(totalBytes)
-                        lastDataTime = System.currentTimeMillis()
-                        if (totalBytes % (64 * 1024) < response.data.size) {
-                            Log.d("BleManager", "downloadFile: $totalBytes bytes received")
-                        }
+                outer@ while (System.currentTimeMillis() - lastDataTime < timeoutMs) {
+                    val response = withTimeoutOrNull(2000) { responseChannel.receive() }
+                    if (response == null) {
+                        Log.d("BleManager", "downloadFile: 2s idle, totalBytes=$totalBytes")
+                        continue
                     }
-                    is ParsedResponse.Ack -> {
-                        Log.i("BleManager", "downloadFile: Ack cmd=0x${response.cmd.toString(16)} totalBytes=$totalBytes readyReceived=$readyReceived")
-                        when (response.cmd) {
-                            0x07 -> break@outer
-                            0x0B -> {
-                                if (!readyReceived) {
-                                    // Initial "ready" Ack — keep waiting for data
-                                    lastDataTime = System.currentTimeMillis()
-                                } else {
-                                    // End-of-file Ack
-                                    break@outer
+
+                    when (response) {
+                        is ParsedResponse.AudioChunk -> {
+                            // An empty chunk must not latch readyReceived: if it arrived between
+                            // CMD 0x0B and the ready Ack(0x0B), latching here would make that ready
+                            // ack read as the end-of-file ack below, ending the download at 0 bytes.
+                            if (response.data.isNotEmpty()) readyReceived = true
+
+                            fos.write(response.data)
+                            // The histogram these feed was previously logged from variables nothing
+                            // ever wrote to, so every transfer reported "0 chunks" and an empty map.
+                            chunkCount++
+                            chunkSizes[response.data.size] = (chunkSizes[response.data.size] ?: 0) + 1
+                            if (first60ChunkSizes.size < 60) first60ChunkSizes.add(response.data.size)
+                            totalBytes += response.data.size
+                            onProgress(totalBytes)
+                            lastDataTime = System.currentTimeMillis()
+                            if (totalBytes % (64 * 1024) < response.data.size) {
+                                Log.d("BleManager", "downloadFile: $totalBytes bytes received")
+                            }
+                        }
+                        is ParsedResponse.Ack -> {
+                            Log.i("BleManager", "downloadFile: Ack cmd=0x${response.cmd.toString(16)} totalBytes=$totalBytes readyReceived=$readyReceived")
+                            when (response.cmd) {
+                                0x07 -> break@outer
+                                0x0B -> {
+                                    if (!readyReceived) {
+                                        // Initial "ready" Ack — keep waiting for data
+                                        lastDataTime = System.currentTimeMillis()
+                                    } else {
+                                        // End-of-file Ack
+                                        break@outer
+                                    }
                                 }
                             }
                         }
+                        else -> Log.d("BleManager", "downloadFile: unexpected=$response")
                     }
-                    else -> Log.d("BleManager", "downloadFile: unexpected=$response")
                 }
+            } finally {
+                transferInProgress = false
+                fos.close()
             }
-        } finally {
-            transferInProgress = false
-            fos.close()
+
+            DownloadOutcome(totalBytes, chunkCount, chunkSizes, first60ChunkSizes)
         }
 
+        val (totalBytes, chunkCount, chunkSizes, first60ChunkSizes) = outcome
         Log.i("BleManager", "downloadFile: done '$cleanName', totalBytes=$totalBytes")
         // A raw byte stream should be almost entirely one MTU-sized chunk repeated, with a
         // single odd-sized tail. Several distinct sizes, or a size that never matches the MTU,
@@ -828,7 +844,7 @@ class BleManager(private val context: Context) {
             val deleted = localFile.delete()
             Log.w("BleManager", "downloadFile: zero-byte transfer for '$cleanName', deleted empty file (success=$deleted)")
         }
-        if (totalBytes > 0) localFile else null
+        return if (totalBytes > 0) localFile else null
     }
 
     // Add FileOutputStream import later or here if I can
@@ -931,13 +947,12 @@ class BleManager(private val context: Context) {
      * two BleManager instances never contend on the same lock — that would over-synchronise
      * unrelated devices (e.g. during a device swap).
      *
-     * Kotlin's Mutex is NON-REENTRANT. Several guarded operations internally call collectFileList
+     * Kotlin's Mutex is NON-REENTRANT. Several guarded operations internally enumerate files
      * (deleteFile, runInitSequence, probeDeleteCmds, probeUploadCmds) — while already holding this
-     * lock via their own [withLink] call, re-entering it via collectFileList() would deadlock. So
-     * collectFileList is split: the public entry point acquires the lock and delegates to
-     * [collectFileListLocked], which callers that already hold the lock invoke directly. No
-     * guarded call site invokes another guarded (lock-acquiring) call site while already holding
-     * the lock, so this remains deadlock-free.
+     * lock via their own [withLink] call, re-acquiring it would deadlock. So callers already
+     * holding the lock invoke [collectFileListLocked] directly instead of going through
+     * [withLink] again. No guarded call site invokes another guarded (lock-acquiring) call site
+     * while already holding the lock, so this remains deadlock-free.
      */
     private val linkMutex = Mutex()
 
@@ -966,8 +981,6 @@ class BleManager(private val context: Context) {
             Log.d("BleManager", "withLink: drained $drainedCount stale residue item(s) from responseChannel")
         }
     }
-
-    private suspend fun collectFileList() = withLink { collectFileListLocked() }
 
     /** Must only be called while [linkMutex] is already held (see [withLink]). */
     private suspend fun collectFileListLocked() {
