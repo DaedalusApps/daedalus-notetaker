@@ -336,6 +336,17 @@ value. Run them as separate invocations and verify with `git log --oneline -1`.
 `ubuntu-latest` is the sole way to see Linux behaviour. `gh run rerun <id>` re-runs the *same
 commit*, which is the right tool for characterising a flake.
 
+**A commit message closed a safety-critical issue.** Merging the session-7 handoff PR (#142)
+silently closed **#119**. The commit subject was `docs: add #141, restore #106 residual note, fix #119
+transfer count` — "fix #119" meant *fix the transfer count for #119 in this document*, but GitHub
+read it as a closing keyword and closed the issue on merge. #119 is the open data-loss issue that the
+handoff, the issue itself, and the decision log all explicitly say must stay open; a commit-subject
+phrase silently overrode all three, with no warning and no failure. It was caught only because the
+open-issue list was compared against expectation after merging. **Never put `fix`/`fixes`/`fixed`/
+`close`/`closes`/`resolves` immediately before an issue number unless that merge should close it —
+use `Refs #N` when merely mentioning one. And run `gh issue list --state open` after every merge and
+compare it to the set you expect.** (#119 has been reopened.)
+
 ---
 
 ## Judgment lessons worth inheriting
