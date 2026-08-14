@@ -497,4 +497,143 @@ class BleManagerTest {
             freshNames.toSet(), files.map { it.filename }.toSet()
         )
     }
+
+    // --- #144: deleteFile's own 0x0D exchanges are unguarded --------------------------------
+
+    /**
+     * Reproduces the measured hardware bug (#144): deleteFile()'s two sendAndAwait(...,
+     * expectedCmd = 0x0D) exchanges (stage then commit) are not covered by any mutex — only its
+     * trailing collectFileList() call is. The 15s status poller's refreshStatus() can acquire
+     * fileListMutex uncontended while deleteFile is mid-exchange, and its own
+     * awaitResponse(0x05) loop drains the same shared responseChannel, silently discarding the
+     * Unknown(cmd=0x0D) commit ack meant for deleteFile. deleteFile then times out waiting for
+     * the commit ack, returns false, and the UI reports "Failed to delete" for a file the device
+     * actually deleted.
+     */
+    @Test
+    fun deleteFile_duringConcurrentRefreshStatus_commitAckIsNotStolen() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
+        val writeCount = AtomicInteger(0)
+        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writeCount.incrementAndGet()
+            true
+        }
+        setPrivateField(manager, "bluetoothGatt", gatt)
+        setPrivateField(manager, "writeChar", writeCharMock)
+
+        var deleteResult = false
+        runBlocking {
+            withTimeout(6000) {
+                val jobDelete = async(Dispatchers.Default) { manager.deleteFile("REC01") }
+                // Wait for deleteFile's first write (the stage 0x0D request).
+                while (writeCount.get() < 1) delay(5)
+
+                // Simulate the 15s status poller firing while deleteFile is still mid-exchange —
+                // nothing before the fix stops refreshStatus()'s own awaitResponse(0x05) loop
+                // from also draining responseChannel concurrently.
+                val jobRefresh = async(Dispatchers.Default) { manager.refreshStatus() }
+                // Give both coroutines time to actually park on responseChannel.receive() before
+                // any entries are sent, so the FIFO round-robin theft can actually manifest.
+                delay(100)
+
+                responseChannel().trySend(ParsedResponse.Unknown(0x0D, byteArrayOf(0)))  // stage ack
+                while (writeCount.get() < 2 && !jobDelete.isCompleted) delay(5)
+                delay(100)
+                responseChannel().trySend(ParsedResponse.Unknown(0x0D, byteArrayOf(1)))  // commit ack
+
+                // If the commit ack was consumed correctly, deleteFile proceeds to its
+                // post-delete enumeration (a third write). If it was instead stolen, deleteFile
+                // bails out early without enumerating — wait for whichever happens first.
+                while (writeCount.get() < 3 && !jobDelete.isCompleted) delay(5)
+                if (writeCount.get() >= 3) {
+                    listOf("REC02", "REC03").forEach { name ->
+                        responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+                    }
+                    responseChannel().trySend(ParsedResponse.FileList(null))
+                }
+
+                // Let refreshStatus complete too, so it doesn't leak into a later test.
+                responseChannel().trySend(
+                    ParsedResponse.Status(
+                        cmd = 0x05,
+                        status = DeviceStatus(50, 1000L, 2000L, false, "fw")
+                    )
+                )
+
+                deleteResult = jobDelete.await()
+                jobRefresh.await()
+            }
+        }
+
+        assertTrue(
+            "deleteFile's commit ack must not be stolen by a concurrent refreshStatus() (#144)",
+            deleteResult
+        )
+    }
+
+    // --- #144: downloadFile's audio stream is unguarded --------------------------------------
+
+    /**
+     * Reproduces the measured hardware bug (#144): downloadFile() reads responseChannel.receive()
+     * directly with no serialisation. A concurrent collectFileList() (via listFiles()) — whose
+     * awaitResponse(0x0A) discards any AudioChunk it happens to receive — can steal chunks meant
+     * for an in-flight download, silently corrupting the downloaded file while it still reports
+     * success.
+     */
+    @Test
+    fun downloadFile_duringConcurrentListFiles_audioChunksAreNotStolen() {
+        val tempDir = java.nio.file.Files.createTempDirectory("ble_manager_test2").toFile()
+        every { context.getExternalFilesDir(null) } returns tempDir
+
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
+        val writeCount = AtomicInteger(0)
+        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writeCount.incrementAndGet()
+            true
+        }
+        setPrivateField(manager, "bluetoothGatt", gatt)
+        setPrivateField(manager, "writeChar", writeCharMock)
+
+        val chunks = (0 until 20).map { i -> ByteArray(10) { ((i * 10) + it).toByte() } }
+        val expectedBytes = chunks.reduce { acc, c -> acc + c }
+
+        var resultFile: File? = null
+        runBlocking {
+            // Generous: on unfixed code downloadFile can legitimately run out its real 10s idle
+            // timeout before giving up, since its own internal timeout is real wall-clock.
+            withTimeout(15000) {
+                val jobDownload = async(Dispatchers.Default) { manager.downloadFile("REC01") {} }
+                // Wait for downloadFile's CMD 0x0B write.
+                while (writeCount.get() < 1) delay(5)
+
+                val jobList = async(Dispatchers.Default) { manager.listFiles() }
+                // Give both coroutines time to actually park on responseChannel.receive().
+                delay(100)
+
+                responseChannel().trySend(ParsedResponse.Ack(0x0B))  // ready
+                chunks.forEach { c -> responseChannel().trySend(ParsedResponse.AudioChunk(c)) }
+                responseChannel().trySend(ParsedResponse.Ack(0x0B))  // EOF
+
+                while (writeCount.get() < 2 && !jobList.isCompleted) delay(5)
+                if (writeCount.get() >= 2) {
+                    responseChannel().trySend(ParsedResponse.FileList(FileEntry("REC02", 1024L)))
+                    responseChannel().trySend(ParsedResponse.FileList(null))
+                }
+
+                resultFile = jobDownload.await()
+                jobList.await()
+            }
+        }
+
+        assertTrue("downloadFile should have produced a file", resultFile != null)
+        val actualBytes = resultFile!!.readBytes()
+        assertEquals(
+            "downloaded file content must exactly match the concatenation of all audio chunks " +
+                "— a concurrent listFiles() must not steal any AudioChunk (#144)",
+            expectedBytes.size, actualBytes.size
+        )
+        assertTrue(expectedBytes.contentEquals(actualBytes))
+    }
 }
