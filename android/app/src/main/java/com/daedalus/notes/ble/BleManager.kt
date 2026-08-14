@@ -87,7 +87,15 @@ class BleManager(private val context: Context) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // @Volatile: onConnectionStateChange fires on a Binder callback thread while connect()/
+    // disconnect() run on the caller's thread — without a visibility guarantee, a stale read of
+    // bluetoothGatt in the stale-callback branch could destructively tear down a live connection
+    // instead of a superseded one. The two are otherwise unsynchronized by design: a benign race
+    // remains where a callback observes a slightly-stale value and reports on a connection
+    // that's about to be superseded anyway — worst case a transient stale errorMessage.
+    @Volatile
     private var bluetoothGatt: BluetoothGatt? = null
+    @Volatile
     private var writeChar: BluetoothGattCharacteristic? = null
     private var leScanner: BluetoothLeScanner? = null
     private var pollJob: Job? = null
@@ -215,11 +223,18 @@ class BleManager(private val context: Context) {
         stopPoller()
         initJob?.cancel()
         initJob = null
-        bluetoothGatt?.disconnect()
-        bluetoothGatt?.close()
-        bluetoothGatt = null
-        writeChar     = null
+        bluetoothGatt?.let { gatt ->
+            gatt.disconnect()
+            closeAndClearGatt(gatt)
+        }
         _bleState.update { it.copy(connectionState = ConnectionState.DISCONNECTED) }
+    }
+
+    /** Closes [gatt] and clears the current-connection fields it owns. */
+    private fun closeAndClearGatt(gatt: BluetoothGatt) {
+        gatt.close()
+        bluetoothGatt = null
+        writeChar = null
     }
 
     // ------------------------------------------------------------------
@@ -232,18 +247,41 @@ class BleManager(private val context: Context) {
             if (gatt != bluetoothGatt) {
                 // Stale callback from a connection superseded by a newer connect()/disconnect()
                 // (e.g. a device swap) — release its resources but don't touch current state.
-                if (newState == BluetoothProfile.STATE_DISCONNECTED) gatt.close()
+                when (newState) {
+                    BluetoothProfile.STATE_DISCONNECTED -> gatt.close()
+                    BluetoothProfile.STATE_CONNECTED -> {
+                        Log.w("BleManager", "Superseded connection reported STATE_CONNECTED — tearing it down")
+                        gatt.disconnect()
+                        gatt.close()
+                    }
+                }
                 return
             }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    gatt.requestMtu(512)
+                    // #151 (closed as unsubstantiated, folded in here): only request the MTU on a
+                    // genuinely successful connect — some OEM/version combos can report
+                    // STATE_CONNECTED with a failure status. On failure, follow the file's
+                    // onScanFailed precedent: go DISCONNECTED (not ERROR) so the auto-connect
+                    // LaunchedEffect can retry cleanly, with an errorMessage naming the status
+                    // for diagnosability. (The follow-up STATE_DISCONNECTED callback for this
+                    // now-nulled gatt will land in the stale branch above as a no-op.)
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        gatt.requestMtu(512)
+                    } else {
+                        Log.w("BleManager", "Connect failed with status $status — going DISCONNECTED for auto-retry")
+                        closeAndClearGatt(gatt)
+                        _bleState.update {
+                            it.copy(
+                                connectionState = ConnectionState.DISCONNECTED,
+                                errorMessage    = "Connect failed: $status"
+                            )
+                        }
+                    }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     stopPoller()
-                    writeChar = null
-                    gatt.close()
-                    bluetoothGatt = null
+                    closeAndClearGatt(gatt)
                     _bleState.update {
                         it.copy(connectionState = ConnectionState.DISCONNECTED)
                     }
@@ -252,7 +290,20 @@ class BleManager(private val context: Context) {
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (gatt != bluetoothGatt) {
+                // #155: a late callback from a connection superseded by a newer connect()/
+                // disconnect() — tear down the stale gatt itself, never touch current state
+                // (same semantics as the stale STATE_CONNECTED branch above).
+                Log.w("BleManager", "Superseded connection reported onServicesDiscovered — tearing it down")
+                gatt.disconnect()
+                gatt.close()
+                return
+            }
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                // Close the gatt here too — otherwise every Scan retry from this ERROR state
+                // leaks a GATT client (#148/#151 review). ERROR (not DISCONNECTED) is kept:
+                // discovery failure staying user-visible as an error is existing behaviour.
+                closeAndClearGatt(gatt)
                 _bleState.update {
                     it.copy(
                         connectionState = ConnectionState.ERROR,
@@ -264,6 +315,7 @@ class BleManager(private val context: Context) {
 
             val service = gatt.getService(UUID.fromString(SERVICE_UUID))
             if (service == null) {
+                closeAndClearGatt(gatt)
                 _bleState.update {
                     it.copy(
                         connectionState = ConnectionState.ERROR,
@@ -295,6 +347,14 @@ class BleManager(private val context: Context) {
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (gatt != bluetoothGatt) {
+                // #155: same staleness guard as onServicesDiscovered/onConnectionStateChange —
+                // tear down the stale gatt itself, never touch current state.
+                Log.w("BleManager", "Superseded connection reported onMtuChanged — tearing it down")
+                gatt.disconnect()
+                gatt.close()
+                return
+            }
             Log.i("BleManager", "MTU changed to $mtu (status=$status)")
             // A failed negotiation can still report a candidate mtu; keep the last-known-good
             // value instead so the BleAudit log line doesn't report a bogus mtu.
