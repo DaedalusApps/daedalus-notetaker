@@ -1460,7 +1460,7 @@ class RecordingViewModelTest {
         every { application.getSystemService(android.os.storage.StorageManager::class.java) } returns storageManager
         every { storageManager.storageVolumes } returns emptyList()
         every { application.getExternalFilesDir(null) } returns
-            java.nio.file.Files.createTempDirectory("d136_fullautosync").toFile()
+            java.nio.file.Files.createTempDirectory("d136_fullautosync").toFile().also { it.deleteOnExit() }
 
         val vm = RecordingViewModel(
             application = application, db = db, repo = repo, llm = llm,
@@ -1479,7 +1479,7 @@ class RecordingViewModelTest {
     fun syncFiles_processesUris_routesOnInjectedIoDispatcher() = runTest {
         val counting = DispatchCountingDispatcher(testDispatcher)
         every { application.getExternalFilesDir(null) } returns
-            java.nio.file.Files.createTempDirectory("d136_syncfiles").toFile()
+            java.nio.file.Files.createTempDirectory("d136_syncfiles").toFile().also { it.deleteOnExit() }
 
         val vm = RecordingViewModel(
             application = application, db = db, repo = repo, llm = llm,
