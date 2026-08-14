@@ -282,4 +282,118 @@ class BleManagerTest {
             files.map { it.filename }.distinct().size, files.size
         )
     }
+
+    // --- #141 finding 1: a concurrent status poll must not steal enumeration entries ---------
+
+    /**
+     * Reproduces the measured hardware bug: startPoller() fires refreshStatus() every 15s in
+     * its own coroutine, guarded only by transferInProgress (which downloadFile sets but
+     * collectFileList never does). refreshStatus()'s own awaitResponse(0x05) loop drains the
+     * SAME shared responseChannel as an in-flight collectFileList(), and kotlinx.coroutines
+     * Channel delivers to waiting receivers in strict FIFO-of-suspension order, so once both
+     * coroutines are parked on responseChannel.receive() the channel round-robins entries
+     * between them: refreshStatus() silently discards every FileList entry it happens to
+     * receive (its expectedCmd is 0x05, not 0x0A), permanently losing roughly half of the
+     * enumeration's entries. This models startPoller's own call pattern (an independent
+     * scope.launch invoking refreshStatus() while collectFileList() is mid-enumeration), not a
+     * synthetic scenario.
+     */
+    @Test
+    fun refreshStatus_duringActiveEnumeration_stealsFileListEntries() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
+        val writeCount = AtomicInteger(0)
+        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writeCount.incrementAndGet()
+            true
+        }
+        setPrivateField(manager, "bluetoothGatt", gatt)
+        setPrivateField(manager, "writeChar", writeCharMock)
+
+        val expectedNames = (1..16).map { "REC%02d".format(it) }
+
+        runBlocking {
+            withTimeout(8000) {
+                val jobA = async(Dispatchers.Default) { manager.listFiles() }
+                while (writeCount.get() < 1) delay(5)
+
+                // Simulate the 15s status poller firing while the enumeration above is still
+                // in flight — nothing before the fix stops refreshStatus()'s own
+                // awaitResponse(0x05) loop from also draining responseChannel concurrently.
+                val jobB = async(Dispatchers.Default) { manager.refreshStatus() }
+                // Give both coroutines time to actually park on responseChannel.receive()
+                // before any entries are sent, so the FIFO round-robin described above can
+                // actually manifest.
+                delay(100)
+
+                expectedNames.forEach { name ->
+                    responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+                }
+                responseChannel().trySend(ParsedResponse.FileList(null))
+
+                jobA.await()
+                jobB.await()
+            }
+        }
+
+        val files = manager.bleState.value.files
+        assertEquals(
+            "a concurrent refreshStatus() call (modelling the 15s poller) stole file entries " +
+                "meant for the in-flight enumeration (#141 finding 1)",
+            expectedNames.toSet(), files.map { it.filename }.toSet()
+        )
+    }
+
+    // --- #141 finding 2: residue from a timed-out enumeration pollutes the NEXT one ----------
+
+    /**
+     * Reproduces the measured hardware bug: collectFileList() exits on either the end-of-list
+     * sentinel OR a 3s per-item idle timeout. responseChannel is unlimited capacity and nothing
+     * drains it between calls, so a call that times out early leaves the device's remaining
+     * entries — plus the end-of-list sentinel that eventually arrives — sitting in the channel.
+     * The NEXT collectFileList() call (e.g. deleteFile's post-delete confirmation) then drains
+     * that stale residue as if it were its own fresh response, instead of the real response to
+     * the request it just sent.
+     */
+    @Test
+    fun collectFileList_residueFromTimedOutPriorCall_pollutesTheNextCall() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
+        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } returns true
+        setPrivateField(manager, "bluetoothGatt", gatt)
+        setPrivateField(manager, "writeChar", writeCharMock)
+
+        // First enumeration: the device answers only 9 of 16 entries before going quiet. The
+        // 3s per-item idle timeout fires and collectFileList() gives up with a partial list.
+        val timedOutNames = (1..9).map { "REC%02d".format(it) }
+        timedOutNames.forEach { name ->
+            responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+        }
+        runBlocking { manager.listFiles() }
+        assertEquals(9, manager.bleState.value.files.size)
+
+        // The straggler entries + end-of-list sentinel from the FIRST call arrive late and now
+        // sit in responseChannel as residue, exactly as #141 finding 2 describes.
+        val strayNames = (10..16).map { "REC%02d".format(it) }
+        strayNames.forEach { name ->
+            responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+        }
+        responseChannel().trySend(ParsedResponse.FileList(null))
+
+        // The fresh response to the SECOND call's own CMD 0x0A request.
+        val freshNames = (1..5).map { "NEW%02d".format(it) }
+        freshNames.forEach { name ->
+            responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+        }
+        responseChannel().trySend(ParsedResponse.FileList(null))
+
+        runBlocking { manager.listFiles() }
+
+        val files = manager.bleState.value.files
+        assertEquals(
+            "the second collectFileList() call consumed stale residue from the first, timed-" +
+                "out call instead of its own fresh response (#141 finding 2)",
+            freshNames.toSet(), files.map { it.filename }.toSet()
+        )
+    }
 }
