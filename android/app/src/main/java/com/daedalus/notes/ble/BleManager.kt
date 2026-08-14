@@ -710,7 +710,6 @@ class BleManager(private val context: Context) {
     suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? {
         val context = this.context
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
-        val nameBytes = cleanName.padEnd(14, ' ').toByteArray(Charsets.US_ASCII)
 
         val localDir = File(context.getExternalFilesDir(null), "Recordings").also { it.mkdirs() }
         val safeName = File(cleanName).name + ".mp3"
@@ -728,8 +727,16 @@ class BleManager(private val context: Context) {
 
         // Protocol: send CMD 0x0B → device responds Ack(0x0B) "ready" → streams AudioChunks →
         // signals Ack(0x0B) again when done. We treat the second Ack(0x0B) (after data) as EOF.
+        //
+        // buildDownloadFile() below can theoretically throw (buildPacket's require), and doing
+        // so here would skip the `totalBytes == 0L` cleanup further down, orphaning the 0-byte
+        // localFile just created above. That is guarded, not by ordering, but by
+        // MAX_PROTOCOL_FILENAME_CHARS + FW920Protocol.kt's init-time bound check keeping every
+        // possible payload under buildPacket's 255-byte ceiling (#116 finding 2) — so this can
+        // never actually throw. If that guarantee ever changes, this call site needs to move
+        // ahead of the file creation above.
         try {
-            val pkt = buildPacket(0x0B, nameBytes + byteArrayOf(0x00, 0x00, 0x00, 0x00))
+            val pkt = buildDownloadFile(filename)
             Log.i("BleManager", "downloadFile: CMD 0x0B '$cleanName'")
             sendPacket(pkt)
 
@@ -832,7 +839,11 @@ class BleManager(private val context: Context) {
     /** Probes CMD range 0x0D–0x17 with a filename payload to find the real delete command. */
     suspend fun probeDeleteCmds(filename: String) {
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
-        val nameBytes = cleanName.padEnd(14, ' ').toByteArray(Charsets.US_ASCII)
+        // Clamped like buildDeleteFile/buildDownloadFile (#116 finding 3): unclamped, a
+        // pathologically long filename here would blow past buildPacket's 255-byte payload
+        // ceiling and throw out of this suspend fun instead of silently corrupting the wire
+        // protocol like the other two builders used to.
+        val nameBytes = cleanName.take(MAX_PROTOCOL_FILENAME_CHARS).padEnd(14, ' ').toByteArray(Charsets.US_ASCII)
         val skipKnown = setOf(0x0F)  // 0x0F is the periodic status update, skip it
 
         for (cmd in 0x0D..0x17) {

@@ -201,4 +201,124 @@ class FW920ProtocolTest {
         val name = payload.toString(Charsets.US_ASCII).trimEnd(' ')
         assertEquals("Note-20260812102746", name)
     }
+
+    // --- #116: single-byte length field must never desync from the actual payload -------------
+
+    /**
+     * buildPacket() encodes the payload length as `payload.size.toByte()`. For a payload larger
+     * than 255 bytes this silently wraps (e.g. 300 -> 44), producing a packet whose declared
+     * length byte no longer matches the number of payload bytes actually written to the wire —
+     * a mid-session GATT protocol desync with no exception thrown. buildPacket must refuse to
+     * build such a packet instead of silently corrupting the length field.
+     */
+    @Test
+    fun buildPacket_payloadOver255Bytes_throwsInsteadOfCorruptingLengthByte() {
+        val oversizedPayload = ByteArray(300) { 0x41 }
+        try {
+            com.daedalus.notes.ble.buildPacket(0x0D, oversizedPayload)
+            org.junit.Assert.fail(
+                "buildPacket silently accepted a 300-byte payload; " +
+                    "the length byte cannot represent this and will desync the wire protocol"
+            )
+        } catch (e: IllegalArgumentException) {
+            // expected
+        }
+    }
+
+    /**
+     * Imported recordings keep their original extensions and are not constrained to the FW920's
+     * 14-digit naming scheme, so a filename can legitimately be much longer than 14 characters —
+     * and, unclamped, long enough to push buildDeleteFile's payload past 255 bytes. When that
+     * happens the declared length byte (read back the same way a real FW920 would: unsigned,
+     * `and 0xFF`) must equal the number of payload bytes actually sent, or the device desyncs
+     * mid-session without either side raising an error.
+     */
+    @Test
+    fun buildDeleteFile_pathologicallyLongFilename_declaredLengthMatchesActualPayload() {
+        val longName = "N".repeat(300)
+        val pkt = com.daedalus.notes.ble.buildDeleteFile(longName)
+
+        val declaredLen = pkt[4].toInt() and 0xFF
+        val actualPayloadLen = pkt.size - 5 - 2 // header(5) .. payload .. crc(2)
+
+        assertEquals(
+            "declared length byte must equal the actual payload length actually written",
+            actualPayloadLen,
+            declaredLen
+        )
+    }
+
+    /** Same invariant for downloadFile's CMD 0x0B packet construction (buildDownloadFile). */
+    @Test
+    fun buildDownloadFile_pathologicallyLongFilename_declaredLengthMatchesActualPayload() {
+        val longName = "N".repeat(300)
+        val pkt = com.daedalus.notes.ble.buildDownloadFile(longName)
+
+        val declaredLen = pkt[4].toInt() and 0xFF
+        val actualPayloadLen = pkt.size - 5 - 2
+
+        assertEquals(
+            "declared length byte must equal the actual payload length actually written",
+            actualPayloadLen,
+            declaredLen
+        )
+    }
+
+    // --- #116 finding 1: pin buildDownloadFile's actual payload, not just buildPacket's -------
+    // arithmetic. Mirrors buildDeleteFile_longerFilename_notTruncated above but checks every
+    // field buildDownloadFile itself is responsible for: opcode, no truncation, space padding,
+    // the 4 trailing zero bytes, and .mp3-suffix stripping.
+
+    /** buildDownloadFile preserves full filename for names longer than 14 chars (no truncation). */
+    @Test
+    fun buildDownloadFile_longerFilename_notTruncated() {
+        val pkt = com.daedalus.notes.ble.buildDownloadFile("Note-20260812102746")
+        val len = pkt[4].toInt() and 0xFF
+        val payload = pkt.copyOfRange(5, 5 + len)
+        val name = payload.copyOfRange(0, payload.size - 4).toString(Charsets.US_ASCII).trimEnd(' ')
+        assertEquals("Note-20260812102746", name)
+    }
+
+    /** buildDownloadFile uses opcode 0x0B. */
+    @Test
+    fun buildDownloadFile_usesOpcode0x0B() {
+        val pkt = com.daedalus.notes.ble.buildDownloadFile("20260812102746")
+        assertEquals(0x0B, pkt[3].toInt() and 0xFF)
+    }
+
+    /** buildDownloadFile's payload ends with 4 trailing zero bytes after the filename field. */
+    @Test
+    fun buildDownloadFile_appendsFourTrailingZeroBytes() {
+        val pkt = com.daedalus.notes.ble.buildDownloadFile("20260812102746")
+        val len = pkt[4].toInt() and 0xFF
+        val payload = pkt.copyOfRange(5, 5 + len)
+        val trailing = payload.copyOfRange(payload.size - 4, payload.size)
+        assertEquals(listOf<Byte>(0, 0, 0, 0), trailing.toList())
+    }
+
+    /** buildDownloadFile pads short filenames to 14 chars with ASCII spaces, not NUL. */
+    @Test
+    fun buildDownloadFile_padsShortFilenameWithSpaces() {
+        val pkt = com.daedalus.notes.ble.buildDownloadFile("AB")
+        val len = pkt[4].toInt() and 0xFF
+        val payload = pkt.copyOfRange(5, 5 + len)
+        // name field = payload minus the 4 trailing zero bytes = 14-byte padded "AB"
+        val nameField = payload.copyOfRange(0, payload.size - 4)
+        assertEquals(14, nameField.size)
+        val expected = "AB".padEnd(14, ' ').toByteArray(Charsets.US_ASCII)
+        assertEquals(expected.toList(), nameField.toList())
+    }
+
+    /** buildDownloadFile strips a trailing ".mp3" suffix before building the payload. */
+    @Test
+    fun buildDownloadFile_stripsMp3Suffix() {
+        val withSuffix = com.daedalus.notes.ble.buildDownloadFile("20260812102746.mp3")
+        val withoutSuffix = com.daedalus.notes.ble.buildDownloadFile("20260812102746")
+        assertTrue(withSuffix.contentEquals(withoutSuffix))
+
+        val len = withSuffix[4].toInt() and 0xFF
+        val payload = withSuffix.copyOfRange(5, 5 + len)
+        val name = payload.copyOfRange(0, payload.size - 4).toString(Charsets.US_ASCII).trimEnd(' ')
+        assertEquals("20260812102746", name)
+    }
 }
