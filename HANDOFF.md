@@ -7,7 +7,13 @@ this whole file before starting — it is written to be the only context you nee
 
 ## Current state
 
-- **`main`** = `354b650` (merge of #140), clean working tree, in sync with `origin/main`.
+- **`main`** = `354b650` (merge of #140), clean working tree, in sync with `origin/main`, and
+  **green on CI** (verified).
+- **`.\gradlew :app:testDebugUnitTest` → 486 tests / 0 failures / 1 skipped.** The single skip is
+  `Mp3FrameScanTest.realFileCrossCheck` and it is **by design** — a skip there is correct; a *pass*
+  would mean something regressed.
+- **`:app:assembleRelease` builds clean** at versionCode **356**, which is what is installed on the
+  phone.
 - **Phone** (Galaxy S26 Ultra) is on the **release** build, **versionCode 356**, `versionCode =
   gitCommitCount` (`app/build.gradle.kts:41`), installed with `adb install -r`. Non-debuggable,
   launches clean, BLE connected.
@@ -68,18 +74,21 @@ reproduced; see below.
 
 ### #119 — still open, not reproduced, and the leading hypothesis took a hit
 
-Seven transfers of the throwaway file this session: **four completed re-downloads** (2 clean-start,
-1 after a single mid-transfer force-stop, 1 after **three consecutive** mid-transfer force-stops)
-and **three deliberately interrupted transfers** (the partials at 12,776 / 65,024 / 73,704 bytes).
-**All four completed re-downloads returned the full 337,148 bytes, MD5-identical.**
+Eight transfers of the throwaway file this session, in order: a clean-start re-download (completed);
+a second clean-start re-download (completed); a re-download deliberately interrupted mid-transfer
+by `am force-stop` (119,272-byte partial, full 337,148 preserved in `.bak`); a re-download from
+that dirty state (completed); three further re-downloads each deliberately interrupted mid-transfer
+(partials at 12,776 / 65,024 / 73,704 bytes); and a final re-download after those three consecutive
+interruptions (completed). **All four completed re-downloads returned the full 337,148 bytes,
+MD5-identical (`a0e25951817b9161008bd0a8b9aae194`).**
 
 This matters because the previous handoff's leading hypothesis — a stale FW920 stream position
-after repeated interruptions — is exactly the scenario these seven transfers tested, and it held
+after repeated interruptions — is exactly the scenario these eight transfers tested, and it held
 up fine every time. That explanation is now **weaker**, not stronger. **Do not close #119** —
 failure to reproduce is not proof of absence, and one anomalous 217,412-byte transfer was seen and
 confirmed on hardware in session 6.
 
-Useful side-confirmations from the same seven runs, not causes:
+Useful side-confirmations from the same eight runs, not causes:
 - The interruptions independently confirmed #123's backup/restore works correctly on hardware:
   partial file + full `.bak` restores to byte-identical.
 - A `Status(cmd=15,…)` packet was seen arriving mid-transfer and logged as `unexpected=` and
@@ -103,8 +112,8 @@ position (mid-stream loss), 28 and 70 times. **An interrupted BLE transfer trunc
 frame boundary — it does not garble to EOF** — so capturing more interrupted transfers can never
 reach the trailing-span paths, however many you take. That needs a different failure mode. Do not
 "fix" it by adding synthetic fixtures — considered and rejected by the owner (D35). Corroborated by
-session 7: three deliberate mid-transfer interruptions produced clean truncations at 12,776 /
-65,024 / 73,704 bytes, consistent with clean frame-boundary truncation.
+session 7: four deliberate mid-transfer interruptions produced clean truncations at 119,272 /
+12,776 / 65,024 / 73,704 bytes, consistent with clean frame-boundary truncation.
 
 ### #141 — new, pre-existing, found incidentally on hardware this session
 
