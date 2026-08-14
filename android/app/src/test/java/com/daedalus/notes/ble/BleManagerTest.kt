@@ -96,6 +96,7 @@ class BleManagerTest {
     @Test
     fun onMtuChanged_success_storesTheNegotiatedMtu() {
         val gatt = mockk<BluetoothGatt>(relaxed = true)
+        setPrivateField(manager, "bluetoothGatt", gatt)
         gattCallback.onMtuChanged(gatt, 247, BluetoothGatt.GATT_SUCCESS)
         assertEquals(247, negotiatedMtu())
     }
@@ -103,6 +104,7 @@ class BleManagerTest {
     @Test
     fun onMtuChanged_failureStatus_leavesTheExistingMtuUntouched() {
         val gatt = mockk<BluetoothGatt>(relaxed = true)
+        setPrivateField(manager, "bluetoothGatt", gatt)
         val before = negotiatedMtu()
         gattCallback.onMtuChanged(gatt, 512, /* status = */ 133)
         assertEquals(before, negotiatedMtu())
@@ -148,6 +150,41 @@ class BleManagerTest {
         assertNull(privateField(manager, "bluetoothGatt"))
         assertEquals(ConnectionState.DISCONNECTED, manager.bleState.value.connectionState)
         assertTrue(manager.bleState.value.errorMessage.contains("133"))
+    }
+
+    // --- #155: a stale (superseded) onServicesDiscovered must not clobber the current -----------
+    // --- connection's state — tear down the stale gatt itself only, same as the sibling ---------
+    // --- staleness guard in onConnectionStateChange. ---------------------------------------------
+
+    @Test
+    fun onServicesDiscovered_staleGattReportsFailure_doesNotClobberCurrentConnection() {
+        val currentGatt = mockk<BluetoothGatt>(relaxed = true)
+        setPrivateField(manager, "bluetoothGatt", currentGatt)
+        val stateBefore = manager.bleState.value.connectionState
+
+        val staleGatt = mockk<BluetoothGatt>(relaxed = true)
+        gattCallback.onServicesDiscovered(staleGatt, /* status = */ 133)
+
+        assertEquals(currentGatt, privateField(manager, "bluetoothGatt"))
+        verify(exactly = 0) { currentGatt.disconnect() }
+        verify(exactly = 0) { currentGatt.close() }
+        verify { staleGatt.close() }
+        assertEquals(stateBefore, manager.bleState.value.connectionState)
+    }
+
+    // --- #155: same staleness guard applies to onMtuChanged — a stale gatt must not trigger ------
+    // --- discoverServices() against the current connection. --------------------------------------
+
+    @Test
+    fun onMtuChanged_staleGatt_doesNotDiscoverServicesOnIt() {
+        val currentGatt = mockk<BluetoothGatt>(relaxed = true)
+        setPrivateField(manager, "bluetoothGatt", currentGatt)
+
+        val staleGatt = mockk<BluetoothGatt>(relaxed = true)
+        gattCallback.onMtuChanged(staleGatt, 247, BluetoothGatt.GATT_SUCCESS)
+
+        verify(exactly = 0) { staleGatt.discoverServices() }
+        verify(exactly = 0) { currentGatt.discoverServices() }
     }
 
     // --- #96: handleIncoming's characteristic-UUID -> isAudioChannel routing -----------------

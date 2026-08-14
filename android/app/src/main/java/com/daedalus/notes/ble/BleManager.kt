@@ -290,6 +290,15 @@ class BleManager(private val context: Context) {
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (gatt != bluetoothGatt) {
+                // #155: a late callback from a connection superseded by a newer connect()/
+                // disconnect() — tear down the stale gatt itself, never touch current state
+                // (same semantics as the stale STATE_CONNECTED branch above).
+                Log.w("BleManager", "Superseded connection reported onServicesDiscovered — tearing it down")
+                gatt.disconnect()
+                gatt.close()
+                return
+            }
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 // Close the gatt here too — otherwise every Scan retry from this ERROR state
                 // leaks a GATT client (#148/#151 review). ERROR (not DISCONNECTED) is kept:
@@ -338,6 +347,14 @@ class BleManager(private val context: Context) {
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (gatt != bluetoothGatt) {
+                // #155: same staleness guard as onServicesDiscovered/onConnectionStateChange —
+                // tear down the stale gatt itself, never touch current state.
+                Log.w("BleManager", "Superseded connection reported onMtuChanged — tearing it down")
+                gatt.disconnect()
+                gatt.close()
+                return
+            }
             Log.i("BleManager", "MTU changed to $mtu (status=$status)")
             // A failed negotiation can still report a candidate mtu; keep the last-known-good
             // value instead so the BleAudit log line doesn't report a bogus mtu.
