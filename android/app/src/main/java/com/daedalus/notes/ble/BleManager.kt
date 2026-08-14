@@ -436,7 +436,7 @@ class BleManager(private val context: Context) {
     // Init sequence
     // ------------------------------------------------------------------
 
-    private suspend fun runInitSequence() {
+    private suspend fun runInitSequence() = withLink {
         Log.i("BleManager", "runInitSequence: start")
 
         // 1. CMD 0x02 — get firmware version
@@ -464,7 +464,7 @@ class BleManager(private val context: Context) {
             .also { Log.d("BleManager", "CMD 0x18: ${if (it != null) "ok" else "timeout"}") }
 
         // 7. CMD 0x0A — list files
-        collectFileList()
+        collectFileListLocked()
 
         // Only mark CONNECTED if the physical link is still up
         if (bluetoothGatt != null) {
@@ -523,12 +523,12 @@ class BleManager(private val context: Context) {
     }
 
     /** Debug-only: tell the FW920 to start a live recording on its own mic (CMD 0x06). */
-    suspend fun startDeviceRecording() {
+    suspend fun startDeviceRecording() = withLink {
         Log.i("BleManager", "startDeviceRecording: ${sendAndAwait(PKT_START_RECORDING, expectedCmd = 0x06)}")
     }
 
     /** Debug-only: tell the FW920 to stop the live recording and persist the file (CMD 0x08). */
-    suspend fun stopDeviceRecording() {
+    suspend fun stopDeviceRecording() = withLink {
         Log.i("BleManager", "stopDeviceRecording: ${sendAndAwait(PKT_STOP_RECORDING, expectedCmd = 0x08)}")
     }
 
@@ -536,8 +536,8 @@ class BleManager(private val context: Context) {
     // Unknown service probe
     // ------------------------------------------------------------------
 
-    suspend fun runServiceProbe() {
-        val gatt = bluetoothGatt ?: run { Log.e("FW920_PROBE", "Not connected"); return }
+    suspend fun runServiceProbe() = withLink {
+        val gatt = bluetoothGatt ?: run { Log.e("FW920_PROBE", "Not connected"); return@withLink }
 
         // The three unknown services and their write/notify UUIDs
         val targets = listOf(
@@ -636,10 +636,10 @@ class BleManager(private val context: Context) {
     // Diagnostic probe — triggered via ADB broadcast
     // ------------------------------------------------------------------
 
-    suspend fun runProbe() {
+    suspend fun runProbe() = withLink {
         val gatt = bluetoothGatt ?: run {
             Log.e("FW920_PROBE", "Not connected — connect first")
-            return
+            return@withLink
         }
 
         Log.i("FW920_PROBE", "=== GATT SERVICE INVENTORY ===")
@@ -683,13 +683,12 @@ class BleManager(private val context: Context) {
     // Public suspend methods
     // ------------------------------------------------------------------
 
-    suspend fun refreshStatus() {
-        fileListMutex.withLock {
-            sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
-        }
+    suspend fun refreshStatus() = withLink {
+        sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
+        Unit
     }
 
-    suspend fun deleteFile(filename: String): Boolean {
+    suspend fun deleteFile(filename: String): Boolean = withLink {
         Log.i("BleManager", "deleteFile: '$filename'")
         // Two-phase delete: first 0x0D stages (payload=[0]), second 0x0D commits (payload=[1])
         val stage = sendAndAwait(buildDeleteFile(filename), expectedCmd = 0x0D)
@@ -702,16 +701,16 @@ class BleManager(private val context: Context) {
         if (!deleted) {
             Log.w("BleManager", "deleteFile: commit failed, payload=${
                 (commit as? ParsedResponse.Unknown)?.payload?.toList()}")
-            return false
+            return@withLink false
         }
-        collectFileList()
+        collectFileListLocked()
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
         val stillPresent = _bleState.value.files.any { it.filename.equals(cleanName, ignoreCase = true) }
         Log.i("BleManager", "deleteFile: stillPresent=$stillPresent")
-        return !stillPresent
+        !stillPresent
     }
 
-    suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? {
+    suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? = withLink {
         val context = this.context
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
 
@@ -829,19 +828,19 @@ class BleManager(private val context: Context) {
             val deleted = localFile.delete()
             Log.w("BleManager", "downloadFile: zero-byte transfer for '$cleanName', deleted empty file (success=$deleted)")
         }
-        return if (totalBytes > 0) localFile else null
+        if (totalBytes > 0) localFile else null
     }
 
     // Add FileOutputStream import later or here if I can
 
-    suspend fun listFiles() {
-        collectFileList()
+    suspend fun listFiles() = withLink {
+        collectFileListLocked()
     }
 
 
 
     /** Probes CMD range 0x0D–0x17 with a filename payload to find the real delete command. */
-    suspend fun probeDeleteCmds(filename: String) {
+    suspend fun probeDeleteCmds(filename: String) = withLink {
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
         // Clamped like buildDeleteFile/buildDownloadFile (#116 finding 3): unclamped, a
         // pathologically long filename here would blow past buildPacket's 255-byte payload
@@ -859,12 +858,12 @@ class BleManager(private val context: Context) {
             Log.i("DeleteProbe", "CMD 0x${cmd.toString(16).uppercase()} response: $resp")
             kotlinx.coroutines.delay(300)
 
-            collectFileList()
+            collectFileListLocked()
             val gone = _bleState.value.files.none { it.filename.equals(cleanName, ignoreCase = true) }
             Log.i("DeleteProbe", "CMD 0x${cmd.toString(16).uppercase()} file gone=$gone")
             if (gone) {
                 Log.i("DeleteProbe", "*** FOUND DELETE CMD: 0x${cmd.toString(16).uppercase()} ***")
-                return
+                return@withLink
             }
         }
         Log.i("DeleteProbe", "No delete command found in 0x0D-0x17 range")
@@ -878,7 +877,7 @@ class BleManager(private val context: Context) {
      * whether the file appears via listFiles(). Logs under tag "UploadProbe".
      * Run on real hardware (device connected): adb broadcast com.daedalus.notes.PROBE_UPLOAD
      */
-    suspend fun probeUploadCmds() {
+    suspend fun probeUploadCmds() = withLink {
         val testName  = "UPLOADTEST01"
         val nameBytes = testName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
         val dummy     = ByteArray(512) { (it and 0xFF).toByte() }
@@ -900,10 +899,10 @@ class BleManager(private val context: Context) {
                 kotlinx.coroutines.delay(300)
             }
             kotlinx.coroutines.delay(200)
-            collectFileList()
+            collectFileListLocked()
             if (_bleState.value.files.any { it.filename.equals(testName, ignoreCase = true) }) {
                 Log.i("UploadProbe", "*** UPLOAD COMMAND FOUND: 0x${cmd.toString(16).uppercase()} — '$testName' is now on device ***")
-                return
+                return@withLink
             }
         }
         Log.i("UploadProbe", "No upload command found in 0x0E–0x50. Protocol appears download-only.")
@@ -914,60 +913,64 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     /**
-     * Guards collectFileList's send+collect critical section, and refreshStatus's
-     * send+await — both drain the single shared responseChannel with no other correlation
-     * mechanism. Five call sites (runInitSequence, deleteFile, listFiles, probeDeleteCmds,
-     * probeUploadCmds) can invoke collectFileList with nothing else serialising them; without
-     * this mutex two overlapping calls both drain responseChannel, splitting and duplicating the
-     * FW920's file entries between them (#141, measured on hardware as a 9/23 split with 32
-     * entry lines for 16 unique files). refreshStatus is also guarded because the 15s
-     * status poller (startPoller) runs it in its own coroutine independent of any enumeration —
-     * transferInProgress does not cover this, since only downloadFile sets it — so an unguarded
-     * refreshStatus would drain and discard FileList entries meant for an in-flight
-     * collectFileList (#141 finding 1). This is a per-instance property (not in a companion
-     * object), so two BleManager instances never contend on the same lock — that would
-     * over-synchronise unrelated devices (e.g. during a device swap).
+     * Serialises EVERY operation that talks to the FW920 over the shared, uncorrelated
+     * responseChannel — not just enumeration. The FW920 is a single-command-at-a-time device and
+     * responses carry no request-correlation id, so ANY two concurrent link operations can steal
+     * each other's responses off responseChannel: collectFileList vs. collectFileList (#141,
+     * measured on hardware as a 9/23 split with 32 entry lines for 16 unique files), the 15s
+     * status poller's refreshStatus() vs. an in-flight enumeration (#141 finding 1), and — the
+     * remaining gap this mutex now also covers (#144) — refreshStatus() vs. deleteFile()'s own
+     * two 0x0D stage/commit exchanges (a stolen commit ack makes a successful hardware delete
+     * report "Failed to delete"), and any enumeration vs. downloadFile()'s audio stream (a stolen
+     * AudioChunk silently corrupts the download while it still reports success). Every public
+     * suspend entry point that sends a packet and waits on responseChannel — refreshStatus,
+     * deleteFile, downloadFile, listFiles, runInitSequence, startDeviceRecording,
+     * stopDeviceRecording, runProbe, runServiceProbe, probeDeleteCmds, probeUploadCmds — acquires
+     * this lock via [withLink] for its entire operation, so at most one of them is ever draining
+     * responseChannel at a time. This is a per-instance property (not in a companion object), so
+     * two BleManager instances never contend on the same lock — that would over-synchronise
+     * unrelated devices (e.g. during a device swap).
      *
-     * None of the guarded call sites invoke another guarded call while already holding this
-     * mutex (no call site is itself reached from inside another critical section here), so a
-     * plain non-reentrant Mutex cannot deadlock.
-     *
-     * This mutex only covers enumeration-vs-enumeration and enumeration-vs-status-poll
-     * contention (collectFileList and refreshStatus). Other responseChannel consumers remain
-     * UNGUARDED and can still be stolen from or interleaved with:
-     *   - downloadFile() (its audio stream has no request-correlation id either).
-     *   - deleteFile()'s own two sendAndAwait(..., expectedCmd = 0x0D) exchanges — only its
-     *     trailing collectFileList() call is guarded. Concretely: the 15s poller's
-     *     refreshStatus() can acquire this mutex uncontended while deleteFile is mid-0x0D
-     *     exchange, and its awaitResponse(0x05) discards the Unknown(cmd=0x0D) commit ack —
-     *     so deleteFile times out, returns false, and the UI reports "Failed to delete" for a
-     *     file the device actually deleted.
-     *   - runInitSequence()'s six sendAndAwait calls, including its own raw
-     *     sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05) — it does not route through the
-     *     now-guarded refreshStatus().
-     * Widening the guard to cover these is a larger change, tracked separately (out of scope
-     * here).
+     * Kotlin's Mutex is NON-REENTRANT. Several guarded operations internally call collectFileList
+     * (deleteFile, runInitSequence, probeDeleteCmds, probeUploadCmds) — while already holding this
+     * lock via their own [withLink] call, re-entering it via collectFileList() would deadlock. So
+     * collectFileList is split: the public entry point acquires the lock and delegates to
+     * [collectFileListLocked], which callers that already hold the lock invoke directly. No
+     * guarded call site invokes another guarded (lock-acquiring) call site while already holding
+     * the lock, so this remains deadlock-free.
      */
-    private val fileListMutex = Mutex()
+    private val linkMutex = Mutex()
 
-    private suspend fun collectFileList() = fileListMutex.withLock {
-        // Drain any residue left behind by a PREVIOUS collectFileList() call that hit its
-        // per-item idle timeout: responseChannel has unlimited capacity and nothing else drains
-        // it between one collectFileList() call and the next (downloadFile, runServiceProbe,
-        // probeUploadCmds and runProbe all read responseChannel directly, but not in a way that
-        // drains stale enumeration residue between enumerations), so that call's still-arriving
-        // entries — and its eventual end-of-list sentinel — would otherwise be consumed here as
-        // if they were the response to THIS call's own request below, corrupting this call's
-        // result with stale data (#141 finding 2). 0x0A carries no request-correlation id, so an
-        // unconditional drain is the only mechanism available.
+    /**
+     * Runs [block] with [linkMutex] held, after draining any residue left in responseChannel by a
+     * PREVIOUS operation that gave up on its own timeout (e.g. collectFileList's per-item idle
+     * timeout, or downloadFile's idle timeout) — responseChannel has unlimited capacity and
+     * nothing else drains it between one guarded operation and the next, so a prior operation's
+     * still-arriving responses would otherwise be consumed here as if they belonged to THIS
+     * operation's own request, corrupting its result with stale data (#141 finding 2, generalised
+     * to every link operation by #144). None of the responses on this channel carry a
+     * request-correlation id, so an unconditional drain at the gate is the only mechanism
+     * available.
+     */
+    private suspend fun <T> withLink(block: suspend () -> T): T = linkMutex.withLock {
+        drainResidue()
+        block()
+    }
+
+    private fun drainResidue() {
         var drainedCount = 0
         while (responseChannel.tryReceive().isSuccess) {
             drainedCount++
         }
         if (drainedCount > 0) {
-            Log.d("BleManager", "collectFileList: drained $drainedCount stale residue item(s) from responseChannel")
+            Log.d("BleManager", "withLink: drained $drainedCount stale residue item(s) from responseChannel")
         }
+    }
 
+    private suspend fun collectFileList() = withLink { collectFileListLocked() }
+
+    /** Must only be called while [linkMutex] is already held (see [withLink]). */
+    private suspend fun collectFileListLocked() {
         Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")
         sendPacket(PKT_LIST_FILES)
         val collected = mutableListOf<FileEntry>()
