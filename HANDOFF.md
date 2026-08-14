@@ -25,8 +25,10 @@ this whole file before starting — it is written to be the only context you nee
 - **The app's own search returns 12 for that same query, not 24 — this is correct, not a bug.**
   It is the parent/part split: 12 parent rows + 12 `_pN` part rows both match, and the UI shows
   parents. Do not re-investigate this.
-- **#119, #141 and #144 are the open issues.** #141 is partially fixed by PR #145 but stays open
-  — see below. #136, #116, #125 are all closed this session (see below).
+- **#119, #141, #144, #147, #148 and #150 are the open issues.** #141 is partially fixed by PR #145
+  but stays open — see below. #147, #148 and #150 were filed this session from stale-branch
+  hardening candidates; #149 and #151 were filed from the same batch and closed not-planned. #136,
+  #116, #125 are all closed this session (see below).
 
 ### Device access: release is not debuggable — read this before trying to pull the db
 
@@ -75,6 +77,9 @@ bug class remain, tracked as new issue **#144**.
 | **#119** | Root cause: why a transfer after an interrupted one comes back short | Unchanged since last write-up; still not reproduced. Needs a fresh hardware repro asset (the old one is deleted off the FW920 — see below) |
 | **#141** | Concurrent `collectFileList()` enumerations interleave, producing a wrong device file list | **Partially fixed by #145** — `collectFileList()` vs itself and vs `refreshStatus()` is now serialised and hardware-verified. **Stays open**: `downloadFile` and `deleteFile` still race the same unserialised `responseChannel`. See below and #144 |
 | **#144** | `responseChannel` has no request-correlation id; every guard added reveals another unguarded consumer | **New.** `collectFileList()` racing `downloadFile()` silently corrupts downloaded audio; the status poller can also steal `deleteFile`'s commit ack, reporting a successful delete as failed. See below |
+| **#147** | `onDescriptorWrite` ignores `status`; `enableNotification` is fire-and-forget, so a failed notify setup proceeds silently and downstream commands just idle-timeout with no diagnostic | `BleManager.kt:305-312, 336-347` |
+| **#148** | Superseded stale GATT connection is neither disconnected nor closed → leaks a BLE client per device-swap race | `BleManager.kt:229-235` |
+| **#150** | `doAnalyzeExclusive` lacks an `autoTriggered` guard → a manual analyze racing auto-analyze re-runs a full Whisper+Gemma pass. Wasted compute, no data loss | `RecordingViewModel.kt` ~`:963` |
 
 ### #119 — still open, not reproduced, and the leading hypothesis took a hit
 
@@ -247,22 +252,44 @@ Unchanged from session 6 — no pillar work happened this session.
 
 ---
 
-## Hardening candidates found on a now-deleted stale branch — not filed as issues yet
+## Hardening candidates found on a now-deleted stale branch — filed and triaged
 
-Found in August, lost when the branch went stale, and rediscovered (row 1, independently, during
-the #141 work) — the finding has now been paid for twice, which is why it's recorded here instead
-of left on a branch again. Honest confidence levels, not a to-do list:
+Found in August, lost when the branch went stale, and rediscovered (the `responseChannel` item,
+independently, during the #141 work) — that finding has now been paid for twice, which is why it's
+recorded here instead of left on a branch again. It became **#144** (see the open-issues table
+above). The remaining five candidates were filed this session: three are open bugs, two were closed
+not-planned with their evidence preserved in the issue.
 
-| Item | Location in current main | Confidence |
+Open, on the board:
+
+| Issue | Item | Location |
 |---|---|---|
-| `responseChannel` never drained before a new request | `BleManager.kt:690, 741, 913, 985` | confirmed by reading code |
-| `onDescriptorWrite` ignores `status`; `enableNotification` is fire-and-forget | `BleManager.kt:305-312, 336-347` | confirmed |
-| GATT leak on superseded stale connect (stale `STATE_CONNECTED` neither disconnects nor closes) | `BleManager.kt:229-235` | confirmed |
-| MediaCodec `INFO_OUTPUT_FORMAT_CHANGED` never handled → decoder's real sample rate never picked up → wrong resample rate into Whisper → silently degraded transcripts | `TranscriptionService.kt:119-120, 167` | **plausible, NOT confirmed against real audio** |
-| Missing `autoTriggered` guard → manual analyze racing auto-analyze re-runs a full Whisper+Gemma pass | `RecordingViewModel.kt` ~`:963` | confirmed, narrow window, wasted compute only |
+| **#147** | `onDescriptorWrite` ignores `status`; `enableNotification` is fire-and-forget, so a failed notify setup proceeds silently and downstream commands just idle-timeout with no diagnostic | `BleManager.kt:305-312, 336-347` |
+| **#148** | Superseded stale GATT connection is neither disconnected nor closed → leaks a BLE client per device-swap race | `BleManager.kt:229-235` |
+| **#150** | `doAnalyzeExclusive` lacks an `autoTriggered` guard → a manual analyze racing auto-analyze re-runs a full Whisper+Gemma pass. Wasted compute, no data loss | `RecordingViewModel.kt` ~`:963` |
 
-A sixth candidate — `requestMtu` called without checking connect status — is **low confidence**,
-based on known Android OEM quirks rather than anything observed on this hardware.
+Two were filed and then closed not-planned, deliberately:
+
+- **#149** (MediaCodec `INFO_OUTPUT_FORMAT_CHANGED` unhandled) — **measured unreachable.** FW920
+  files are mp3 16 kHz mono; phone-mic files are AAC-**LC** 16 kHz mono (`AudioRecorder.kt:35-40`
+  pins that); `TARGET_SAMPLE_RATE = 16000`. So `srcSampleRate != TARGET` is false and
+  `channelCount > 1` is false for every file — `resample()` and the mono downmix are **never
+  called**. AAC-LC also rules out the HE-AAC/SBR case. Handling it would change no output for any
+  real file. Closed with the full measurement preserved in the issue; reopenable if an import ever
+  arrives with a divergent decoder format (the only route that could reach it).
+- **#151** (`requestMtu` called without checking connect status) — this was the sixth candidate,
+  flagged low confidence and based on known Android OEM quirks rather than anything observed on
+  this hardware. Closed as unsubstantiated and **folded into #148 as a note**, since it is the same
+  connection callback and a one-line addition if someone is already editing it.
+
+**A finding is not a task.** Everything above is true, but only some of it is actionable. #147/#148/
+#150 are confirmed defects with a route to a fix, so they belong on the board. #149 was measured to
+affect zero real recordings and #151 was never observed at all, so they belong in the record, not
+the backlog — closed with their evidence intact and reopenable in seconds. The test is not "is it
+true?" but "would we act on it?" Note the tension this resolves: findings left only in prose get
+lost and re-derived at full cost (the `responseChannel` finding was paid for twice), which argues
+for filing everything — but a board full of items nobody will pick up stops being useful for the
+items that matter. **File what is actionable; archive what is merely true.**
 
 ---
 
