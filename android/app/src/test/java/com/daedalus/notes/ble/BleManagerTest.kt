@@ -11,8 +11,12 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkStatic
 import io.mockk.verify
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,6 +26,7 @@ import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 class BleManagerTest {
 
@@ -55,6 +60,12 @@ class BleManagerTest {
         val field = target.javaClass.getDeclaredField(name)
         field.isAccessible = true
         return field.get(target)
+    }
+
+    private fun setPrivateField(target: Any, name: String, value: Any?) {
+        val field = target.javaClass.getDeclaredField(name)
+        field.isAccessible = true
+        field.set(target, value)
     }
 
     private fun negotiatedMtu(): Int = privateField(manager, "negotiatedMtu") as Int
@@ -192,5 +203,83 @@ class BleManagerTest {
         assertNull(result)
         val expectedFile = File(File(tempDir, "Recordings"), "zerobyte.mp3")
         assertFalse("expected $expectedFile to have been deleted", expectedFile.exists())
+    }
+
+    // --- #141: two overlapping collectFileList() calls must not interleave -------------------
+
+    /**
+     * Reproduces the measured hardware bug: two overlapping enumerations (e.g. init sequence +
+     * a user-triggered refresh) both loop over the single shared responseChannel with nothing
+     * serialising them, so the 16 real file entries the FW920 sends back (once per outstanding
+     * CMD 0x0A request) get split and duplicated across the two collectFileList() loops instead
+     * of each call observing its own complete, duplicate-free 16-file list.
+     *
+     * Wires a mocked GATT + write characteristic (mirroring sendPacket's early-exit-if-null
+     * guard, which the existing downloadFile test relies on) so writeCharacteristic calls can be
+     * counted as a proxy for "a collectFileList() call has sent its own CMD 0x0A and entered the
+     * response-collection loop". Runs both listFiles() calls on real threads (Dispatchers.Default)
+     * so they can genuinely race, then feeds two full 16-entry batches (matching the real
+     * hardware: the device answers each outstanding list-files request with the full list) only
+     * once the write-count proves which call is actually allowed to be enumerating.
+     */
+    @Test
+    fun collectFileList_twoConcurrentCalls_eachObservesCompleteListNoDuplicatesNoOmissions() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
+        val writeCount = AtomicInteger(0)
+        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writeCount.incrementAndGet()
+            true
+        }
+        setPrivateField(manager, "bluetoothGatt", gatt)
+        setPrivateField(manager, "writeChar", writeCharMock)
+
+        val expectedNames = (1..16).map { "REC%02d".format(it) }
+
+        runBlocking {
+            withTimeout(5000) {
+                val jobA = async(Dispatchers.Default) { manager.listFiles() }
+                val jobB = async(Dispatchers.Default) { manager.listFiles() }
+
+                // Wait for the first call to send its CMD 0x0A.
+                while (writeCount.get() < 1) delay(5)
+
+                // The second call must NOT also send its own CMD 0x0A while the first is still
+                // enumerating — if it does, both loops are now consuming the same response
+                // stream and entries will be split/duplicated between them (the measured bug).
+                delay(150)
+                assertEquals(
+                    "a second collectFileList() call sent its own request while the first " +
+                        "call's enumeration was still in flight — responses will now be split " +
+                        "between the two loops",
+                    1, writeCount.get()
+                )
+
+                // Satisfy the first call's enumeration with a complete, duplicate-free 16-entry
+                // list (the FW920 answers each outstanding request with the full list).
+                expectedNames.forEach { name ->
+                    responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+                }
+                responseChannel().trySend(ParsedResponse.FileList(null))
+
+                // Only once the first call has released should the second call send its request.
+                while (writeCount.get() < 2) delay(5)
+                expectedNames.forEach { name ->
+                    responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+                }
+                responseChannel().trySend(ParsedResponse.FileList(null))
+
+                jobA.await()
+                jobB.await()
+            }
+        }
+
+        val files = manager.bleState.value.files
+        assertEquals("expected exactly the 16 real files, no more, no fewer", 16, files.size)
+        assertEquals(expectedNames.toSet(), files.map { it.filename }.toSet())
+        assertEquals(
+            "duplicate filenames present in final file list",
+            files.map { it.filename }.distinct().size, files.size
+        )
     }
 }
