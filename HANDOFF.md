@@ -7,8 +7,8 @@ this whole file before starting.
 
 ## Current state
 
-- **`main`** = `050d729`, clean working tree, in sync with `origin/main`.
-- **`.\gradlew :app:testDebugUnitTest` → 463 tests / 0 failures / 1 skipped.**
+- **`main`** = `5103e5b`, clean working tree, in sync with `origin/main`.
+- **`.\gradlew :app:testDebugUnitTest` → 474 tests / 0 failures / 1 skipped.**
   The skip is `Mp3FrameScanTest.realFileCrossCheck` and it is **by design**. A skip there is
   correct; a *pass* would mean something regressed.
 - **`:app:assembleRelease` builds clean** (`lintVitalRelease` passes) at versionCode 334.
@@ -62,12 +62,31 @@ this whole file before starting.
 | #130 | #125 | `@Upsert` for rowid stability (issue re-scoped — see below) |
 | #131 | **#126 closed** | 13→12 downgrade migration, so an older APK opens instead of throwing |
 | #132 | **#122 closed** | `heavyWork` widened to the whole re-download critical section |
+| #134 | **#103 closed** | Transcripts render as paragraphs; the speaker fiction is deleted |
 
 **#104, #117, #101, #126 and #122 are closed. #106 was closed by the owner.** #119 stays open — its guard
 shipped, but the root cause of the short transfer is unexplained and needs hardware. **#103 was
 deliberately NOT built** — see below.
 
-### #103 was re-scoped, not implemented — read before picking it up
+### #103 is CLOSED — shipped as paragraph formatting (PR #134)
+
+`SpeakerDiarizer` is deleted. It never detected speakers: it flipped the label every three
+sentences with no audio input at all. What shipped is `TranscriptFormatter.formatParagraphs`, which
+groups sentences into paragraphs with **no speaker labels**, applied at **display time only** —
+the stored transcript is untouched, so FTS search and markdown export still read exactly what
+Whisper produced.
+
+One thing worth knowing if you touch the transcript view: `highlightMatches` is now
+**whitespace-insensitive**. It has to be — search matches the raw stored text, but highlighting runs
+over the reformatted text where every third sentence boundary became `
+
+`, so a query spanning
+one of those matched globally and silently failed to highlight in the note. Do not "simplify" it back
+to `indexOf`.
+
+The historical reasoning below is kept because the lesson generalises.
+
+### Why #103 was refused as originally scoped
 
 `SpeakerDiarizer.formatTranscript` does not detect speakers. It splits on sentence boundaries and
 flips between "Speaker 1" and "Speaker 2" **every three sentences, unconditionally** — there is no
@@ -107,7 +126,11 @@ reason that matters*. Same shape as D30's cadence detector.
 | **#119** | Root cause: why a transfer after an interrupted one comes back short | **Start here.** The guard shipped; the cause is unexplained. Needs a clean-start hardware repro |
 | #125 | **Re-scoped.** Its stated mechanism does not exist — see below | Needs a device read of the live write-connection pragma and trigger list |
 | #116 | Delete/download packets omit the 14-byte filename clamp | Needs a throwaway-file hardware delete to verify |
-| #103 | `SpeakerDiarizer` | **Product decision, not code.** See above |
+
+**Every remaining issue needs the phone.** There is no further ADB-free work on the board — #116
+needs a hardware delete against a throwaway file, #119 needs a clean-start transfer reproduction,
+and #125 needs a read of the live write-connection pragma and trigger list. Pick up hardware work
+first next session, or triage new work.
 
 ### #125 was filed on a mechanism that does not exist — read before acting on it
 
@@ -292,7 +315,7 @@ those was a *live hole* before #113.
 adb shell am broadcast -a com.daedalus.notes.SYNC -n com.daedalus.notes/.AdbReceiver
 adb shell am broadcast -a com.daedalus.notes.ANALYZE --es filename "20260812113220" -n com.daedalus.notes/.AdbReceiver
 adb shell am broadcast -a com.daedalus.notes.SET_SPEED --ef speed 1.5 -n com.daedalus.notes/.AdbReceiver
-adb shell am broadcast -a com.daedalus.notes.FORMAT_SPEAKER --es filename "20260812102746" -n com.daedalus.notes/.AdbReceiver
+adb shell am broadcast -a com.daedalus.notes.FORMAT_PARAGRAPHS --es filename "20260812102746" -n com.daedalus.notes/.AdbReceiver
 adb shell am broadcast -a com.daedalus.notes.SEARCH_FTS --es query "initiative" -n com.daedalus.notes/.AdbReceiver
 adb shell am broadcast -a "com.daedalus.notes.ADD_CALENDAR" --es title 'Multi word title' -n com.daedalus.notes/.AdbReceiver
 ```
