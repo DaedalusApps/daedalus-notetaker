@@ -18,6 +18,7 @@ import android.os.Build
 import android.util.Log
 import com.daedalus.notes.BuildConfig
 import com.daedalus.notes.data.model.Mp3FrameScan
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,6 +38,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 
 // ---------------------------------------------------------------------------
@@ -107,11 +109,21 @@ class BleManager(private val context: Context) {
     private val responseChannel = Channel<ParsedResponse>(capacity = Channel.UNLIMITED)
 
     /**
-     * Signals completion of each writeDescriptor call (one per notification enable) — `true` if
-     * onDescriptorWrite reported GATT_SUCCESS, `false` otherwise (#147: previously Channel<Unit>,
-     * unconditionally signalled regardless of status).
+     * Per-characteristic correlation for descriptor-write completions, keyed by the notify
+     * characteristic's UUID (#147 review round 2: a single shared `Channel<Boolean>` had no way
+     * to tell which characteristic a given completion belonged to — a late callback, or one from
+     * a connection superseded by a device swap, was simply "the next thing on the channel" and
+     * got consumed by whichever `receive()` happened to be parked at the time, corrupting an
+     * unrelated characteristic's result).
+     *
+     * [enableNotification] registers a fresh [CompletableDeferred] here before initiating the
+     * write; [onDescriptorWrite] resolves it by looking up `descriptor.characteristic.uuid`. A
+     * callback for a UUID with no registered entry (late, after the waiter already timed out and
+     * removed it, or from a connection this map was cleared for) is dropped with a `Log.w`
+     * instead of poisoning some other characteristic's wait. Cleared in [disconnect] and at the
+     * start of each init-loop run, so entries never leak across connections/device swaps.
      */
-    private val descriptorChannel = Channel<Boolean>(capacity = Channel.UNLIMITED)
+    private val descriptorCompletions = ConcurrentHashMap<UUID, CompletableDeferred<Boolean>>()
 
     // Descriptor UUID required to enable notifications on Android
     private val CCC_DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -228,6 +240,10 @@ class BleManager(private val context: Context) {
         stopPoller()
         initJob?.cancel()
         initJob = null
+        // Cross-connection hygiene (#147 review): drop any still-registered waiters so a late
+        // callback from this connection can never resolve a deferred a future connection's init
+        // loop registers under the same characteristic UUID.
+        descriptorCompletions.clear()
         bluetoothGatt?.let { gatt ->
             gatt.disconnect()
             closeAndClearGatt(gatt)
@@ -338,14 +354,25 @@ class BleManager(private val context: Context) {
             // otherwise it keeps draining responseChannel for the superseded device and can
             // mark the new connection CONNECTED prematurely at the tail of its own sequence.
             initJob?.cancel()
+            // Cross-connection hygiene (#147 review): a fresh init run must never resolve
+            // against waiters registered by (or completions stranded from) a previous run.
+            descriptorCompletions.clear()
             initJob = scope.launch {
                 // Owner decision (#147): a failed notify channel does not abort the init sequence
                 // — the device may still be partially usable — but it must not proceed silently.
-                // Every failure is logged per-channel, and if ANY of the three failed, that is
-                // surfaced once in BleState.errorMessage.
+                // Every failure is logged per-channel; if ANY of the three failed, that is
+                // surfaced ONCE as a summary Log.w (owner decision: errorMessage surfacing
+                // dropped, see review finding — the UI only renders errorMessage in the
+                // DISCONNECTED/ERROR states, so a write here was invisible while relevant and
+                // would surface later as a stale, misleading message after a normal disconnect).
                 var anyNotifyFailed = false
                 for (notifyUuid in listOf(NOTIFY_B0B2_UUID, NOTIFY_B0B3_UUID, NOTIFY_B0B4_UUID)) {
-                    val notifyChar = service.getCharacteristic(UUID.fromString(notifyUuid)) ?: continue
+                    val notifyChar = service.getCharacteristic(UUID.fromString(notifyUuid))
+                    if (notifyChar == null) {
+                        Log.w("BleManager", "notify setup: characteristic $notifyUuid not found on service")
+                        anyNotifyFailed = true
+                        continue
+                    }
                     val result = enableNotification(gatt, notifyChar)
                     if (!result.notificationSet) {
                         // Already logged with the exact characteristic UUID inside
@@ -354,32 +381,27 @@ class BleManager(private val context: Context) {
                     }
                     // The wait-vs-skip decision must be driven by callbackExpected (writeDescriptor's
                     // own initiation) ALONE — that is the only thing that determines whether an
-                    // onDescriptorWrite callback will ever arrive on descriptorChannel. Gating this
-                    // on the combined notificationSet+callbackExpected result desyncs every
-                    // subsequent iteration: a real callback still lands on the channel later and
-                    // gets consumed by the NEXT notify UUID's receive instead of this one's.
+                    // onDescriptorWrite callback will ever arrive for this characteristic. Gating
+                    // this on the combined notificationSet+callbackExpected result desyncs every
+                    // subsequent iteration under a shared/positional channel; UUID correlation
+                    // makes that moot now, but the gate itself must still be correct.
                     if (!result.callbackExpected) {
                         Log.w("BleManager", "notify setup failed to initiate for $notifyUuid")
                         anyNotifyFailed = true
                         continue
                     }
-                    // Wait up to 2s for onDescriptorWrite before continuing to the next one
-                    val completedOk = withTimeoutOrNull(2000L) { descriptorChannel.receive() }
+                    // Wait up to 2s for THIS characteristic's own onDescriptorWrite completion.
+                    val completedOk = awaitDescriptorCompletion(UUID.fromString(notifyUuid))
                     if (completedOk != true) {
                         Log.w("BleManager", "notify setup failed for $notifyUuid (result=$completedOk)")
                         anyNotifyFailed = true
                     }
                 }
                 if (anyNotifyFailed) {
-                    _bleState.update {
-                        it.copy(errorMessage = "One or more notification channels failed to enable — some data may not update")
-                    }
-                }
-                Log.i("BleManager", if (anyNotifyFailed) {
-                    "Notification setup finished with failures, starting init sequence anyway"
+                    Log.w("BleManager", "notify setup: one or more notification channels failed to enable — some data may not update")
                 } else {
-                    "All notifications enabled, starting init sequence"
-                })
+                    Log.i("BleManager", "All notifications enabled, starting init sequence")
+                }
                 runInitSequence()
             }
             initJob?.invokeOnCompletion { initJob = null }
@@ -408,12 +430,25 @@ class BleManager(private val context: Context) {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
+            // No `gatt != bluetoothGatt` staleness guard needed here (unlike onServicesDiscovered/
+            // onMtuChanged/onConnectionStateChange, #148): descriptorCompletions is cleared on
+            // disconnect() and at every init-loop start, so a callback from a superseded connection
+            // already finds no registered waiter below and is dropped harmlessly.
+            val charUuid = descriptor.characteristic.uuid
+            val deferred = descriptorCompletions.remove(charUuid)
+            if (deferred == null) {
+                // Late (its own waiter already timed out and removed the entry) or from a
+                // connection descriptorCompletions was cleared for (disconnect/device swap) —
+                // drop it instead of letting it resolve some other characteristic's wait.
+                Log.w("BleManager", "onDescriptorWrite: no registered waiter for $charUuid (status=$status) — dropped")
+                return
+            }
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d("BleManager", "onDescriptorWrite status=$status char=${descriptor.characteristic.uuid}")
-                descriptorChannel.trySend(true)
+                Log.d("BleManager", "onDescriptorWrite status=$status char=$charUuid")
+                deferred.complete(true)
             } else {
-                Log.w("BleManager", "onDescriptorWrite FAILED status=$status char=${descriptor.characteristic.uuid}")
-                descriptorChannel.trySend(false)
+                Log.w("BleManager", "onDescriptorWrite FAILED status=$status char=$charUuid")
+                deferred.complete(false)
             }
         }
 
@@ -444,15 +479,18 @@ class BleManager(private val context: Context) {
      *   that must be logged and counted, but (unlike [callbackExpected]) does NOT affect whether
      *   an onDescriptorWrite callback will arrive.
      * @param callbackExpected whether writeDescriptor's own initiation succeeded on whichever API
-     *   branch ran — this, and only this, determines whether a callback (and thus a
-     *   [descriptorChannel] item) will ever arrive. A caller must gate its wait-vs-skip decision
-     *   on this field alone: gating on the combination of both fields desyncs descriptorChannel,
-     *   since a real callback still lands on the channel even when [notificationSet] is false
-     *   (#147 review finding).
+     *   branch ran — this, and only this, determines whether a callback (and thus a resolution of
+     *   the [descriptorCompletions] entry registered for this UUID) will ever arrive. A caller
+     *   must gate its wait-vs-skip decision on this field alone: gating on the combination of both
+     *   fields skips the wait for a characteristic that WILL still get a real callback (#147
+     *   review finding).
+     *
+     * Internal (not private): exposed so tests can call this directly and assert on the typed
+     * result instead of invoking it — and picking apart its return value — via reflection.
      */
-    private data class EnableNotificationResult(val notificationSet: Boolean, val callbackExpected: Boolean)
+    internal data class EnableNotificationResult(val notificationSet: Boolean, val callbackExpected: Boolean)
 
-    private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic): EnableNotificationResult {
+    internal fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic): EnableNotificationResult {
         val notificationSet = gatt.setCharacteristicNotification(char, true)
         if (!notificationSet) {
             Log.w("BleManager", "enableNotification: setCharacteristicNotification failed for ${char.uuid}")
@@ -462,6 +500,10 @@ class BleManager(private val context: Context) {
             Log.w("BleManager", "enableNotification: CCC descriptor not found for ${char.uuid}")
             return EnableNotificationResult(notificationSet, callbackExpected = false)
         }
+        // Registered BEFORE initiating the write, so a callback that somehow fires before
+        // writeDescriptor() even returns always finds its deferred already present.
+        val deferred = CompletableDeferred<Boolean>()
+        descriptorCompletions[char.uuid] = deferred
         val writeInitiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
                 BluetoothStatusCodes.SUCCESS
@@ -473,8 +515,25 @@ class BleManager(private val context: Context) {
         }
         if (!writeInitiated) {
             Log.w("BleManager", "enableNotification: writeDescriptor failed to initiate for ${char.uuid}")
+            // No callback will ever arrive for a failed initiation — remove the deferred instead
+            // of leaving it registered forever.
+            descriptorCompletions.remove(char.uuid)
         }
         return EnableNotificationResult(notificationSet, callbackExpected = writeInitiated)
+    }
+
+    /**
+     * Waits up to 2s for the descriptor-write completion registered for [charUuid] (see
+     * [enableNotification]/[onDescriptorWrite]), returning null on timeout. Always removes the
+     * entry afterward — resolved or timed out — so a late/duplicate onDescriptorWrite callback
+     * for this UUID finds nothing registered and is dropped rather than resolving a deferred
+     * nobody is awaiting anymore.
+     */
+    private suspend fun awaitDescriptorCompletion(charUuid: UUID): Boolean? {
+        val deferred = descriptorCompletions[charUuid]
+        val result = deferred?.let { withTimeoutOrNull(2000L) { it.await() } }
+        descriptorCompletions.remove(charUuid)
+        return result
     }
 
     // ------------------------------------------------------------------
@@ -712,9 +771,14 @@ class BleManager(private val context: Context) {
                 val svc = gatt.getService(UUID.fromString(svcUuid))
                 val ch  = svc?.getCharacteristic(UUID.fromString(notifyUuid)) ?: return@forEach
                 if (ch.properties and 0x10 != 0 || ch.properties and 0x20 != 0) {
-                    enableNotification(gatt, ch)
-                    withTimeoutOrNull(2000L) { descriptorChannel.receive() }
-                    Log.i("FW920_PROBE", "  Subscribed to $name/$notifyUuid")
+                    val result = enableNotification(gatt, ch)
+                    val completedOk = if (result.callbackExpected) {
+                        awaitDescriptorCompletion(ch.uuid)
+                    } else {
+                        null
+                    }
+                    Log.i("FW920_PROBE", "  $name/$notifyUuid subscribe result: $completedOk " +
+                        "(callbackExpected=${result.callbackExpected})")
                 }
             }
         }
