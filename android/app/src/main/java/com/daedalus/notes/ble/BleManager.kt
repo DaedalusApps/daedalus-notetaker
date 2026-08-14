@@ -30,6 +30,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileOutputStream
@@ -909,7 +911,19 @@ class BleManager(private val context: Context) {
     // File list collector
     // ------------------------------------------------------------------
 
-    private suspend fun collectFileList() {
+    /**
+     * Guards collectFileList's send+collect critical section. Five call sites (runInitSequence,
+     * deleteFile, listFiles, probeDeleteCmds, probeUploadCmds) can invoke this with nothing else
+     * serialising them; without this mutex two overlapping calls both drain the single shared
+     * responseChannel, splitting and duplicating the FW920's file entries between them (#141,
+     * measured on hardware as a 9/23 split with 32 entry lines for 16 unique files). None of the
+     * five call sites invoke collectFileList() while already holding this mutex (no call site is
+     * itself reached from inside another collectFileList() critical section), so a plain
+     * non-reentrant Mutex cannot deadlock here.
+     */
+    private val fileListMutex = Mutex()
+
+    private suspend fun collectFileList() = fileListMutex.withLock {
         Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")
         sendPacket(PKT_LIST_FILES)
         val collected = mutableListOf<FileEntry>()
