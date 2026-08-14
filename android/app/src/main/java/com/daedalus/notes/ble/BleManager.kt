@@ -30,6 +30,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileOutputStream
@@ -682,7 +684,9 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     suspend fun refreshStatus() {
-        sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
+        fileListMutex.withLock {
+            sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
+        }
     }
 
     suspend fun deleteFile(filename: String): Boolean {
@@ -909,7 +913,61 @@ class BleManager(private val context: Context) {
     // File list collector
     // ------------------------------------------------------------------
 
-    private suspend fun collectFileList() {
+    /**
+     * Guards collectFileList's send+collect critical section, and refreshStatus's
+     * send+await — both drain the single shared responseChannel with no other correlation
+     * mechanism. Five call sites (runInitSequence, deleteFile, listFiles, probeDeleteCmds,
+     * probeUploadCmds) can invoke collectFileList with nothing else serialising them; without
+     * this mutex two overlapping calls both drain responseChannel, splitting and duplicating the
+     * FW920's file entries between them (#141, measured on hardware as a 9/23 split with 32
+     * entry lines for 16 unique files). refreshStatus is also guarded because the 15s
+     * status poller (startPoller) runs it in its own coroutine independent of any enumeration —
+     * transferInProgress does not cover this, since only downloadFile sets it — so an unguarded
+     * refreshStatus would drain and discard FileList entries meant for an in-flight
+     * collectFileList (#141 finding 1). This is a per-instance property (not in a companion
+     * object), so two BleManager instances never contend on the same lock — that would
+     * over-synchronise unrelated devices (e.g. during a device swap).
+     *
+     * None of the guarded call sites invoke another guarded call while already holding this
+     * mutex (no call site is itself reached from inside another critical section here), so a
+     * plain non-reentrant Mutex cannot deadlock.
+     *
+     * This mutex only covers enumeration-vs-enumeration and enumeration-vs-status-poll
+     * contention (collectFileList and refreshStatus). Other responseChannel consumers remain
+     * UNGUARDED and can still be stolen from or interleaved with:
+     *   - downloadFile() (its audio stream has no request-correlation id either).
+     *   - deleteFile()'s own two sendAndAwait(..., expectedCmd = 0x0D) exchanges — only its
+     *     trailing collectFileList() call is guarded. Concretely: the 15s poller's
+     *     refreshStatus() can acquire this mutex uncontended while deleteFile is mid-0x0D
+     *     exchange, and its awaitResponse(0x05) discards the Unknown(cmd=0x0D) commit ack —
+     *     so deleteFile times out, returns false, and the UI reports "Failed to delete" for a
+     *     file the device actually deleted.
+     *   - runInitSequence()'s six sendAndAwait calls, including its own raw
+     *     sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05) — it does not route through the
+     *     now-guarded refreshStatus().
+     * Widening the guard to cover these is a larger change, tracked separately (out of scope
+     * here).
+     */
+    private val fileListMutex = Mutex()
+
+    private suspend fun collectFileList() = fileListMutex.withLock {
+        // Drain any residue left behind by a PREVIOUS collectFileList() call that hit its
+        // per-item idle timeout: responseChannel has unlimited capacity and nothing else drains
+        // it between one collectFileList() call and the next (downloadFile, runServiceProbe,
+        // probeUploadCmds and runProbe all read responseChannel directly, but not in a way that
+        // drains stale enumeration residue between enumerations), so that call's still-arriving
+        // entries — and its eventual end-of-list sentinel — would otherwise be consumed here as
+        // if they were the response to THIS call's own request below, corrupting this call's
+        // result with stale data (#141 finding 2). 0x0A carries no request-correlation id, so an
+        // unconditional drain is the only mechanism available.
+        var drainedCount = 0
+        while (responseChannel.tryReceive().isSuccess) {
+            drainedCount++
+        }
+        if (drainedCount > 0) {
+            Log.d("BleManager", "collectFileList: drained $drainedCount stale residue item(s) from responseChannel")
+        }
+
         Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")
         sendPacket(PKT_LIST_FILES)
         val collected = mutableListOf<FileEntry>()
