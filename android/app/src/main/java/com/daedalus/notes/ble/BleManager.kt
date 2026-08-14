@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
@@ -345,8 +346,19 @@ class BleManager(private val context: Context) {
                 var anyNotifyFailed = false
                 for (notifyUuid in listOf(NOTIFY_B0B2_UUID, NOTIFY_B0B3_UUID, NOTIFY_B0B4_UUID)) {
                     val notifyChar = service.getCharacteristic(UUID.fromString(notifyUuid)) ?: continue
-                    val initiated = enableNotification(gatt, notifyChar)
-                    if (!initiated) {
+                    val result = enableNotification(gatt, notifyChar)
+                    if (!result.notificationSet) {
+                        // Already logged with the exact characteristic UUID inside
+                        // enableNotification — just record it toward anyNotifyFailed here.
+                        anyNotifyFailed = true
+                    }
+                    // The wait-vs-skip decision must be driven by callbackExpected (writeDescriptor's
+                    // own initiation) ALONE — that is the only thing that determines whether an
+                    // onDescriptorWrite callback will ever arrive on descriptorChannel. Gating this
+                    // on the combined notificationSet+callbackExpected result desyncs every
+                    // subsequent iteration: a real callback still lands on the channel later and
+                    // gets consumed by the NEXT notify UUID's receive instead of this one's.
+                    if (!result.callbackExpected) {
                         Log.w("BleManager", "notify setup failed to initiate for $notifyUuid")
                         anyNotifyFailed = true
                         continue
@@ -428,12 +440,19 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     /**
-     * Returns whether the notification-enable request was successfully INITIATED — i.e.
-     * setCharacteristicNotification succeeded AND writeDescriptor's own initiation succeeded on
-     * whichever API branch runs. This does NOT mean the descriptor write completed; that is
-     * reported later, asynchronously, via [descriptorChannel] (#147).
+     * @param notificationSet whether setCharacteristicNotification succeeded — a real failure
+     *   that must be logged and counted, but (unlike [callbackExpected]) does NOT affect whether
+     *   an onDescriptorWrite callback will arrive.
+     * @param callbackExpected whether writeDescriptor's own initiation succeeded on whichever API
+     *   branch ran — this, and only this, determines whether a callback (and thus a
+     *   [descriptorChannel] item) will ever arrive. A caller must gate its wait-vs-skip decision
+     *   on this field alone: gating on the combination of both fields desyncs descriptorChannel,
+     *   since a real callback still lands on the channel even when [notificationSet] is false
+     *   (#147 review finding).
      */
-    private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic): Boolean {
+    private data class EnableNotificationResult(val notificationSet: Boolean, val callbackExpected: Boolean)
+
+    private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic): EnableNotificationResult {
         val notificationSet = gatt.setCharacteristicNotification(char, true)
         if (!notificationSet) {
             Log.w("BleManager", "enableNotification: setCharacteristicNotification failed for ${char.uuid}")
@@ -441,11 +460,11 @@ class BleManager(private val context: Context) {
         val descriptor = char.getDescriptor(CCC_DESCRIPTOR_UUID)
         if (descriptor == null) {
             Log.w("BleManager", "enableNotification: CCC descriptor not found for ${char.uuid}")
-            return false
+            return EnableNotificationResult(notificationSet, callbackExpected = false)
         }
         val writeInitiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
-                BluetoothGatt.GATT_SUCCESS
+                BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
@@ -455,7 +474,7 @@ class BleManager(private val context: Context) {
         if (!writeInitiated) {
             Log.w("BleManager", "enableNotification: writeDescriptor failed to initiate for ${char.uuid}")
         }
-        return notificationSet && writeInitiated
+        return EnableNotificationResult(notificationSet, callbackExpected = writeInitiated)
     }
 
     // ------------------------------------------------------------------
