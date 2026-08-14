@@ -436,7 +436,7 @@ class BleManager(private val context: Context) {
     // Init sequence
     // ------------------------------------------------------------------
 
-    private suspend fun runInitSequence() {
+    private suspend fun runInitSequence() = withLink {
         Log.i("BleManager", "runInitSequence: start")
 
         // 1. CMD 0x02 — get firmware version
@@ -464,7 +464,7 @@ class BleManager(private val context: Context) {
             .also { Log.d("BleManager", "CMD 0x18: ${if (it != null) "ok" else "timeout"}") }
 
         // 7. CMD 0x0A — list files
-        collectFileList()
+        collectFileListLocked()
 
         // Only mark CONNECTED if the physical link is still up
         if (bluetoothGatt != null) {
@@ -486,10 +486,13 @@ class BleManager(private val context: Context) {
     private var b0b3EverObserved = false
 
     /**
-     * Set while a file transfer owns the link. The FW920 streams audio in response to one
-     * CMD 0x0B and has no way to multiplex; sending it an unrelated command mid-transfer makes
-     * it answer that instead — observed killing a download outright (Ack(0x0B) "ready" followed
-     * by no audio at all), and a 45-minute recording takes long enough to collect ~16 of these.
+     * Set while a file transfer owns the link, cleared inside the same [withLink]-guarded
+     * critical section. linkMutex is what actually prevents a command from reaching the FW920
+     * mid-transfer now (#144) — this flag is no longer load-bearing for correctness, it exists
+     * purely so the 15s status poller can skip a poll outright (see [startPoller]) instead of
+     * suspending on linkMutex and queueing behind a multi-minute download. `linkMutex.isLocked`
+     * (checked alongside this flag, see [startPoller]) generalises the same skip-instead-of-queue
+     * optimisation to every held link operation, not just transfers.
      */
     @Volatile
     private var transferInProgress = false
@@ -507,6 +510,15 @@ class BleManager(private val context: Context) {
                     Log.d("BleManager", "poller: transfer in progress, skipping status")
                     continue
                 }
+                // linkMutex now serialises EVERY link operation (#144), not just transfers —
+                // without this check a poll would still get in, it would just suspend on
+                // linkMutex and queue up behind whatever is holding it (see withLink's KDoc).
+                // A status poll is disposable (the next one is 15s away regardless), so skip
+                // outright rather than adding an indefinite wait to the poller's coroutine.
+                if (linkMutex.isLocked) {
+                    Log.d("BleManager", "poller: link busy, skipping status")
+                    continue
+                }
                 refreshStatus()
             }
         }
@@ -522,13 +534,22 @@ class BleManager(private val context: Context) {
         refreshStatus()
     }
 
-    /** Debug-only: tell the FW920 to start a live recording on its own mic (CMD 0x06). */
-    suspend fun startDeviceRecording() {
+    /**
+     * Debug-only: tell the FW920 to start a live recording on its own mic (CMD 0x06). Like every
+     * [withLink]-guarded op, this suspends until the link is free — e.g. it will queue behind an
+     * in-flight downloadFile() rather than run concurrently with it. That's the intended
+     * tradeoff: before #144 an unguarded send here during a download killed the transfer outright
+     * (the FW920 answered this instead of the audio stream); queueing is strictly better.
+     */
+    suspend fun startDeviceRecording(): Unit = withLink {
         Log.i("BleManager", "startDeviceRecording: ${sendAndAwait(PKT_START_RECORDING, expectedCmd = 0x06)}")
     }
 
-    /** Debug-only: tell the FW920 to stop the live recording and persist the file (CMD 0x08). */
-    suspend fun stopDeviceRecording() {
+    /**
+     * Debug-only: tell the FW920 to stop the live recording and persist the file (CMD 0x08).
+     * Queues behind any in-flight link operation, same tradeoff as [startDeviceRecording].
+     */
+    suspend fun stopDeviceRecording(): Unit = withLink {
         Log.i("BleManager", "stopDeviceRecording: ${sendAndAwait(PKT_STOP_RECORDING, expectedCmd = 0x08)}")
     }
 
@@ -536,8 +557,8 @@ class BleManager(private val context: Context) {
     // Unknown service probe
     // ------------------------------------------------------------------
 
-    suspend fun runServiceProbe() {
-        val gatt = bluetoothGatt ?: run { Log.e("FW920_PROBE", "Not connected"); return }
+    suspend fun runServiceProbe() = withLink {
+        val gatt = bluetoothGatt ?: run { Log.e("FW920_PROBE", "Not connected"); return@withLink }
 
         // The three unknown services and their write/notify UUIDs
         val targets = listOf(
@@ -636,10 +657,10 @@ class BleManager(private val context: Context) {
     // Diagnostic probe — triggered via ADB broadcast
     // ------------------------------------------------------------------
 
-    suspend fun runProbe() {
+    suspend fun runProbe() = withLink {
         val gatt = bluetoothGatt ?: run {
             Log.e("FW920_PROBE", "Not connected — connect first")
-            return
+            return@withLink
         }
 
         Log.i("FW920_PROBE", "=== GATT SERVICE INVENTORY ===")
@@ -683,17 +704,29 @@ class BleManager(private val context: Context) {
     // Public suspend methods
     // ------------------------------------------------------------------
 
-    suspend fun refreshStatus() {
-        fileListMutex.withLock {
-            sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
-        }
+    suspend fun refreshStatus(): Unit = withLink {
+        sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05)
     }
 
-    suspend fun deleteFile(filename: String): Boolean {
+    suspend fun deleteFile(filename: String): Boolean = withLink {
         Log.i("BleManager", "deleteFile: '$filename'")
         // Two-phase delete: first 0x0D stages (payload=[0]), second 0x0D commits (payload=[1])
         val stage = sendAndAwait(buildDeleteFile(filename), expectedCmd = 0x0D)
         Log.i("BleManager", "deleteFile: stage=$stage")
+        if (stage == null) {
+            // The stage exchange timed out. Sending the commit packet anyway would race a
+            // late-arriving stage ack (payload=[0]) against the real commit ack: if the stage ack
+            // finally arrives after commit is sent, the commit's own awaitResponse(0x0D) would
+            // return it instead, misreading a stage ack's payload=[0] as a FAILED commit and
+            // reporting deleted=false even though the device actually deleted the file. Bail out
+            // instead of racing it.
+            Log.w("BleManager", "deleteFile: stage timed out, not sending commit")
+            return@withLink false
+        }
+        // Defence in depth for a stage ack that arrives late but still before commit is sent
+        // (e.g. a device retransmit) — a duplicate cmd=0x0D response sitting in the channel would
+        // otherwise be misread as the commit response the same way a truly-late one would be.
+        drainResidue()
         val commit = sendAndAwait(buildDeleteFile(filename), expectedCmd = 0x0D)
         Log.i("BleManager", "deleteFile: commit=$commit")
         val deleted = commit is ParsedResponse.Unknown &&
@@ -702,14 +735,22 @@ class BleManager(private val context: Context) {
         if (!deleted) {
             Log.w("BleManager", "deleteFile: commit failed, payload=${
                 (commit as? ParsedResponse.Unknown)?.payload?.toList()}")
-            return false
+            return@withLink false
         }
-        collectFileList()
+        collectFileListLocked()
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
         val stillPresent = _bleState.value.files.any { it.filename.equals(cleanName, ignoreCase = true) }
         Log.i("BleManager", "deleteFile: stillPresent=$stillPresent")
-        return !stillPresent
+        !stillPresent
     }
+
+    /** Local-only stats handed out of downloadFile's [withLink] block for post-lock logging. */
+    private data class DownloadOutcome(
+        val totalBytes: Long,
+        val chunkCount: Int,
+        val chunkSizes: Map<Int, Int>,
+        val first60ChunkSizes: List<Int>
+    )
 
     suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? {
         val context = this.context
@@ -719,85 +760,94 @@ class BleManager(private val context: Context) {
         val safeName = File(cleanName).name + ".mp3"
         val localFile = File(localDir, safeName).also { it.delete() }
 
-        var totalBytes = 0L
-        var chunkCount = 0
-        val chunkSizes = mutableMapOf<Int, Int>()
-        // Ordering the histogram loses is what makes the block structure invisible in logs; this
-        // keeps the first 60 chunk sizes in arrival order so the structure can be confirmed
-        // directly, capped so the log line stays bounded regardless of file size.
-        val first60ChunkSizes = mutableListOf<Int>()
-        val fos = FileOutputStream(localFile)
-        transferInProgress = true
+        // Only the wire transfer itself needs linkMutex — everything after fos.close() below
+        // (frame-scan re-read, log-string building, zero-byte cleanup) is pure local disk/CPU
+        // work with no responseChannel traffic, and running it inside the lock would block every
+        // other queued link consumer for as long as it takes.
+        val outcome = withLink {
+            var totalBytes = 0L
+            var chunkCount = 0
+            val chunkSizes = mutableMapOf<Int, Int>()
+            // Ordering the histogram loses is what makes the block structure invisible in logs; this
+            // keeps the first 60 chunk sizes in arrival order so the structure can be confirmed
+            // directly, capped so the log line stays bounded regardless of file size.
+            val first60ChunkSizes = mutableListOf<Int>()
+            val fos = FileOutputStream(localFile)
+            transferInProgress = true
 
-        // Protocol: send CMD 0x0B → device responds Ack(0x0B) "ready" → streams AudioChunks →
-        // signals Ack(0x0B) again when done. We treat the second Ack(0x0B) (after data) as EOF.
-        //
-        // buildDownloadFile() below can theoretically throw (buildPacket's require), and doing
-        // so here would skip the `totalBytes == 0L` cleanup further down, orphaning the 0-byte
-        // localFile just created above. That is guarded, not by ordering, but by
-        // MAX_PROTOCOL_FILENAME_CHARS + FW920Protocol.kt's init-time bound check keeping every
-        // possible payload under buildPacket's 255-byte ceiling (#116 finding 2) — so this can
-        // never actually throw. If that guarantee ever changes, this call site needs to move
-        // ahead of the file creation above.
-        try {
-            val pkt = buildDownloadFile(filename)
-            Log.i("BleManager", "downloadFile: CMD 0x0B '$cleanName'")
-            sendPacket(pkt)
+            // Protocol: send CMD 0x0B → device responds Ack(0x0B) "ready" → streams AudioChunks →
+            // signals Ack(0x0B) again when done. We treat the second Ack(0x0B) (after data) as EOF.
+            //
+            // buildDownloadFile() below can theoretically throw (buildPacket's require), and doing
+            // so here would skip the `totalBytes == 0L` cleanup further down, orphaning the 0-byte
+            // localFile just created above. That is guarded, not by ordering, but by
+            // MAX_PROTOCOL_FILENAME_CHARS + FW920Protocol.kt's init-time bound check keeping every
+            // possible payload under buildPacket's 255-byte ceiling (#116 finding 2) — so this can
+            // never actually throw. If that guarantee ever changes, this call site needs to move
+            // ahead of the file creation above.
+            try {
+                val pkt = buildDownloadFile(filename)
+                Log.i("BleManager", "downloadFile: CMD 0x0B '$cleanName'")
+                sendPacket(pkt)
 
-            var readyReceived = false
-            val timeoutMs = 10000L
-            var lastDataTime = System.currentTimeMillis()
+                var readyReceived = false
+                val timeoutMs = 10000L
+                var lastDataTime = System.currentTimeMillis()
 
-            outer@ while (System.currentTimeMillis() - lastDataTime < timeoutMs) {
-                val response = withTimeoutOrNull(2000) { responseChannel.receive() }
-                if (response == null) {
-                    Log.d("BleManager", "downloadFile: 2s idle, totalBytes=$totalBytes")
-                    continue
-                }
-
-                when (response) {
-                    is ParsedResponse.AudioChunk -> {
-                        // An empty chunk must not latch readyReceived: if it arrived between
-                        // CMD 0x0B and the ready Ack(0x0B), latching here would make that ready
-                        // ack read as the end-of-file ack below, ending the download at 0 bytes.
-                        if (response.data.isNotEmpty()) readyReceived = true
-
-                        fos.write(response.data)
-                        // The histogram these feed was previously logged from variables nothing
-                        // ever wrote to, so every transfer reported "0 chunks" and an empty map.
-                        chunkCount++
-                        chunkSizes[response.data.size] = (chunkSizes[response.data.size] ?: 0) + 1
-                        if (first60ChunkSizes.size < 60) first60ChunkSizes.add(response.data.size)
-                        totalBytes += response.data.size
-                        onProgress(totalBytes)
-                        lastDataTime = System.currentTimeMillis()
-                        if (totalBytes % (64 * 1024) < response.data.size) {
-                            Log.d("BleManager", "downloadFile: $totalBytes bytes received")
-                        }
+                outer@ while (System.currentTimeMillis() - lastDataTime < timeoutMs) {
+                    val response = withTimeoutOrNull(2000) { responseChannel.receive() }
+                    if (response == null) {
+                        Log.d("BleManager", "downloadFile: 2s idle, totalBytes=$totalBytes")
+                        continue
                     }
-                    is ParsedResponse.Ack -> {
-                        Log.i("BleManager", "downloadFile: Ack cmd=0x${response.cmd.toString(16)} totalBytes=$totalBytes readyReceived=$readyReceived")
-                        when (response.cmd) {
-                            0x07 -> break@outer
-                            0x0B -> {
-                                if (!readyReceived) {
-                                    // Initial "ready" Ack — keep waiting for data
-                                    lastDataTime = System.currentTimeMillis()
-                                } else {
-                                    // End-of-file Ack
-                                    break@outer
+
+                    when (response) {
+                        is ParsedResponse.AudioChunk -> {
+                            // An empty chunk must not latch readyReceived: if it arrived between
+                            // CMD 0x0B and the ready Ack(0x0B), latching here would make that ready
+                            // ack read as the end-of-file ack below, ending the download at 0 bytes.
+                            if (response.data.isNotEmpty()) readyReceived = true
+
+                            fos.write(response.data)
+                            // The histogram these feed was previously logged from variables nothing
+                            // ever wrote to, so every transfer reported "0 chunks" and an empty map.
+                            chunkCount++
+                            chunkSizes[response.data.size] = (chunkSizes[response.data.size] ?: 0) + 1
+                            if (first60ChunkSizes.size < 60) first60ChunkSizes.add(response.data.size)
+                            totalBytes += response.data.size
+                            onProgress(totalBytes)
+                            lastDataTime = System.currentTimeMillis()
+                            if (totalBytes % (64 * 1024) < response.data.size) {
+                                Log.d("BleManager", "downloadFile: $totalBytes bytes received")
+                            }
+                        }
+                        is ParsedResponse.Ack -> {
+                            Log.i("BleManager", "downloadFile: Ack cmd=0x${response.cmd.toString(16)} totalBytes=$totalBytes readyReceived=$readyReceived")
+                            when (response.cmd) {
+                                0x07 -> break@outer
+                                0x0B -> {
+                                    if (!readyReceived) {
+                                        // Initial "ready" Ack — keep waiting for data
+                                        lastDataTime = System.currentTimeMillis()
+                                    } else {
+                                        // End-of-file Ack
+                                        break@outer
+                                    }
                                 }
                             }
                         }
+                        else -> Log.d("BleManager", "downloadFile: unexpected=$response")
                     }
-                    else -> Log.d("BleManager", "downloadFile: unexpected=$response")
                 }
+            } finally {
+                transferInProgress = false
+                fos.close()
             }
-        } finally {
-            transferInProgress = false
-            fos.close()
+
+            DownloadOutcome(totalBytes, chunkCount, chunkSizes, first60ChunkSizes)
         }
 
+        val (totalBytes, chunkCount, chunkSizes, first60ChunkSizes) = outcome
         Log.i("BleManager", "downloadFile: done '$cleanName', totalBytes=$totalBytes")
         // A raw byte stream should be almost entirely one MTU-sized chunk repeated, with a
         // single odd-sized tail. Several distinct sizes, or a size that never matches the MTU,
@@ -834,14 +884,14 @@ class BleManager(private val context: Context) {
 
     // Add FileOutputStream import later or here if I can
 
-    suspend fun listFiles() {
-        collectFileList()
+    suspend fun listFiles() = withLink {
+        collectFileListLocked()
     }
 
 
 
     /** Probes CMD range 0x0D–0x17 with a filename payload to find the real delete command. */
-    suspend fun probeDeleteCmds(filename: String) {
+    suspend fun probeDeleteCmds(filename: String) = withLink {
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
         // Clamped like buildDeleteFile/buildDownloadFile (#116 finding 3): unclamped, a
         // pathologically long filename here would blow past buildPacket's 255-byte payload
@@ -859,12 +909,12 @@ class BleManager(private val context: Context) {
             Log.i("DeleteProbe", "CMD 0x${cmd.toString(16).uppercase()} response: $resp")
             kotlinx.coroutines.delay(300)
 
-            collectFileList()
+            collectFileListLocked()
             val gone = _bleState.value.files.none { it.filename.equals(cleanName, ignoreCase = true) }
             Log.i("DeleteProbe", "CMD 0x${cmd.toString(16).uppercase()} file gone=$gone")
             if (gone) {
                 Log.i("DeleteProbe", "*** FOUND DELETE CMD: 0x${cmd.toString(16).uppercase()} ***")
-                return
+                return@withLink
             }
         }
         Log.i("DeleteProbe", "No delete command found in 0x0D-0x17 range")
@@ -878,7 +928,7 @@ class BleManager(private val context: Context) {
      * whether the file appears via listFiles(). Logs under tag "UploadProbe".
      * Run on real hardware (device connected): adb broadcast com.daedalus.notes.PROBE_UPLOAD
      */
-    suspend fun probeUploadCmds() {
+    suspend fun probeUploadCmds() = withLink {
         val testName  = "UPLOADTEST01"
         val nameBytes = testName.padEnd(14, ' ').take(14).toByteArray(Charsets.US_ASCII)
         val dummy     = ByteArray(512) { (it and 0xFF).toByte() }
@@ -900,10 +950,10 @@ class BleManager(private val context: Context) {
                 kotlinx.coroutines.delay(300)
             }
             kotlinx.coroutines.delay(200)
-            collectFileList()
+            collectFileListLocked()
             if (_bleState.value.files.any { it.filename.equals(testName, ignoreCase = true) }) {
                 Log.i("UploadProbe", "*** UPLOAD COMMAND FOUND: 0x${cmd.toString(16).uppercase()} — '$testName' is now on device ***")
-                return
+                return@withLink
             }
         }
         Log.i("UploadProbe", "No upload command found in 0x0E–0x50. Protocol appears download-only.")
@@ -914,60 +964,78 @@ class BleManager(private val context: Context) {
     // ------------------------------------------------------------------
 
     /**
-     * Guards collectFileList's send+collect critical section, and refreshStatus's
-     * send+await — both drain the single shared responseChannel with no other correlation
-     * mechanism. Five call sites (runInitSequence, deleteFile, listFiles, probeDeleteCmds,
-     * probeUploadCmds) can invoke collectFileList with nothing else serialising them; without
-     * this mutex two overlapping calls both drain responseChannel, splitting and duplicating the
-     * FW920's file entries between them (#141, measured on hardware as a 9/23 split with 32
-     * entry lines for 16 unique files). refreshStatus is also guarded because the 15s
-     * status poller (startPoller) runs it in its own coroutine independent of any enumeration —
-     * transferInProgress does not cover this, since only downloadFile sets it — so an unguarded
-     * refreshStatus would drain and discard FileList entries meant for an in-flight
-     * collectFileList (#141 finding 1). This is a per-instance property (not in a companion
-     * object), so two BleManager instances never contend on the same lock — that would
-     * over-synchronise unrelated devices (e.g. during a device swap).
+     * Serialises EVERY operation that talks to the FW920 over the shared, uncorrelated
+     * responseChannel — not just enumeration. The FW920 is a single-command-at-a-time device and
+     * responses carry no request-correlation id, so ANY two concurrent link operations can steal
+     * each other's responses off responseChannel: collectFileList vs. collectFileList (#141,
+     * measured on hardware as a 9/23 split with 32 entry lines for 16 unique files), the 15s
+     * status poller's refreshStatus() vs. an in-flight enumeration (#141 finding 1), and — the
+     * remaining gap this mutex now also covers (#144) — refreshStatus() vs. deleteFile()'s own
+     * two 0x0D stage/commit exchanges (a stolen commit ack makes a successful hardware delete
+     * report "Failed to delete"), and any enumeration vs. downloadFile()'s audio stream (a stolen
+     * AudioChunk silently corrupts the download while it still reports success). Every public
+     * suspend entry point that sends a packet and waits on responseChannel — refreshStatus,
+     * deleteFile, downloadFile, listFiles, runInitSequence, startDeviceRecording,
+     * stopDeviceRecording, runProbe, runServiceProbe, probeDeleteCmds, probeUploadCmds — acquires
+     * this lock via [withLink] for its entire operation, so at most one of them is ever draining
+     * responseChannel at a time. This is a per-instance property (not in a companion object), so
+     * two BleManager instances never contend on the same lock — that would over-synchronise
+     * unrelated devices (e.g. during a device swap).
      *
-     * None of the guarded call sites invoke another guarded call while already holding this
-     * mutex (no call site is itself reached from inside another critical section here), so a
-     * plain non-reentrant Mutex cannot deadlock.
-     *
-     * This mutex only covers enumeration-vs-enumeration and enumeration-vs-status-poll
-     * contention (collectFileList and refreshStatus). Other responseChannel consumers remain
-     * UNGUARDED and can still be stolen from or interleaved with:
-     *   - downloadFile() (its audio stream has no request-correlation id either).
-     *   - deleteFile()'s own two sendAndAwait(..., expectedCmd = 0x0D) exchanges — only its
-     *     trailing collectFileList() call is guarded. Concretely: the 15s poller's
-     *     refreshStatus() can acquire this mutex uncontended while deleteFile is mid-0x0D
-     *     exchange, and its awaitResponse(0x05) discards the Unknown(cmd=0x0D) commit ack —
-     *     so deleteFile times out, returns false, and the UI reports "Failed to delete" for a
-     *     file the device actually deleted.
-     *   - runInitSequence()'s six sendAndAwait calls, including its own raw
-     *     sendAndAwait(PKT_GET_STATUS, expectedCmd = 0x05) — it does not route through the
-     *     now-guarded refreshStatus().
-     * Widening the guard to cover these is a larger change, tracked separately (out of scope
-     * here).
+     * Kotlin's Mutex is NON-REENTRANT. Several guarded operations internally enumerate files
+     * (deleteFile, runInitSequence, probeDeleteCmds, probeUploadCmds) — while already holding this
+     * lock via their own [withLink] call, re-acquiring it would deadlock. So callers already
+     * holding the lock invoke [collectFileListLocked] directly instead of going through
+     * [withLink] again. No guarded call site invokes another guarded (lock-acquiring) call site
+     * while already holding the lock, so this remains deadlock-free.
      */
-    private val fileListMutex = Mutex()
+    private val linkMutex = Mutex()
 
-    private suspend fun collectFileList() = fileListMutex.withLock {
-        // Drain any residue left behind by a PREVIOUS collectFileList() call that hit its
-        // per-item idle timeout: responseChannel has unlimited capacity and nothing else drains
-        // it between one collectFileList() call and the next (downloadFile, runServiceProbe,
-        // probeUploadCmds and runProbe all read responseChannel directly, but not in a way that
-        // drains stale enumeration residue between enumerations), so that call's still-arriving
-        // entries — and its eventual end-of-list sentinel — would otherwise be consumed here as
-        // if they were the response to THIS call's own request below, corrupting this call's
-        // result with stale data (#141 finding 2). 0x0A carries no request-correlation id, so an
-        // unconditional drain is the only mechanism available.
+    /**
+     * Runs [block] with [linkMutex] held, after draining any residue left in responseChannel by a
+     * PREVIOUS operation that gave up on its own timeout (e.g. collectFileList's per-item idle
+     * timeout, or downloadFile's idle timeout) — responseChannel has unlimited capacity and
+     * nothing else drains it between one guarded operation and the next, so a prior operation's
+     * still-arriving responses would otherwise be consumed here as if they belonged to THIS
+     * operation's own request, corrupting its result with stale data (#141 finding 2, generalised
+     * to every link operation by #144). None of the responses on this channel carry a
+     * request-correlation id, so an unconditional drain at the gate is the only mechanism
+     * available.
+     *
+     * Queueing: because linkMutex is a single per-instance gate, any user-initiated op called
+     * while another is in flight suspends until the link frees — e.g. a delete requested during
+     * an in-flight multi-minute download waits for that download to finish before it even sends
+     * its first packet. This is inherent to the FW920 being single-command-at-a-time, not a
+     * regression: pre-#144, sending during a transfer didn't queue, it corrupted the link (see
+     * [transferInProgress]'s KDoc). This function intentionally adds no timeout of its own — a
+     * caller that needs to bound how long it waits (e.g. to show the user a "busy" state) has to
+     * do that at the UI layer, out of scope here.
+     */
+    private suspend fun <T> withLink(block: suspend () -> T): T = linkMutex.withLock {
+        drainResidue()
+        block()
+    }
+
+    private fun drainResidue() {
         var drainedCount = 0
         while (responseChannel.tryReceive().isSuccess) {
             drainedCount++
         }
         if (drainedCount > 0) {
-            Log.d("BleManager", "collectFileList: drained $drainedCount stale residue item(s) from responseChannel")
+            Log.d("BleManager", "withLink: drained $drainedCount stale residue item(s) from responseChannel")
         }
+    }
 
+    /**
+     * Must only be called while [linkMutex] is already held (see [withLink]). Also drains
+     * residue itself, not just at the enclosing [withLink]'s entry: probeDeleteCmds and
+     * probeUploadCmds call this in a LOOP under a single lock hold, so without a drain here too,
+     * iteration N timing out with stragglers still in flight would have them consumed by
+     * iteration N+1's enumeration as if they were its own response, corrupting it exactly like
+     * the cross-call residue this same drain already prevents at the [withLink] boundary.
+     */
+    private suspend fun collectFileListLocked() {
+        drainResidue()
         Log.i("BleManager", "collectFileList: sending PKT_LIST_FILES")
         sendPacket(PKT_LIST_FILES)
         val collected = mutableListOf<FileEntry>()

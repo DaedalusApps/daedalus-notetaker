@@ -70,6 +70,26 @@ class BleManagerTest {
 
     private fun negotiatedMtu(): Int = privateField(manager, "negotiatedMtu") as Int
 
+    /**
+     * Wires a mocked GATT + write characteristic onto [target] and returns an AtomicInteger that
+     * counts every writeCharacteristic call, so tests can gate response-feeding on "a specific
+     * request has actually gone out" instead of a bare delay (see
+     * collectFileList_twoConcurrentCalls's KDoc for why write-count gating is required for these
+     * races to be deterministic).
+     */
+    private fun wireGattWithWriteCounter(target: BleManager = manager): AtomicInteger {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
+        val writeCount = AtomicInteger(0)
+        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writeCount.incrementAndGet()
+            true
+        }
+        setPrivateField(target, "bluetoothGatt", gatt)
+        setPrivateField(target, "writeChar", writeCharMock)
+        return writeCount
+    }
+
     // --- FIX 5: onMtuChanged must ignore a non-success status --------------------------------
 
     @Test
@@ -224,15 +244,7 @@ class BleManagerTest {
      */
     @Test
     fun collectFileList_twoConcurrentCalls_eachObservesCompleteListNoDuplicatesNoOmissions() {
-        val gatt = mockk<BluetoothGatt>(relaxed = true)
-        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
-        val writeCount = AtomicInteger(0)
-        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
-            writeCount.incrementAndGet()
-            true
-        }
-        setPrivateField(manager, "bluetoothGatt", gatt)
-        setPrivateField(manager, "writeChar", writeCharMock)
+        val writeCount = wireGattWithWriteCounter()
 
         val expectedNames = (1..16).map { "REC%02d".format(it) }
 
@@ -381,15 +393,7 @@ class BleManagerTest {
      */
     @Test
     fun refreshStatus_duringActiveEnumeration_stealsFileListEntries() {
-        val gatt = mockk<BluetoothGatt>(relaxed = true)
-        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
-        val writeCount = AtomicInteger(0)
-        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
-            writeCount.incrementAndGet()
-            true
-        }
-        setPrivateField(manager, "bluetoothGatt", gatt)
-        setPrivateField(manager, "writeChar", writeCharMock)
+        val writeCount = wireGattWithWriteCounter()
 
         val expectedNames = (1..16).map { "REC%02d".format(it) }
 
@@ -438,15 +442,7 @@ class BleManagerTest {
      */
     @Test
     fun collectFileList_residueFromTimedOutPriorCall_pollutesTheNextCall() {
-        val gatt = mockk<BluetoothGatt>(relaxed = true)
-        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
-        val writeCount = AtomicInteger(0)
-        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
-            writeCount.incrementAndGet()
-            true
-        }
-        setPrivateField(manager, "bluetoothGatt", gatt)
-        setPrivateField(manager, "writeChar", writeCharMock)
+        val writeCount = wireGattWithWriteCounter()
 
         runBlocking {
             withTimeout(8000) {
@@ -495,6 +491,263 @@ class BleManagerTest {
             "the second collectFileList() call consumed stale residue from the first, timed-" +
                 "out call instead of its own fresh response (#141 finding 2)",
             freshNames.toSet(), files.map { it.filename }.toSet()
+        )
+    }
+
+    // --- #144: deleteFile's own 0x0D exchanges are unguarded --------------------------------
+
+    /**
+     * Reproduces the measured hardware bug (#144): deleteFile()'s two sendAndAwait(...,
+     * expectedCmd = 0x0D) exchanges (stage then commit) are not covered by any mutex — only its
+     * trailing collectFileList() call is. The 15s status poller's refreshStatus() can acquire
+     * fileListMutex uncontended while deleteFile is mid-exchange, and its own
+     * awaitResponse(0x05) loop drains the same shared responseChannel, silently discarding the
+     * Unknown(cmd=0x0D) commit ack meant for deleteFile. deleteFile then times out waiting for
+     * the commit ack, returns false, and the UI reports "Failed to delete" for a file the device
+     * actually deleted.
+     */
+    @Test
+    fun deleteFile_duringConcurrentRefreshStatus_commitAckIsNotStolen() {
+        val writeCount = wireGattWithWriteCounter()
+
+        var deleteResult = false
+        runBlocking {
+            withTimeout(6000) {
+                val jobDelete = async(Dispatchers.Default) { manager.deleteFile("REC01") }
+                // Wait for deleteFile's first write (the stage 0x0D request).
+                while (writeCount.get() < 1) delay(5)
+
+                // Simulate the 15s status poller firing while deleteFile is still mid-exchange —
+                // nothing before the fix stops refreshStatus()'s own awaitResponse(0x05) loop
+                // from also draining responseChannel concurrently.
+                val jobRefresh = async(Dispatchers.Default) { manager.refreshStatus() }
+                // Give both coroutines time to actually park on responseChannel.receive() before
+                // any entries are sent, so the FIFO round-robin theft can actually manifest.
+                delay(100)
+
+                responseChannel().trySend(ParsedResponse.Unknown(0x0D, byteArrayOf(0)))  // stage ack
+                while (writeCount.get() < 2 && !jobDelete.isCompleted) delay(5)
+                delay(100)
+                responseChannel().trySend(ParsedResponse.Unknown(0x0D, byteArrayOf(1)))  // commit ack
+
+                // If the commit ack was consumed correctly, deleteFile proceeds to its
+                // post-delete enumeration (a third write). If it was instead stolen, deleteFile
+                // bails out early without enumerating — wait for whichever happens first.
+                while (writeCount.get() < 3 && !jobDelete.isCompleted) delay(5)
+                if (writeCount.get() >= 3) {
+                    listOf("REC02", "REC03").forEach { name ->
+                        responseChannel().trySend(ParsedResponse.FileList(FileEntry(name, 1024L)))
+                    }
+                    responseChannel().trySend(ParsedResponse.FileList(null))
+                }
+
+                // Let refreshStatus complete too, so it doesn't leak into a later test. Gated on
+                // its own write (the 4th overall: stage, commit, deleteFile's post-delete
+                // list-files, then refreshStatus's status request) rather than sent unconditionally
+                // — refreshStatus is now queued behind deleteFile's linkMutex hold, and withLink
+                // drains residue at its own entry, so a Status sent before refreshStatus's write
+                // goes out would just be drained away as stale residue, forcing this test to dead-
+                // wait out refreshStatus's own 3s sendAndAwait timeout instead.
+                while (writeCount.get() < 4 && !jobRefresh.isCompleted) delay(5)
+                responseChannel().trySend(
+                    ParsedResponse.Status(
+                        cmd = 0x05,
+                        status = DeviceStatus(50, 1000L, 2000L, false, "fw")
+                    )
+                )
+
+                deleteResult = jobDelete.await()
+                jobRefresh.await()
+            }
+        }
+
+        assertTrue(
+            "deleteFile's commit ack must not be stolen by a concurrent refreshStatus() (#144)",
+            deleteResult
+        )
+    }
+
+    // --- #144: downloadFile's audio stream is unguarded --------------------------------------
+
+    /**
+     * Reproduces the measured hardware bug (#144): downloadFile() reads responseChannel.receive()
+     * directly with no serialisation. A concurrent collectFileList() (via listFiles()) — whose
+     * awaitResponse(0x0A) discards any AudioChunk it happens to receive — can steal chunks meant
+     * for an in-flight download, silently corrupting the downloaded file while it still reports
+     * success.
+     */
+    @Test
+    fun downloadFile_duringConcurrentListFiles_audioChunksAreNotStolen() {
+        val tempDir = java.nio.file.Files.createTempDirectory("ble_manager_test2").toFile()
+        every { context.getExternalFilesDir(null) } returns tempDir
+
+        val writeCount = wireGattWithWriteCounter()
+
+        val chunks = (0 until 20).map { i -> ByteArray(10) { ((i * 10) + it).toByte() } }
+        val expectedBytes = chunks.reduce { acc, c -> acc + c }
+
+        var resultFile: File? = null
+        runBlocking {
+            // Generous: on unfixed code downloadFile can legitimately run out its real 10s idle
+            // timeout before giving up, since its own internal timeout is real wall-clock.
+            withTimeout(15000) {
+                val jobDownload = async(Dispatchers.Default) { manager.downloadFile("REC01") {} }
+                // Wait for downloadFile's CMD 0x0B write.
+                while (writeCount.get() < 1) delay(5)
+
+                val jobList = async(Dispatchers.Default) { manager.listFiles() }
+                // Give both coroutines time to actually park on responseChannel.receive().
+                delay(100)
+
+                responseChannel().trySend(ParsedResponse.Ack(0x0B))  // ready
+                chunks.forEach { c -> responseChannel().trySend(ParsedResponse.AudioChunk(c)) }
+                responseChannel().trySend(ParsedResponse.Ack(0x0B))  // EOF
+
+                while (writeCount.get() < 2 && !jobList.isCompleted) delay(5)
+                if (writeCount.get() >= 2) {
+                    responseChannel().trySend(ParsedResponse.FileList(FileEntry("REC02", 1024L)))
+                    responseChannel().trySend(ParsedResponse.FileList(null))
+                }
+
+                resultFile = jobDownload.await()
+                jobList.await()
+            }
+        }
+
+        assertTrue("downloadFile should have produced a file", resultFile != null)
+        val actualBytes = resultFile!!.readBytes()
+        assertEquals(
+            "downloaded file content must exactly match the concatenation of all audio chunks " +
+                "— a concurrent listFiles() must not steal any AudioChunk (#144)",
+            expectedBytes.size, actualBytes.size
+        )
+        assertTrue(expectedBytes.contentEquals(actualBytes))
+    }
+
+    // --- #144 review round finding 1: deleteFile misreads a late stage ack as the commit ack --
+
+    /**
+     * If deleteFile's stage sendAndAwait(0x0D) times out (device latency > 3s), the OLD code
+     * still sent the commit packet regardless. A stage ack that then arrives late — after commit
+     * has been sent but before its own awaitResponse(0x0D) reads it — gets consumed as if it were
+     * the COMMIT response instead: its payload=[0] ("staged, not committed") reads as a failed
+     * commit, so deleteFile reports false even though the device may go on to actually delete the
+     * file once the (never-sent) commit... except in this exact scenario the device never even
+     * received a commit request, since deleteFile only sent ONE packet (the stage) and then misread
+     * its own late stage ack as commit's answer. The fix bails out on a null stage instead of
+     * racing a stray late response — provable here via write count: a timed-out stage exchange
+     * must never cause a second (commit) packet to go out.
+     */
+    @Test
+    fun deleteFile_stageTimesOutThenArrivesLate_doesNotMisreadAsCommitAckAndSendsOnlyOnePacket() {
+        val writeCount = wireGattWithWriteCounter()
+
+        var deleteResult = true  // default true so a bug that silently succeeds isn't masked
+        runBlocking {
+            withTimeout(8000) {
+                val jobDelete = async(Dispatchers.Default) { manager.deleteFile("REC01") }
+                while (writeCount.get() < 1) delay(5)
+
+                // Let the stage sendAndAwait's own 3000ms timeout actually fire in real time
+                // before its ack is delivered — reproduces a device with >3s stage latency.
+                delay(3200)
+                responseChannel().trySend(ParsedResponse.Unknown(0x0D, byteArrayOf(0)))  // late stage ack
+
+                deleteResult = jobDelete.await()
+            }
+        }
+
+        assertFalse(
+            "deleteFile must not report success from a late stage ack it never correctly " +
+                "attributed (#144 review finding 1)",
+            deleteResult
+        )
+        assertEquals(
+            "a timed-out stage exchange must bail out instead of sending a commit packet — " +
+                "otherwise the late stage ack sitting in the channel gets misread as the commit " +
+                "response (#144 review finding 1)",
+            1, writeCount.get()
+        )
+    }
+
+    // --- #144 review round finding 2: collectFileListLocked's own loop needs its own drain ----
+
+    /**
+     * withLink's drain only runs once, at the OUTER gate entry. probeDeleteCmds and
+     * probeUploadCmds call collectFileListLocked() in a LOOP under a single withLink hold, so
+     * without a drain inside collectFileListLocked itself, one iteration's enumeration timing out
+     * with stragglers still arriving would have them consumed by the NEXT iteration's own
+     * collectFileListLocked call as if they were its answer — the same cross-call corruption
+     * #141/#144's drain already prevents at the outer boundary, just one level down.
+     *
+     * Drives this through probeDeleteCmds (a real looping call site), using write-count gating
+     * throughout so the residue is sent only once it is guaranteed to be genuine stragglers (i.e.
+     * after the first iteration's own probe+enumeration are fully done) and the fresh answer is
+     * sent only once the second iteration's own list-files request has actually gone out.
+     */
+    @Test
+    fun probeDeleteCmds_strandedEnumerationResidue_doesNotCorruptNextIterationsEnumeration() {
+        val writeCount = wireGattWithWriteCounter()
+        val cleanName = "TARGETFILE"
+
+        runBlocking {
+            withTimeout(15000) {
+                val jobProbe = async(Dispatchers.Default) { manager.probeDeleteCmds(cleanName) }
+
+                // Iteration 1 (cmd 0x0D): answer its own probe-response await (expectedCmd=0x0D)
+                // immediately with a plain ack, so the test isn't forced to wait out its 1500ms
+                // timeout for no reason — awaitResponse's linear scan would otherwise discard any
+                // FileList sent here anyway, since FileList never matches a non-0x0A expectedCmd.
+                while (writeCount.get() < 1) delay(5)
+                responseChannel().trySend(ParsedResponse.Unknown(0x0D, byteArrayOf()))
+
+                // Iteration 1's collectFileListLocked write (#2).
+                while (writeCount.get() < 2) delay(5)
+                // Answer with two entries, INCLUDING cleanName, so iteration 1 does not report
+                // "gone" and the loop proceeds to iteration 2 — but withhold the end-of-list
+                // sentinel so this enumeration gives up on its own hard-coded 3000ms idle timeout
+                // instead of completing cleanly, leaving genuine stragglers unconsumed.
+                responseChannel().trySend(ParsedResponse.FileList(FileEntry(cleanName, 1024L)))
+                responseChannel().trySend(ParsedResponse.FileList(FileEntry("OTHER", 1024L)))
+
+                // Iteration 2's probe write (#3) only happens once iteration 1's
+                // collectFileListLocked has genuinely given up on its 3000ms idle timeout and
+                // probeDeleteCmds has moved on — so by the time we observe it, iteration 1 is
+                // fully done.
+                while (writeCount.get() < 3) delay(5)
+                // Answer iteration 2's own probe-response await (expectedCmd=0x0E) immediately
+                // too, for the same reason as iteration 1 above — and critically, this makes what
+                // follows deterministic: awaitResponse(0x0E) resumes and returns synchronously
+                // relative to probeDeleteCmds' own subsequent 300ms delay before it calls
+                // collectFileListLocked again, so anything sent right here — the straggler entry
+                // and end-of-list sentinel modelling iteration 1's late, never-consumed
+                // response — is guaranteed to already be sitting in responseChannel well before
+                // collectFileListLocked's own drain (or lack thereof) runs, with no reliance on
+                // real-time margins.
+                responseChannel().trySend(ParsedResponse.Unknown(0x0E, byteArrayOf()))
+                val strayName = "STALE_STRAGGLER"
+                responseChannel().trySend(ParsedResponse.FileList(FileEntry(strayName, 1024L)))
+                responseChannel().trySend(ParsedResponse.FileList(null))
+
+                // Iteration 2's own collectFileListLocked write (#4) — only once this has
+                // actually gone out do we send the FRESH answer, so a fix that correctly drains
+                // the stragglers above waits for and receives this, not iteration 1's leftovers.
+                // Deliberately excludes cleanName so iteration 2 reports "gone" and
+                // probeDeleteCmds returns immediately instead of looping further.
+                while (writeCount.get() < 4) delay(5)
+                val freshName = "FRESH_ANSWER"
+                responseChannel().trySend(ParsedResponse.FileList(FileEntry(freshName, 1024L)))
+                responseChannel().trySend(ParsedResponse.FileList(null))
+
+                jobProbe.await()
+            }
+        }
+
+        val filenames = manager.bleState.value.files.map { it.filename }.toSet()
+        assertEquals(
+            "iteration 2's enumeration must reflect its OWN fresh response, not iteration 1's " +
+                "stranded stragglers (#144 review finding 2)",
+            setOf("FRESH_ANSWER"), filenames
         )
     }
 }
