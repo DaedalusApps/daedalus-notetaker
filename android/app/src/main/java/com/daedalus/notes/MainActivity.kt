@@ -163,6 +163,39 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                AdbActions.DB_PRAGMA -> {
+                    Log.i("DaedalusADB", "DB pragma probe triggered")
+                    lifecycleScope.launch {
+                        // #125: reads must go through Room's own write connection -- the exact
+                        // one normal INSERT/UPDATE/DELETE writes use -- not a fresh or read-only
+                        // connection the app opens for this probe. openHelper.writableDatabase is
+                        // that connection: it is the same cached SupportSQLiteDatabase Room hands
+                        // out to every DAO write and to InvalidationTracker.internalInit, which is
+                        // what set PRAGMA recursive_triggers='ON' on it in the first place.
+                        val db = com.daedalus.notes.data.db.AppDatabase.getInstance(applicationContext)
+                            .openHelper.writableDatabase
+                        val recursiveTriggers = db.query("PRAGMA recursive_triggers").use { c ->
+                            if (c.moveToFirst()) c.getString(0) else "?"
+                        }
+                        val tempStore = db.query("PRAGMA temp_store").use { c ->
+                            if (c.moveToFirst()) c.getString(0) else "?"
+                        }
+                        val triggers = db.query(
+                            "SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name"
+                        ).use { c ->
+                            val names = mutableListOf<String>()
+                            while (c.moveToNext()) names.add(c.getString(0))
+                            names.joinToString(",")
+                        }
+                        val userVersion = db.query("PRAGMA user_version").use { c ->
+                            if (c.moveToFirst()) c.getString(0) else "?"
+                        }
+                        Log.i("DaedalusADB", "DB_PRAGMA recursive_triggers=$recursiveTriggers")
+                        Log.i("DaedalusADB", "DB_PRAGMA temp_store=$tempStore")
+                        Log.i("DaedalusADB", "DB_PRAGMA triggers=$triggers")
+                        Log.i("DaedalusADB", "DB_PRAGMA user_version=$userVersion")
+                    }
+                }
             }
         }
     }
