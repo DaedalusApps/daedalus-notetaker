@@ -22,7 +22,7 @@ import com.daedalus.notes.ai.expandWithTopicSiblings
 import com.daedalus.notes.ai.EmbeddingService
 import com.daedalus.notes.ai.LocalLlmService
 import com.daedalus.notes.ai.MarkdownExporter
-import com.daedalus.notes.ai.SpeakerDiarizer
+import com.daedalus.notes.ai.TranscriptFormatter
 import com.daedalus.notes.ai.TranscriptionService
 import com.daedalus.notes.ai.isWhisperReady
 import com.daedalus.notes.ai.isTranscriptReadable
@@ -706,13 +706,13 @@ class RecordingViewModel @JvmOverloads constructor(
     suspend fun getPartsOf(filename: String): List<Recording> = repo.getPartsOf(filename)
 
     /**
-     * Debug ADB support for com.daedalus.notes.FORMAT_SPEAKER: runs [SpeakerDiarizer] over the
-     * stored transcript for [filename] and returns the formatted result, or null if the
+     * Debug ADB support for com.daedalus.notes.FORMAT_PARAGRAPHS: runs [TranscriptFormatter] over
+     * the stored transcript for [filename] and returns the formatted result, or null if the
      * recording or its transcript doesn't exist.
      */
-    suspend fun formatSpeakerPreview(filename: String): String? {
+    suspend fun formatParagraphsPreview(filename: String): String? {
         val transcript = repo.get(filename)?.transcript?.takeIf { it.isNotBlank() } ?: return null
-        return SpeakerDiarizer.formatTranscript(transcript)
+        return TranscriptFormatter.formatParagraphs(transcript)
     }
 
     /**

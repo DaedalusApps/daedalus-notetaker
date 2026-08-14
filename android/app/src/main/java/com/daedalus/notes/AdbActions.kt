@@ -29,13 +29,13 @@ object AdbActions {
     const val DELETE_FILE = "com.daedalus.notes.DELETE_FILE"
     const val ADD_CALENDAR = "com.daedalus.notes.ADD_CALENDAR"
     const val SET_SPEED = "com.daedalus.notes.SET_SPEED"
-    const val FORMAT_SPEAKER = "com.daedalus.notes.FORMAT_SPEAKER"
+    const val FORMAT_PARAGRAPHS = "com.daedalus.notes.FORMAT_PARAGRAPHS"
     const val SEARCH_FTS = "com.daedalus.notes.SEARCH_FTS"
 
     /** Every action the dynamic receiver's `when` block handles. */
     val HANDLED: List<String> = listOf(
         SYNC, PROBE, PROBE2, PROBE_DELETE, PROBE_UPLOAD, START_RECORDING, STOP_RECORDING,
-        ANALYZE, REDOWNLOAD, DELETE_FILE, ADD_CALENDAR, SET_SPEED, FORMAT_SPEAKER,
+        ANALYZE, REDOWNLOAD, DELETE_FILE, ADD_CALENDAR, SET_SPEED, FORMAT_PARAGRAPHS,
         SEARCH_FTS
     )
 
