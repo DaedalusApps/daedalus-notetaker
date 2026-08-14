@@ -87,7 +87,15 @@ class BleManager(private val context: Context) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // @Volatile: onConnectionStateChange fires on a Binder callback thread while connect()/
+    // disconnect() run on the caller's thread — without a visibility guarantee, a stale read of
+    // bluetoothGatt in the stale-callback branch could destructively tear down a live connection
+    // instead of a superseded one. The two are otherwise unsynchronized by design: a benign race
+    // remains where a callback observes a slightly-stale value and reports on a connection
+    // that's about to be superseded anyway — worst case a transient stale errorMessage.
+    @Volatile
     private var bluetoothGatt: BluetoothGatt? = null
+    @Volatile
     private var writeChar: BluetoothGattCharacteristic? = null
     private var leScanner: BluetoothLeScanner? = null
     private var pollJob: Job? = null
@@ -215,11 +223,18 @@ class BleManager(private val context: Context) {
         stopPoller()
         initJob?.cancel()
         initJob = null
-        bluetoothGatt?.disconnect()
-        bluetoothGatt?.close()
-        bluetoothGatt = null
-        writeChar     = null
+        bluetoothGatt?.let { gatt ->
+            gatt.disconnect()
+            closeAndClearGatt(gatt)
+        }
         _bleState.update { it.copy(connectionState = ConnectionState.DISCONNECTED) }
+    }
+
+    /** Closes [gatt] and clears the current-connection fields it owns. */
+    private fun closeAndClearGatt(gatt: BluetoothGatt) {
+        gatt.close()
+        bluetoothGatt = null
+        writeChar = null
     }
 
     // ------------------------------------------------------------------
@@ -246,18 +261,19 @@ class BleManager(private val context: Context) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     // #151 (closed as unsubstantiated, folded in here): only request the MTU on a
                     // genuinely successful connect — some OEM/version combos can report
-                    // STATE_CONNECTED with a failure status. On failure, don't strand the
-                    // connection at CONNECTING forever — tear it down and surface an error,
-                    // mirroring onServicesDiscovered's failure handling below.
+                    // STATE_CONNECTED with a failure status. On failure, follow the file's
+                    // onScanFailed precedent: go DISCONNECTED (not ERROR) so the auto-connect
+                    // LaunchedEffect can retry cleanly, with an errorMessage naming the status
+                    // for diagnosability. (The follow-up STATE_DISCONNECTED callback for this
+                    // now-nulled gatt will land in the stale branch above as a no-op.)
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         gatt.requestMtu(512)
                     } else {
-                        gatt.close()
-                        bluetoothGatt = null
-                        writeChar = null
+                        Log.w("BleManager", "Connect failed with status $status — going DISCONNECTED for auto-retry")
+                        closeAndClearGatt(gatt)
                         _bleState.update {
                             it.copy(
-                                connectionState = ConnectionState.ERROR,
+                                connectionState = ConnectionState.DISCONNECTED,
                                 errorMessage    = "Connect failed: $status"
                             )
                         }
@@ -265,9 +281,7 @@ class BleManager(private val context: Context) {
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     stopPoller()
-                    writeChar = null
-                    gatt.close()
-                    bluetoothGatt = null
+                    closeAndClearGatt(gatt)
                     _bleState.update {
                         it.copy(connectionState = ConnectionState.DISCONNECTED)
                     }
@@ -277,6 +291,10 @@ class BleManager(private val context: Context) {
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                // Close the gatt here too — otherwise every Scan retry from this ERROR state
+                // leaks a GATT client (#148/#151 review). ERROR (not DISCONNECTED) is kept:
+                // discovery failure staying user-visible as an error is existing behaviour.
+                closeAndClearGatt(gatt)
                 _bleState.update {
                     it.copy(
                         connectionState = ConnectionState.ERROR,
@@ -288,6 +306,7 @@ class BleManager(private val context: Context) {
 
             val service = gatt.getService(UUID.fromString(SERVICE_UUID))
             if (service == null) {
+                closeAndClearGatt(gatt)
                 _bleState.update {
                     it.copy(
                         connectionState = ConnectionState.ERROR,

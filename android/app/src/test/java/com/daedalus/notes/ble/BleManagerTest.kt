@@ -109,6 +109,7 @@ class BleManagerTest {
     }
 
     // --- #148: a stale (superseded) GATT callback reporting STATE_CONNECTED must be torn down ---
+    // --- (that gatt only — the current connection must be left completely untouched) ------------
 
     @Test
     fun onConnectionStateChange_staleGattReportsConnected_disconnectsAndClosesThatGattOnly() {
@@ -123,33 +124,29 @@ class BleManagerTest {
 
         verify { staleGatt.disconnect() }
         verify { staleGatt.close() }
+        verify(exactly = 0) { currentGatt.disconnect() }
+        verify(exactly = 0) { currentGatt.close() }
         assertEquals(currentGatt, privateField(manager, "bluetoothGatt"))
         assertEquals(stateBefore, manager.bleState.value.connectionState)
     }
 
-    // --- #151 (folded into #148): a failed-status STATE_CONNECTED must not request an MTU -------
+    // --- #151 (closed as unsubstantiated, applied here since we're already editing this
+    // --- callback): a failed-status STATE_CONNECTED must not request an MTU, and — per the
+    // --- file's own onScanFailed precedent — must go DISCONNECTED (not ERROR) so the
+    // --- auto-connect LaunchedEffect can retry cleanly, with the stale gatt closed and cleared
+    // --- so it isn't leaked, and an errorMessage naming the status for diagnosability. ----------
 
     @Test
-    fun onConnectionStateChange_currentConnectionFailedStatus_doesNotRequestMtu() {
+    fun onConnectionStateChange_currentConnectionFailedStatus_goesDisconnectedAndClosesGatt() {
         val gatt = mockk<BluetoothGatt>(relaxed = true)
         setPrivateField(manager, "bluetoothGatt", gatt)
 
         gattCallback.onConnectionStateChange(gatt, /* status = */ 133, BluetoothProfile.STATE_CONNECTED)
 
         verify(exactly = 0) { gatt.requestMtu(any()) }
-    }
-
-    // --- #151 fold-in defect: a failed-status STATE_CONNECTED must not strand the connection at -
-    // --- CONNECTING forever — it must surface as ERROR, mirroring onServicesDiscovered's idiom --
-
-    @Test
-    fun onConnectionStateChange_currentConnectionFailedStatus_surfacesErrorInsteadOfStrandingAtConnecting() {
-        val gatt = mockk<BluetoothGatt>(relaxed = true)
-        setPrivateField(manager, "bluetoothGatt", gatt)
-
-        gattCallback.onConnectionStateChange(gatt, /* status = */ 133, BluetoothProfile.STATE_CONNECTED)
-
-        assertEquals(ConnectionState.ERROR, manager.bleState.value.connectionState)
+        verify { gatt.close() }
+        assertNull(privateField(manager, "bluetoothGatt"))
+        assertEquals(ConnectionState.DISCONNECTED, manager.bleState.value.connectionState)
         assertTrue(manager.bleState.value.errorMessage.contains("133"))
     }
 
