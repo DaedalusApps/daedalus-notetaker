@@ -7,16 +7,16 @@ this whole file before starting — it is written to be the only context you nee
 
 ## Current state
 
-- **`main`** = `354b650` (merge of #140), clean working tree, in sync with `origin/main`, and
+- **`main`** = `5ca5047` (merge of #145), clean working tree, in sync with `origin/main`, and
   **green on CI** (verified).
-- **`.\gradlew :app:testDebugUnitTest` → 486 tests / 0 failures / 1 skipped.** The single skip is
+- **`.\gradlew :app:testDebugUnitTest` → 490 tests / 0 failures / 1 skipped.** The single skip is
   `Mp3FrameScanTest.realFileCrossCheck` and it is **by design** — a skip there is correct; a *pass*
   would mean something regressed.
-- **`:app:assembleRelease` builds clean** at versionCode **356**, which is what is installed on the
+- **`:app:assembleRelease` builds clean** at versionCode **368**, which is what is installed on the
   phone.
-- **Phone** (Galaxy S26 Ultra) is on the **release** build, **versionCode 356**, `versionCode =
-  gitCommitCount` (`app/build.gradle.kts:41`), installed with `adb install -r`. Non-debuggable,
-  launches clean, BLE connected.
+- **Phone** (Galaxy S26 Ultra) is on the **release** build, **versionCode 368**, `versionCode =
+  gitCommitCount` (`app/build.gradle.kts:41`), installed with `adb install -r`. Verified
+  non-debuggable, launches clean, BLE connected.
 - **The schema 12→13 migration has run, on the real database, and is DONE.** `user_version` is now
   13, `integrity_check ok`, all 40 rows preserved and byte-identical before/after (270,329 chars
   both sides, no MD5 changed). FTS was back-filled **40/40 rows** — `MATCH 'actually'` returns
@@ -25,7 +25,8 @@ this whole file before starting — it is written to be the only context you nee
 - **The app's own search returns 12 for that same query, not 24 — this is correct, not a bug.**
   It is the parent/part split: 12 parent rows + 12 `_pN` part rows both match, and the UI shows
   parents. Do not re-investigate this.
-- **#119 and #141 are the open issues.** #136, #116, #125 are all closed this session (see below).
+- **#119, #141 and #144 are the open issues.** #141 is partially fixed by PR #145 but stays open
+  — see below. #136, #116, #125 are all closed this session (see below).
 
 ### Device access: release is not debuggable — read this before trying to pull the db
 
@@ -48,7 +49,7 @@ is not obvious from the manifest alone.
   set for device-side paths — that env var only affects device paths, not the local file argument.
 
 The pre-migration schema-12 db from this session is preserved outside the repo at
-`C:\Users\franc\daedalus-db-snapshots\2026-08-14-session7\db_pre_migration\`. **It cannot be
+`C:\Users\franc\local-persist\daedalus-notetaker-db-snapshots\2026-08-14-session7\`. **It cannot be
 recreated** — the source data (the owner's own real, unmigrated database) no longer exists on the
 phone.
 
@@ -59,9 +60,11 @@ phone.
 | #138 | **#136 closed** | Six raw `Dispatchers.IO` sites converted to injectable dispatcher; vacuous tests fixed; `deleteOnExit()` leak and dispatcher `Delay` gap also fixed |
 | #139 | **#116 closed** | `buildPacket` now throws on oversize payload instead of silently wrapping the length byte; filename builders clamp to a derived, wire-format-correct limit |
 | #140 | refs #125 | Permanent debug-only `DB_PRAGMA` ADB probe added; used to verify #125 on hardware, then closed manually (no code fix needed) |
+| #145 | refs #141 (stays open) | Per-instance `Mutex` serialising `collectFileList()`; `refreshStatus()` acquires the **same** mutex; `responseChannel` drained of stale residue before each `PKT_LIST_FILES` send. Hardware-verified 16/16, no duplicates, no omissions, three consecutive runs. Does not close #141 — see below |
 
 **Closed in session 7: #136, #116, #125.** **#119 stays open** — extensively re-tested, not
-reproduced; see below.
+reproduced; see below. **#141 stays open** — partially fixed; two unguarded routes into the same
+bug class remain, tracked as new issue **#144**.
 
 ---
 
@@ -69,8 +72,9 @@ reproduced; see below.
 
 | # | Title | Note |
 |---|---|---|
-| **#119** | Root cause: why a transfer after an interrupted one comes back short | **Start here.** Extensively retested this session; still unexplained, and the leading hypothesis is now weaker, not stronger. Needs a fresh hardware repro asset (the old one is deleted off the FW920 — see below) |
-| **#141** | Concurrent `collectFileList()` enumerations interleave, producing a wrong device file list | Pre-existing, found incidentally on hardware this session. See below |
+| **#119** | Root cause: why a transfer after an interrupted one comes back short | Unchanged since last write-up; still not reproduced. Needs a fresh hardware repro asset (the old one is deleted off the FW920 — see below) |
+| **#141** | Concurrent `collectFileList()` enumerations interleave, producing a wrong device file list | **Partially fixed by #145** — `collectFileList()` vs itself and vs `refreshStatus()` is now serialised and hardware-verified. **Stays open**: `downloadFile` and `deleteFile` still race the same unserialised `responseChannel`. See below and #144 |
+| **#144** | `responseChannel` has no request-correlation id; every guard added reveals another unguarded consumer | **New.** `collectFileList()` racing `downloadFile()` silently corrupts downloaded audio; the status poller can also steal `deleteFile`'s commit ack, reporting a successful delete as failed. See below |
 
 ### #119 — still open, not reproduced, and the leading hypothesis took a hit
 
@@ -115,25 +119,53 @@ reach the trailing-span paths, however many you take. That needs a different fai
 session 7: four deliberate mid-transfer interruptions produced clean truncations at 119,272 /
 12,776 / 65,024 / 73,704 bytes, consistent with clean frame-boundary truncation.
 
-### #141 — new, pre-existing, found incidentally on hardware this session
+### #141 — partially fixed by PR #145, stays open
 
 Filed 2026-08-14, release build 356. `BleManager.collectFileList()` sends `PKT_LIST_FILES` then
-loops `awaitResponse(expectedCmd = 0x0A)` into a **local** `collected` list. It is called from five
+loops `awaitResponse(expectedCmd = 0x0A)` into a **local** `collected` list. It was called from five
 sites (`BleManager.kt:465, 703, 834, 858, 899`) with nothing serialising them. When two enumerations
 overlap, both loops consume the same notification stream, so entries get split between them and can
 be delivered to both.
 
-Measured on hardware: the FW920 holds **16** files. A non-overlapping pass reported 16/16 correctly.
-An overlapping pair reported **9** and **23** — the 23 collector logged 32 entry lines for 16 unique
-filenames (duplicates), the 9 collector was missing files. Consequence: last writer wins
-`_bleState.update { it.copy(files = collected) }`, so `BleState.files` can hold duplicates or omit
-real files.
+Measured on hardware before the fix: the FW920 holds **16** files. A non-overlapping pass reported
+16/16 correctly. An overlapping pair reported **9** and **23** — the 23 collector logged 32 entry
+lines for 16 unique filenames (duplicates), the 9 collector was missing files.
 
-**Limit of what's known:** it is NOT yet verified whether this causes harm beyond the device-list
-UI — specifically whether any sync path double-processes or skips a recording. Also flag that
-`collectFileList` is used at `BleManager.kt:703` for the `stillPresent` delete-confirmation re-list,
-so a truncated list could in principle report a file deleted when it was not (the delete verified
-correctly by hand this session, so this is a concern to check, not an observed failure).
+**What #145 shipped:** a per-instance `Mutex` serialising `collectFileList()` against itself;
+`refreshStatus()` acquiring the **same** mutex (the 15 s status poller was eating `FileList`
+entries mid-enumeration — a second, independent way to reproduce the same symptom); and a drain of
+`responseChannel` before each `PKT_LIST_FILES` send (an enumeration that exits on its 3 s idle
+timeout leaves its remaining entries *plus the end-of-list sentinel* queued for the next caller,
+which corrupts the *next* enumeration even when nothing overlaps it in time). Hardware-verified:
+three consecutive enumerations at **16/16, no duplicates, no omissions**, poller running
+throughout — where the same conditions previously produced 9 and 23.
+
+**Why it stays open:** the obvious fix looked like the whole fix, but two more unserialised routes
+into the same bug class remained — `downloadFile` and `deleteFile`. They are real, hardware-relevant,
+and now filed separately as **#144** because they're a different code path with different
+consequences (data corruption and a false failure report, not just a wrong list). See #144 and the
+pattern note below.
+
+### #144 — NEW, unserialised `responseChannel` consumers outside `collectFileList`
+
+`collectFileList()` racing `downloadFile()` consumes audio chunks and silently corrupts the
+downloaded file: `downloadFile` reads `responseChannel.receive()` directly (`BleManager.kt:752`),
+`awaitResponse` maps `AudioChunk -> false`, and dropped chunks are written contiguously with no gap
+detection — the download still reports success. Reachable from `DeviceViewModel.kt:42-48`, where
+`refreshFiles()` and `downloadFile()` launch unserialised.
+
+#144 also records a sibling case: the status poller can steal `deleteFile`'s `0x0D` commit ack, so
+a **successful** delete reports "Failed to delete".
+
+### The pattern behind #141 and #144, worth naming so it isn't rediscovered piecemeal
+
+`responseChannel` is shared by every consumer with **no request-correlation id** — a response is
+matched by expected packet type, not by which call sent the request. Every guard added so far has
+revealed another unguarded consumer: #141 guarded `collectFileList` against itself and against
+`refreshStatus`; #144 shows `downloadFile`, `deleteFile`'s two `0x0D` `sendAndAwait` calls, and
+`runInitSequence`'s six `sendAndAwait` calls are **still unguarded**. The FW920 link is
+single-command-at-a-time; **the durable fix is serialising all link operations, not guarding them
+one at a time.** That work belongs to #144, not to another one-off mutex.
 
 ### #125 — CLOSED, verified on hardware, no code change needed
 
@@ -215,6 +247,25 @@ Unchanged from session 6 — no pillar work happened this session.
 
 ---
 
+## Hardening candidates found on a now-deleted stale branch — not filed as issues yet
+
+Found in August, lost when the branch went stale, and rediscovered (row 1, independently, during
+the #141 work) — the finding has now been paid for twice, which is why it's recorded here instead
+of left on a branch again. Honest confidence levels, not a to-do list:
+
+| Item | Location in current main | Confidence |
+|---|---|---|
+| `responseChannel` never drained before a new request | `BleManager.kt:690, 741, 913, 985` | confirmed by reading code |
+| `onDescriptorWrite` ignores `status`; `enableNotification` is fire-and-forget | `BleManager.kt:305-312, 336-347` | confirmed |
+| GATT leak on superseded stale connect (stale `STATE_CONNECTED` neither disconnects nor closes) | `BleManager.kt:229-235` | confirmed |
+| MediaCodec `INFO_OUTPUT_FORMAT_CHANGED` never handled → decoder's real sample rate never picked up → wrong resample rate into Whisper → silently degraded transcripts | `TranscriptionService.kt:119-120, 167` | **plausible, NOT confirmed against real audio** |
+| Missing `autoTriggered` guard → manual analyze racing auto-analyze re-runs a full Whisper+Gemma pass | `RecordingViewModel.kt` ~`:963` | confirmed, narrow window, wasted compute only |
+
+A sixth candidate — `requestMtu` called without checking connect status — is **low confidence**,
+based on known Android OEM quirks rather than anything observed on this hardware.
+
+---
+
 ## Hard constraints — these are not negotiable
 
 - **The phone holds real user recordings, frequently the only copy** (the FW920 source is often
@@ -244,10 +295,13 @@ Unchanged from session 6 — no pillar work happened this session.
    recording.
 3. Re-pull and diff MD5s afterwards to *prove* byte-identity. Report it.
 
-Session 7's data: **23 files / 58,995,702 bytes, MD5 byte-identical at TEN checkpoints** across
-the session (23 vs session 6's 22 = the throwaway; it is still on the phone locally, though now
-deleted off the FW920 — see #119 above). The scratchpad holding session 6's baseline was
-session-scoped and is gone; re-pull your own baseline for session 8.
+Session 7's data, updated: the phone now holds **20 recordings / 53,541,678 bytes**. Three files
+were deliberately removed with owner approval after the earlier 23-file baseline: two stale `.bak`
+files from session 6 and the throwaway's local copy. All survivors verified byte-identical.
+Off-device backups (pre-migration schema-12 db, post-migration db, and all 23 pre-cleanup
+recordings) live at `C:\Users\franc\local-persist\daedalus-notetaker-db-snapshots\2026-08-14-session7\`
+— **outside the repo**, and the pre-migration db **cannot be recreated**. The scratchpad holding
+session 6's baseline was session-scoped and is gone; re-pull your own baseline for session 8.
 
 ### Device-work gotchas that cost real time
 
@@ -350,6 +404,20 @@ compare it to the set you expect.** (#119 has been reopened.)
 ---
 
 ## Judgment lessons worth inheriting
+
+**The obvious fix can be half a fix that looks whole.** #141's mutex serialised `collectFileList`
+against itself — exactly what the issue described — and its KDoc then implied the list was
+trustworthy. Two HIGH paths remained that reproduced the original symptoms. Enumerate the other
+routes into a bug class before calling it closed.
+
+**A test can be vacuous because of a timeout, not a weak assertion.** #141's per-instance-mutex
+test survived hoisting the mutex into a `companion object`, because the code under test escapes via
+a 3 s idle timeout that fitted inside the test's 5 s budget. Mutation testing found it; reading it
+would not have. Fourth vacuous test in two sessions.
+
+**An unqualified worry decays exactly like an unqualified assurance.** A concern was published on
+#141 as "not a data-loss path" while only the delete path had actually been assessed; the sync path
+had not been. Both over-claims become tomorrow's inherited fact.
 
 **A test is not evidence until you have watched it fail for the reason you care about.** Red-first
 is necessary but insufficient: a test can be red for the wrong reason and go vacuous the moment an
