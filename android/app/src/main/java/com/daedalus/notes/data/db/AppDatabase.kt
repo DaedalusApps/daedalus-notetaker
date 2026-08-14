@@ -12,6 +12,14 @@ import com.daedalus.notes.data.model.Recording
 import com.daedalus.notes.data.model.RecordingFts
 import com.daedalus.notes.data.model.TodoItem
 
+// #125: result of AppDatabase.debugPragmaProbe().
+data class DbPragmaProbeResult(
+    val recursiveTriggers: String,
+    val tempStore: String,
+    val triggers: String,
+    val userVersion: String,
+)
+
 @Database(entities = [Recording::class, TodoItem::class, RecordingFts::class], version = 13, exportSchema = true)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
@@ -19,6 +27,34 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun recordingDao(): RecordingDao
 
     abstract fun todoDao(): TodoDao
+
+    // #125: debug-only ADB diagnostic. Reads recursive_triggers, temp_store, the sqlite_master
+    // trigger list, and user_version off openHelper.writableDatabase -- the exact same cached
+    // SupportSQLiteDatabase connection every DAO write and InvalidationTracker.internalInit use,
+    // which is what set PRAGMA recursive_triggers='ON' on it in the first place. Do not change
+    // this to open a fresh or read-only connection: that would read a different connection's
+    // pragma state and make the probe worthless. Callers must dispatch this off the main thread
+    // (e.g. withContext(Dispatchers.IO)) -- these are synchronous blocking disk reads.
+    fun debugPragmaProbe(): DbPragmaProbeResult {
+        val db = openHelper.writableDatabase
+        val recursiveTriggers = db.query("PRAGMA recursive_triggers").use { c ->
+            if (c.moveToFirst()) c.getString(0) else "?"
+        }
+        val tempStore = db.query("PRAGMA temp_store").use { c ->
+            if (c.moveToFirst()) c.getString(0) else "?"
+        }
+        val triggers = db.query(
+            "SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name"
+        ).use { c ->
+            val names = mutableListOf<String>()
+            while (c.moveToNext()) names.add(c.getString(0))
+            names.joinToString(",")
+        }
+        val userVersion = db.query("PRAGMA user_version").use { c ->
+            if (c.moveToFirst()) c.getString(0) else "?"
+        }
+        return DbPragmaProbeResult(recursiveTriggers, tempStore, triggers, userVersion)
+    }
 
     companion object {
         @Volatile
