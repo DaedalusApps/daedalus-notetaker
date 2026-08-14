@@ -3,6 +3,7 @@ package com.daedalus.notes.ble
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.SharedPreferences
@@ -192,6 +193,32 @@ class BleManagerTest {
     @Suppress("UNCHECKED_CAST")
     private fun responseChannel(): Channel<ParsedResponse> =
         privateField(manager, "responseChannel") as Channel<ParsedResponse>
+
+    // --- #147: onDescriptorWrite / enableNotification failure signalling ---------------------
+
+    /**
+     * Typed as `Channel<Any?>` (not `Channel<Boolean>`/`Channel<Unit>`) deliberately: the element
+     * type is exactly what #147's fix changes, so a statically-typed cast here would make these
+     * tests fail to compile against the pre-fix code instead of failing at runtime for the right
+     * reason. `Channel<T>`'s element type is erased on the JVM, so this cast is safe regardless
+     * of which element type the field actually declares.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun descriptorChannel(): Channel<Any?> =
+        privateField(manager, "descriptorChannel") as Channel<Any?>
+
+    /**
+     * Invokes the private `enableNotification(gatt, char)` via reflection instead of calling it
+     * directly, so this test compiles against both the pre-fix (`Unit`-returning) and post-fix
+     * (`Boolean`-returning) signatures — only the returned value's identity changes.
+     */
+    private fun invokeEnableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic): Any? {
+        val method = manager.javaClass.getDeclaredMethod(
+            "enableNotification", BluetoothGatt::class.java, BluetoothGattCharacteristic::class.java
+        )
+        method.isAccessible = true
+        return method.invoke(manager, gatt, char)
+    }
 
     private fun characteristicWithUuid(uuid: String): BluetoothGattCharacteristic {
         val characteristic = mockk<BluetoothGattCharacteristic>(relaxed = true)
@@ -828,6 +855,162 @@ class BleManagerTest {
             "iteration 2's enumeration must reflect its OWN fresh response, not iteration 1's " +
                 "stranded stragglers (#144 review finding 2)",
             setOf("FRESH_ANSWER"), filenames
+        )
+    }
+
+    // --- #147: onDescriptorWrite ignores status, enableNotification is fire-and-forget -------
+
+    /**
+     * Reproduces the defect: onDescriptorWrite unconditionally signals success regardless of the
+     * GATT `status` argument it receives, so a real hardware failure (GATT busy, insufficient
+     * authentication, etc.) is indistinguishable on descriptorChannel from a genuine success —
+     * the init loop in onServicesDiscovered proceeds as though notifications were enabled.
+     */
+    @Test
+    fun onDescriptorWrite_failureStatus_doesNotSignalSuccess() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val characteristic = characteristicWithUuid("0000b0b2-0000-1000-8000-00805f9b34fb")
+        val descriptor = mockk<BluetoothGattDescriptor>(relaxed = true)
+        every { descriptor.characteristic } returns characteristic
+
+        gattCallback.onDescriptorWrite(gatt, descriptor, /* status = */ 133)
+
+        val result = descriptorChannel().tryReceive().getOrNull()
+        // Equality (not `result == true`/assertFalse) is deliberate: pre-fix, onDescriptorWrite
+        // unconditionally sends the channel's sole possible value (Unit) regardless of status, and
+        // `Unit == true` is trivially false — an assertFalse(result == true) here would pass
+        // against the unfixed code for the wrong reason (a type mismatch, not a real guard). The
+        // fix must send the literal failure signal (false); anything else, including the old
+        // unconditional Unit, fails this equality check.
+        assertEquals(
+            "a failed descriptor write (status=133) must signal failure (false), not the old " +
+                "unconditional success signal",
+            false, result
+        )
+    }
+
+    /**
+     * Confirms the success path still signals success — otherwise a fix that makes every status
+     * signal failure would trivially "pass" the test above while breaking the happy path.
+     */
+    @Test
+    fun onDescriptorWrite_successStatus_signalsSuccess() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val characteristic = characteristicWithUuid("0000b0b2-0000-1000-8000-00805f9b34fb")
+        val descriptor = mockk<BluetoothGattDescriptor>(relaxed = true)
+        every { descriptor.characteristic } returns characteristic
+
+        gattCallback.onDescriptorWrite(gatt, descriptor, BluetoothGatt.GATT_SUCCESS)
+
+        val result = descriptorChannel().tryReceive().getOrNull()
+        assertEquals(
+            "a successful descriptor write must signal success (true) on descriptorChannel",
+            true, result
+        )
+    }
+
+    /**
+     * Reproduces the defect: enableNotification() is fire-and-forget — it never checks
+     * writeDescriptor()'s return value, so a request that the OS never even initiated (e.g. GATT
+     * busy) looks identical to one that was successfully initiated. This test's environment runs
+     * unit tests with no Robolectric shadow active, so android.os.Build.VERSION.SDK_INT reads as
+     * the stub default 0 — below Build.VERSION_CODES.TIRAMISU (33) — meaning enableNotification
+     * always takes the pre-Tiramisu (`writeDescriptor(descriptor)`, 1-arg) branch here, which is
+     * exactly what wireGattWithWriteCounter's mocking of the 1-arg writeCharacteristic overload
+     * elsewhere in this file already relies on.
+     */
+    @Test
+    fun enableNotification_writeDescriptorInitiationFails_returnsFalse() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val descriptor = mockk<BluetoothGattDescriptor>(relaxed = true)
+        val char = mockk<BluetoothGattCharacteristic>(relaxed = true)
+        every { char.getDescriptor(any()) } returns descriptor
+        every { gatt.setCharacteristicNotification(char, true) } returns true
+        @Suppress("DEPRECATION")
+        every { gatt.writeDescriptor(descriptor) } returns false
+
+        val result = invokeEnableNotification(gatt, char)
+
+        assertEquals(
+            "enableNotification must report false when writeDescriptor's own initiation fails",
+            false, result
+        )
+    }
+
+    /**
+     * Reproduces the consequence described in #147: a failed notify setup for even one of the
+     * three notification channels must surface a diagnostic in BleState.errorMessage, while the
+     * init loop still proceeds to runInitSequence() for the other channels (owner decision: don't
+     * abort, just surface). Drives the real onServicesDiscovered path with a mocked GATT/service
+     * tree, feeding two successful descriptor writes and one failing one (mirroring real hardware,
+     * where only some notify channels fail), then polls for the resulting errorMessage and for
+     * evidence that runInitSequence actually started sending commands.
+     */
+    @Test
+    fun onServicesDiscovered_oneOfThreeNotifySetupsFails_surfacesErrorAndStillProceeds() {
+        val gatt = mockk<BluetoothGatt>(relaxed = true)
+        val service = mockk<android.bluetooth.BluetoothGattService>(relaxed = true)
+        val writeCharMock = mockk<BluetoothGattCharacteristic>(relaxed = true)
+
+        val notifyChars = listOf(NOTIFY_B0B2_UUID, NOTIFY_B0B3_UUID, NOTIFY_B0B4_UUID).map { uuid ->
+            characteristicWithUuid(uuid)
+        }
+        val descriptors = notifyChars.map { char ->
+            mockk<BluetoothGattDescriptor>(relaxed = true).also {
+                every { it.characteristic } returns char
+                every { char.getDescriptor(any()) } returns it
+            }
+        }
+
+        // onServicesDiscovered never assigns bluetoothGatt itself (only connect() and
+        // onConnectionStateChange do) — without this, sendPacket()'s later `bluetoothGatt ?: return`
+        // guard would silently no-op every command runInitSequence tries to send, and the test's
+        // wait for writeCharacteristicCount would hang until the outer withTimeout fires.
+        setPrivateField(manager, "bluetoothGatt", gatt)
+
+        every { gatt.getService(UUID.fromString(SERVICE_UUID)) } returns service
+        every { service.getCharacteristic(UUID.fromString(WRITE_UUID)) } returns writeCharMock
+        listOf(NOTIFY_B0B2_UUID, NOTIFY_B0B3_UUID, NOTIFY_B0B4_UUID).forEachIndexed { i, uuid ->
+            every { service.getCharacteristic(UUID.fromString(uuid)) } returns notifyChars[i]
+        }
+        every { gatt.setCharacteristicNotification(any(), true) } returns true
+
+        val writeDescriptorCount = AtomicInteger(0)
+        @Suppress("DEPRECATION")
+        every { gatt.writeDescriptor(any<BluetoothGattDescriptor>()) } answers {
+            writeDescriptorCount.incrementAndGet()
+            true
+        }
+        val writeCharacteristicCount = AtomicInteger(0)
+        every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writeCharacteristicCount.incrementAndGet()
+            true
+        }
+
+        runBlocking {
+            withTimeout(8000) {
+                gattCallback.onServicesDiscovered(gatt, BluetoothGatt.GATT_SUCCESS)
+
+                // Descriptor write #1 (B0B2) — simulate a successful completion.
+                while (writeDescriptorCount.get() < 1) delay(5)
+                gattCallback.onDescriptorWrite(gatt, descriptors[0], BluetoothGatt.GATT_SUCCESS)
+
+                // Descriptor write #2 (B0B3) — simulate a real hardware failure status.
+                while (writeDescriptorCount.get() < 2) delay(5)
+                gattCallback.onDescriptorWrite(gatt, descriptors[1], /* status = */ 133)
+
+                // Descriptor write #3 (B0B4) — simulate a successful completion.
+                while (writeDescriptorCount.get() < 3) delay(5)
+                gattCallback.onDescriptorWrite(gatt, descriptors[2], BluetoothGatt.GATT_SUCCESS)
+
+                // The init loop must still proceed into runInitSequence() despite the failure.
+                while (writeCharacteristicCount.get() < 1) delay(5)
+            }
+        }
+
+        assertTrue(
+            "a failed notify setup for one of three channels must surface in BleState.errorMessage",
+            manager.bleState.value.errorMessage.isNotBlank()
         )
     }
 }
