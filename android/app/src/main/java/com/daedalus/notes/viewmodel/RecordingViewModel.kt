@@ -230,7 +230,7 @@ class RecordingViewModel @JvmOverloads constructor(
             .getBoolean("use_bluetooth_mic", false)
 
         // Heal missing durations and timestamps for already synced files
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(ioDispatcher) {
             repo.allRecordings.first().forEach { recording ->
                 val dateMillis = DateUtils.parseEpochMillisFromFilename(recording.filename)
                 val duration = if (recording.durationMillis == 0L && recording.localPath.isNotBlank()) {
@@ -550,7 +550,7 @@ class RecordingViewModel @JvmOverloads constructor(
             _syncProgress.value = "Searching for USB..."
             _aiError.value = null
 
-            withContext(Dispatchers.IO) {
+            withContext(ioDispatcher) {
                 val storageManager = context.getSystemService(android.os.storage.StorageManager::class.java)
                 val volumes = storageManager.storageVolumes
                 
@@ -631,7 +631,7 @@ class RecordingViewModel @JvmOverloads constructor(
             val context = getApplication<Application>()
             val localDir = File(context.getExternalFilesDir(null), "Recordings").also { it.mkdirs() }
 
-            withContext(Dispatchers.IO) {
+            withContext(ioDispatcher) {
                 uris.forEach { uri ->
                     val docFile = DocumentFile.fromSingleUri(context, uri) ?: return@forEach
                     val name = docFile.name ?: "REC_${System.currentTimeMillis()}.mp3"
@@ -977,7 +977,7 @@ class RecordingViewModel @JvmOverloads constructor(
 
                 // Determine duration, healing the DB value if needed.
                 val durationMs = note.durationMillis.takeIf { it > 0 }
-                    ?: withContext(Dispatchers.IO) {
+                    ?: withContext(ioDispatcher) {
                         AudioUtils.getDurationMillis(localFile.absolutePath)
                     }.also { d ->
                         // Rebind `note` so the later copy(...) saves below don't write the stale 0 back.
@@ -1322,7 +1322,7 @@ class RecordingViewModel @JvmOverloads constructor(
 
             val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             val outFile = File(downloadsDir, "${File(recording.filename).nameWithoutExtension}.md")
-            withContext(Dispatchers.IO) { outFile.writeText(content) }
+            withContext(ioDispatcher) { outFile.writeText(content) }
 
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", outFile)
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
@@ -1342,7 +1342,7 @@ class RecordingViewModel @JvmOverloads constructor(
 
             val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             val outFile = File(downloadsDir, "ask-${System.currentTimeMillis()}.md")
-            withContext(Dispatchers.IO) { outFile.writeText(content) }
+            withContext(ioDispatcher) { outFile.writeText(content) }
 
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", outFile)
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
