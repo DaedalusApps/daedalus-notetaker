@@ -710,7 +710,6 @@ class BleManager(private val context: Context) {
     suspend fun downloadFile(filename: String, onProgress: (Long) -> Unit): File? {
         val context = this.context
         val cleanName = if (filename.endsWith(".mp3")) filename.removeSuffix(".mp3") else filename
-        val nameBytes = cleanName.padEnd(14, ' ').toByteArray(Charsets.US_ASCII)
 
         val localDir = File(context.getExternalFilesDir(null), "Recordings").also { it.mkdirs() }
         val safeName = File(cleanName).name + ".mp3"
@@ -729,7 +728,7 @@ class BleManager(private val context: Context) {
         // Protocol: send CMD 0x0B → device responds Ack(0x0B) "ready" → streams AudioChunks →
         // signals Ack(0x0B) again when done. We treat the second Ack(0x0B) (after data) as EOF.
         try {
-            val pkt = buildPacket(0x0B, nameBytes + byteArrayOf(0x00, 0x00, 0x00, 0x00))
+            val pkt = buildDownloadFile(filename)
             Log.i("BleManager", "downloadFile: CMD 0x0B '$cleanName'")
             sendPacket(pkt)
 
