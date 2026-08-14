@@ -533,7 +533,7 @@ class RecordingViewModel @JvmOverloads constructor(
                 val file = File(recording.localPath)
                 if (file.exists()) {
                     _syncProgress.value = "Auto-analyzing ${recording.filename}…"
-                    doAnalyze(recording.filename)
+                    doAnalyze(recording.filename, autoTriggered = true)
                     delay(500) // Brief pause between analyses
                 }
             }
@@ -956,17 +956,25 @@ class RecordingViewModel @JvmOverloads constructor(
     }
 
     /** Waits for any in-flight transfer or analysis; see [heavyWork]. */
-    private suspend fun doAnalyze(filename: String) = heavyWork.withLock {
-        doAnalyzeExclusive(filename)
+    private suspend fun doAnalyze(filename: String, autoTriggered: Boolean = false) = heavyWork.withLock {
+        doAnalyzeExclusive(filename, autoTriggered)
     }
 
-    private suspend fun doAnalyzeExclusive(filename: String) {
+    private suspend fun doAnalyzeExclusive(filename: String, autoTriggered: Boolean = false) {
             _isProcessing.value = true
             _aiError.value = null
             AnalysisForegroundService.start(getApplication(), filename, "Processing audio...")
             try {
                 var note = repo.get(filename) ?: run {
                     _aiError.value = "Recording not synced. Download it first."
+                    return
+                }
+
+                // Re-check under the lock: a manual analyze can beat a queued auto-analyze
+                // call to the front of heavyWork, leaving this one's snapshot stale. Only
+                // skip auto-triggered work — a deliberate re-analysis must still run.
+                if (autoTriggered && note.summary.isNotBlank()) {
+                    Log.i("DaedalusAI", "Skipping auto-analyze of $filename; already summarised")
                     return
                 }
 
