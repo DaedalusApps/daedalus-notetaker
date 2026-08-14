@@ -263,4 +263,62 @@ class FW920ProtocolTest {
             declaredLen
         )
     }
+
+    // --- #116 finding 1: pin buildDownloadFile's actual payload, not just buildPacket's -------
+    // arithmetic. Mirrors buildDeleteFile_longerFilename_notTruncated above but checks every
+    // field buildDownloadFile itself is responsible for: opcode, no truncation, space padding,
+    // the 4 trailing zero bytes, and .mp3-suffix stripping.
+
+    /** buildDownloadFile preserves full filename for names longer than 14 chars (no truncation). */
+    @Test
+    fun buildDownloadFile_longerFilename_notTruncated() {
+        val pkt = com.daedalus.notes.ble.buildDownloadFile("Note-20260812102746")
+        val len = pkt[4].toInt() and 0xFF
+        val payload = pkt.copyOfRange(5, 5 + len)
+        val name = payload.copyOfRange(0, payload.size - 4).toString(Charsets.US_ASCII).trimEnd(' ')
+        assertEquals("Note-20260812102746", name)
+    }
+
+    /** buildDownloadFile uses opcode 0x0B. */
+    @Test
+    fun buildDownloadFile_usesOpcode0x0B() {
+        val pkt = com.daedalus.notes.ble.buildDownloadFile("20260812102746")
+        assertEquals(0x0B, pkt[3].toInt() and 0xFF)
+    }
+
+    /** buildDownloadFile's payload ends with 4 trailing zero bytes after the filename field. */
+    @Test
+    fun buildDownloadFile_appendsFourTrailingZeroBytes() {
+        val pkt = com.daedalus.notes.ble.buildDownloadFile("20260812102746")
+        val len = pkt[4].toInt() and 0xFF
+        val payload = pkt.copyOfRange(5, 5 + len)
+        val trailing = payload.copyOfRange(payload.size - 4, payload.size)
+        assertEquals(listOf<Byte>(0, 0, 0, 0), trailing.toList())
+    }
+
+    /** buildDownloadFile pads short filenames to 14 chars with ASCII spaces, not NUL. */
+    @Test
+    fun buildDownloadFile_padsShortFilenameWithSpaces() {
+        val pkt = com.daedalus.notes.ble.buildDownloadFile("AB")
+        val len = pkt[4].toInt() and 0xFF
+        val payload = pkt.copyOfRange(5, 5 + len)
+        // name field = payload minus the 4 trailing zero bytes = 14-byte padded "AB"
+        val nameField = payload.copyOfRange(0, payload.size - 4)
+        assertEquals(14, nameField.size)
+        val expected = "AB".padEnd(14, ' ').toByteArray(Charsets.US_ASCII)
+        assertEquals(expected.toList(), nameField.toList())
+    }
+
+    /** buildDownloadFile strips a trailing ".mp3" suffix before building the payload. */
+    @Test
+    fun buildDownloadFile_stripsMp3Suffix() {
+        val withSuffix = com.daedalus.notes.ble.buildDownloadFile("20260812102746.mp3")
+        val withoutSuffix = com.daedalus.notes.ble.buildDownloadFile("20260812102746")
+        assertTrue(withSuffix.contentEquals(withoutSuffix))
+
+        val len = withSuffix[4].toInt() and 0xFF
+        val payload = withSuffix.copyOfRange(5, 5 + len)
+        val name = payload.copyOfRange(0, payload.size - 4).toString(Charsets.US_ASCII).trimEnd(' ')
+        assertEquals("20260812102746", name)
+    }
 }
