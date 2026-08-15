@@ -15,13 +15,16 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkStatic
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -59,6 +62,21 @@ class BleManagerTest {
 
     @After
     fun tearDown() {
+        // #157: onServicesDiscovered-driven tests leave initJob running on manager's real
+        // Dispatchers.IO scope past the end of the test — destroy() cancels it (and the scope)
+        // before Log is unmocked below, so a still-in-flight Log call from that coroutine can
+        // never throw "not mocked" on an IO thread and leak an uncaught exception into a later
+        // test class in this JVM fork. destroy()'s scope.cancel() only takes effect at the
+        // coroutine's next suspension checkpoint on its own (IO) thread — it doesn't block until
+        // that actually happens — so without the join below, unmockkStatic() a few lines down
+        // could still race a not-yet-cancelled coroutine's in-flight Log call. Bounded so a stuck
+        // coroutine can never hang the suite.
+        manager.destroy()
+        runBlocking {
+            withTimeoutOrNull(2000) {
+                (privateField(manager, "scope") as CoroutineScope).coroutineContext[Job]?.join()
+            }
+        }
         unmockkStatic(Log::class)
     }
 
@@ -490,6 +508,7 @@ class BleManagerTest {
 
         assertEquals(1, writeCount1.get())
         assertEquals(1, writeCount2.get())
+        manager2.destroy()
     }
 
     // --- #141 finding 1: a concurrent status poll must not steal enumeration entries ---------
